@@ -40,12 +40,41 @@ Determining installed services:
 - wazuh-agent is NOT installed
 
 Configure installation options:
-Would you like to add a new sudo user?     (y/n): Use current user 'xlvisuals' for setup?    (y/n): Would you like to configure LVM disks?     (y/n): Would you like to configure swap space?    (y/n): Would you like to tune the system?         (y/n): Would you like to uninstall packages?      (y/n): Would you like to update packages?         (y/n): Would you like to install new packages?    (y/n): Would you like to configure ufw?           (y/n): Would you like to configure ssh?           (y/n): Would you like to install fonts?           (y/n): Would you like to install   weasyprint?    (y/n): Would you like to install   imagemagick?   (y/n): Would you like to reinstall Python 3.14?   (y/n): Would you like to install   Pypy 3.11?     (y/n): Would you like to install   nginx?         (y/n): Would you like to install   valkey?        (y/n): Would you like to install   MySQL?         (y/n):   Enter MySQL root password   : 
+Would you like to add a new sudo user?     (y/n): 
+Use current user 'xlvisuals' for setup?    (y/n): 
+Would you like to configure LVM disks?     (y/n): 
+Would you like to configure swap space?    (y/n): 
+Would you like to tune the system?         (y/n): 
+Would you like to uninstall packages?      (y/n): 
+Would you like to update packages?         (y/n): 
+Would you like to install new packages?    (y/n): 
+Would you like to configure ufw?           (y/n): 
+Would you like to configure ssh?           (y/n): 
+Would you like to install fonts?           (y/n): 
+Would you like to install   weasyprint?    (y/n): 
+Would you like to install   imagemagick?   (y/n): 
+Would you like to reinstall Python 3.14?   (y/n): 
+Would you like to install   Pypy 3.11?     (y/n): 
+Would you like to install   nginx?         (y/n): 
+Would you like to install   valkey?        (y/n): 
+Would you like to install   MySQL?         (y/n):   
+Enter MySQL root password   : 
   Confirm MySQL root password : 
 Password is too short. Must be at least 4 characters.
   Enter MySQL root password   : 
   Confirm MySQL root password : 
-Would you like to install   PostgreSQL 18? (y/n): Would you like to install   Mosquitto?     (y/n): Would you like to install   Monit?         (y/n): Would you like to install   Webmin?        (y/n): Would you like to install   Grafana?       (y/n): Would you like to install   Forgejo?       (y/n): Would you like to install   Fail2Ban?      (y/n): Would you like to install   auditd?        (y/n): Would you like to install   IP blocklist?  (y/n): Would you like to install   Suricata IDS?  (y/n): Would you like to install   Wazuh Agent?   (y/n):   Enter IP or Hostname of Wazuh Manager : 
+Would you like to install   PostgreSQL 18? (y/n): 
+Would you like to install   Mosquitto?     (y/n): 
+Would you like to install   Monit?         (y/n): 
+Would you like to install   Webmin?        (y/n): 
+Would you like to install   Grafana?       (y/n): 
+Would you like to install   Forgejo?       (y/n): 
+Would you like to install   Fail2Ban?      (y/n): 
+Would you like to install   auditd?        (y/n): 
+Would you like to install   IP blocklist?  (y/n): 
+Would you like to install   Suricata IDS?  (y/n): 
+Would you like to install   Wazuh Agent?   (y/n):   
+Enter IP or Hostname of Wazuh Manager : 
 
 Configuration settings:
 Add sudo user?           : n
