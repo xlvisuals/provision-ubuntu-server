@@ -1,4 +1,4 @@
-# Ubuntu 26.04 Server Provisioning Script
+# Ubuntu 24.04 + 26.04 Server Provisioning Script
 
 An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server to quickly provision a secure webserver. 
 The script is re-entrant, but best run on a fresh **minimized** or **standard** install. 
