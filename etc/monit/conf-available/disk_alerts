@@ -1,0 +1,6 @@
+# Check the Root Filesystem
+check device root_disk with path /
+    # Alert if disk usage exceeds 80%
+    if space usage > 80% then alert
+    # Critical alert and optional action if exceeds 90%
+    if space usage > 90% then alert

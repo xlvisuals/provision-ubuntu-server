@@ -1,0 +1,17 @@
+# webmin
+check process webmin with pidfile /var/webmin/miniserv.pid
+  group cache
+  group webmin
+  start program = "/usr/bin/systemctl start webmin" with timeout 60 seconds
+  stop program  = "/usr/bin/systemctl start webmin" with timeout 60 seconds
+#  if failed host localhost port 10000 protocol mysql with timeout 15 seconds for 3 times within 4 cycles then restart
+  if totalmem > 300 Mb then alert
+  if totalmem > 500 Mb then restart
+  if cpu > 60% for 2 cycles then alert
+  if cpu > 98% for 5 cycles then restart
+  if 2 restarts within 2 cycles then alert
+  depend webmin_bin
+
+check file webmin_bin with path /usr/share/webmin/miniserv.pl
+  group webmin
+  include /etc/monit/templates/rootbin

@@ -1,0 +1,21 @@
+# valkey
+check process valkey with pidfile /var/run/valkey/valkey-server.pid
+  group cache
+  group valkey
+  start program = "/usr/sbin/service valkey-server start" with timeout 60 seconds
+  stop program  = "/usr/sbin/service valkey-server stop" with timeout 60 seconds
+  if failed host 127.0.0.1 port 6379 then restart
+  if totalmem > 500 Mb then alert
+  if cpu > 60% for 2 cycles then alert
+  if cpu > 98% for 5 cycles then restart
+  if 2 restarts within 2 cycles then alert
+  depend valkey_bin
+  depend valkey_rc
+
+check file valkey_bin with path /usr/bin/valkey-server
+  group valkey
+  include /etc/monit/templates/rootbin
+
+check file valkey_rc with path /etc/init.d/valkey-server
+  group valkey
+  include /etc/monit/templates/rootbin

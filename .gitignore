@@ -1,0 +1,27 @@
+
+.DS_Store
+doc/.DS_Store
+
+# Editor directories and files
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+backup/
+cache/
+log/
+
+# Python virtual env
+env/
+venv/
+
+# Default ignored files
+/shelf/
+/workspace.xml
+# Editor-based HTTP Client requests
+/httpRequests/
+# Datasource local storage ignored files
+/dataSources/
+/dataSources.local.xml

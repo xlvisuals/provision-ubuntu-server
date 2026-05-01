@@ -30,7 +30,7 @@ check_service() {
 
 
 echo "==========================================="
-echo "       XLVISUALS SERVER HEALTH CHECK "
+echo "      XLVISUALS SERVER HEALTH CHECK "
 echo "==========================================="
 
 echo ""
@@ -46,7 +46,7 @@ if [ -n "$(swapon --show)" ]; then
     if [ "$SWAP_VAL" -gt 10 ]; then
         echo "WARNING: Swappiness is set to $SWAP_VAL."
         echo "A value of 10 or lower is recommended for high-performance."
-        read -p "Would you like to set swappiness to 10 now? (y/n): " FIX_SWAP
+        read -p "Would you like to set swappiness to 10 now? (y/n)" FIX_SWAP
         if [[ "$FIX_SWAP" =~ ^[Yy]$ ]]; then
             sysctl vm.swappiness=10
             # Make it permanent
@@ -73,6 +73,18 @@ echo ""
 echo "Memory"
 echo "==========================================="
 free -h | awk '/^Mem:/ {print "Used: " $3 " / " $2}'
+
+echo ""
+echo "TCP Transmit Offloading"
+echo "==========================================="
+PRIMARY_INTERFACE=$(ip -o -4 route show to default | awk '{print $5}')
+if systemctl is-active --quiet disable-offload.service; then
+    ethtool -k $PRIMARY_INTERFACE 2>/dev/null | grep "tx-checksumming" \
+        && echo -e "${GREEN}[DISABLED]${NC}" \
+        || echo -e "${RED}[UNKNOWN]${NC}"
+else
+    echo -e "${NC}[NOT CONFIGURED]${NC}"
+fi
 
 echo ""
 echo "Failed systemd units"
@@ -107,5 +119,19 @@ check_service "fail2ban" "Fail2Ban IDS"
 check_service "auditd" "Auditd Daemon"
 check_service "suricata" "Suricata IDS"
 check_service "wazuh-agent" "Wazuh Agent"
+check_service "postfix" "Postfix Mail Relay"
+
+echo ""
+echo "AppArmor"
+echo "==========================================="
+if command -v aa-status &>/dev/null; then
+    if aa-status --enabled 2>/dev/null; then
+        aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are unconfined"
+    else
+        echo -e "AppArmor: ${RED}[DISABLED]${NC}"
+    fi
+else
+    echo -e "AppArmor: ${RED}[NOT INSTALLED]${NC}"
+fi
 
 echo "==========================================="

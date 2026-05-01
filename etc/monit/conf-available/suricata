@@ -1,0 +1,15 @@
+ check process suricata with pidfile /var/run/suricata.pid
+   start program = "/usr/bin/systemctl start suricata" with timeout 60 seconds
+   stop program = "/usr/bin/systemctl stop suricata" with timeout 60 seconds
+   if cpu > 60% for 2 cycles then alert
+   if memory > 500 MB for 2 cycles then alert
+   if 5 restarts within 5 cycles then timeout
+
+ check device root_disk with path /
+   if space usage > 90% then exec "/usr/sbin/logrotate -f /etc/logrotate.d/suricata"
+
+ # Monitor the Suricata Log Directory specifically
+ check directory suricata_logs with path /var/log/suricata
+    # Alert if the directory grows too large (e.g., > 2GB)
+    # This catches "log floods" before the whole disk fills up
+    if size > 2 GB then alert

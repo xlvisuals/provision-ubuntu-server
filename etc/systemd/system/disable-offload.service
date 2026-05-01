@@ -1,0 +1,11 @@
+[Unit]
+Description=Disable TCP Transmit Offloading
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ethtool -K %%PRIMARY_INTERFACE%% tx off
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

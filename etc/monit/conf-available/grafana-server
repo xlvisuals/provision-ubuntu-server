@@ -1,0 +1,5 @@
+ check process grafana with pidfile /run/grafana/grafana-server.pid
+   start program = "/usr/bin/systemctl start grafana-server" with timeout 60 seconds
+   stop program = "/usr/bin/systemctl stop grafana-server" with timeout 60 seconds
+   if failed host 127.0.0.1 port 3000 protocol http then restart
+   if 3 restarts within 5 cycles then timeout
