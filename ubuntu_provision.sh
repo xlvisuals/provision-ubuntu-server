@@ -64,6 +64,22 @@ if [[ -n "$1" ]]; then
         exit 1
     fi
 fi
+# If INSTALL_DEFAULT is set, apply INSTALL_DEFAULT to any INSTALL_ and CONFIGURE_ variable not explicitly set in conf
+if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
+    for var in \
+        INSTALL_UFW INSTALL_SSH INSTALL_FONTS INSTALL_WEASYPRINT INSTALL_IMAGEMAGICK \
+        INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
+        INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
+        INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
+        INSTALL_SURICATA INSTALL_WAZUH; do
+        [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
+    done
+    for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
+               UNINSTALL_PACKAGES UPDATE_PACKAGES INSTALL_PACKAGES \
+               DISABLE_TX_OFFLOAD; do
+        [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
+    done
+fi
 
 # change into current directory
 cd "$(dirname "$(readlink -f "$0")")" || exit
@@ -122,13 +138,16 @@ APT_FLAGS="-y -o Dpkg::Use-Pty=0"
 check_service() {
     local service="$1"
     local var="$2"
+    local installed_var="${3:-}"
 
     if systemctl status "$service" &>/dev/null; then
         echo "- $service is already installed"
         printf -v "$var" "reinstall"
+        [[ -n "$installed_var" ]] && printf -v "$installed_var" "y"
     else
-           echo "- $service is NOT installed"
+        echo "- $service is NOT installed"
         printf -v "$var" "install"
+        [[ -n "$installed_var" ]] && printf -v "$installed_var" "n"
     fi
 }
 
@@ -254,7 +273,7 @@ else
     python3 -c "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('1.1.1.1',53)); s.close(); sys.exit(0)" \
         2>/dev/null && NETWORK_OK=y || NETWORK_OK=n
 fi
-if [[ "NETWORK_OK" =~ ^[Yy]$ ]]; then
+if [[ "$NETWORK_OK" == "n" ]]; then
     echo "Error: No internet connection"
     exit 1
 fi
@@ -274,20 +293,20 @@ check_file /usr/bin/weasyprint PROMPT_WEASYPRINT
 check_file /usr/bin/convert PROMPT_IMAGEMAGICK
 
 echo "Determining installed services:"
-check_service nginx PROMPT_NGINX
-check_service valkey-server PROMPT_VALKEY
-check_service mysql PROMPT_MYSQL
-check_service postgresql PROMPT_POSTGRESQL
-check_service mosquitto PROMPT_MOSQUITTO
-check_service postfix PROMPT_POSTFIX
-check_service monit PROMPT_MONIT
-check_service webmin PROMPT_WEBMIN
-check_service grafana-server PROMPT_GRAFANA
-check_service forgejo PROMPT_FORGEJO
-check_service fail2ban PROMPT_FAIL2BAN
-check_service auditd PROMPT_AUDITD
-check_service suricata PROMPT_SURICATA
-check_service wazuh-agent PROMPT_WAZUH
+check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
+check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
+check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
+check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
+check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
+check_service monit PROMPT_MONIT ISINSTALLED_MONIT
+check_service webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
+check_service grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
+check_service forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
+check_service fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
+check_service auditd PROMPT_AUDITD ISINSTALLED_AUDITD
+check_service suricata PROMPT_SURICATA ISINSTALLED_SURICATA
+check_service wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
 
 # Detect AppArmor state
 APPARMOR_INSTALLED=n
@@ -580,7 +599,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         POSTFIX_RELAY_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
     done
-    TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@:}"
+    TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
     prompt_if_unset POSTFIX_DOMAIN          "  Mail domain (used in From address)"       n $TEMP_POSTFIX_DOMAIN
     prompt_if_unset POSTFIX_FROM_ADDRESS    "  From address (e.g. root@domain.com)"      n "root@${POSTFIX_DOMAIN}"
     prompt_if_unset POSTFIX_ROOT_ALIAS      "  Forward root mail to"                     n
@@ -1192,10 +1211,10 @@ fi
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
 
 
-echo ""
-echo "--- 13. Localization  ---"
-echo "Set timezone to UTC"
-timedatectl set-timezone UTC
+    echo ""
+    echo "--- 13. Localization  ---"
+    echo "Set timezone to UTC"
+    timedatectl set-timezone UTC
 
 
     echo ""
@@ -1220,7 +1239,6 @@ timedatectl set-timezone UTC
     echo -e "[Timer]\nOnCalendar=*-*-* ${APT_UPGRADE_HOUR}:00" > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
     systemctl daemon-reload
 
-
     echo ""
     echo "--- 16. Configure system file limits ---"
     rm -f /etc/security/limits.d/xlvisuals.conf
@@ -1237,7 +1255,6 @@ root hard nofile   1048576
 root soft nproc    65536
 root hard nproc    1048576
 EOF
-
 
     echo ""
     echo "--- 17. Kernel tuning and hardening ---"
@@ -1291,19 +1308,34 @@ EOF
     # allow MySQL to write to the memory space, but prevents an attacker from running executables or gain root
     if ! grep -q "none /run/shm tmpfs" /etc/fstab; then
         echo "none /run/shm tmpfs defaults,nosuid,nodev,noexec 0 0" >> /etc/fstab
+        echo "Modified /etc/fstab"
     fi
     # Re-mount immediately to apply changes without reboot
     mount -o remount,nosuid,nodev,noexec /run/shm 2>/dev/null || true
+    echo "Remounted /run/shm"
+
+    echo ""
+    echo "--- 19. Ubuntu Pro ---"
+    if pro status --format json 2>/dev/null | grep -q '"attached": false'; then
+        # Removing Ubuntu Pro can sometimes cause issues with apt on Ubuntu since it's fairly integrated.
+        # Safer to just disabling the services
+        echo "Ubuntu Pro not attached — disabling Pro services"
+        pro config set apt_news=false 2>/dev/null || true
+        systemctl stop ubuntu-advantage ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
+        systemctl mask ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
+    else
+        echo "Ubuntu Pro is attached — no changes"
+    fi
 
 else
     echo ""
-    echo "--- 13.-18. System Tuning ---"
+    echo "--- 13.-19. System Tuning ---"
     echo "Skipping system tuning steps."
 fi
 
 
 echo ""
-echo "--- 19. Install fonts ---"
+echo "--- 20. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
@@ -1319,7 +1351,7 @@ fi
 
 
 echo ""
-echo "--- 20. Install Python 3.14 ---"
+echo "--- 21. Install Python 3.14 ---"
 if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_CPYTHON314" == 'reinstall' ]]; then
         echo "Uninstall Python 3.14"
@@ -1367,7 +1399,7 @@ fi
 
 
 echo ""
-echo "--- 21. Install PyPy 3.11 ---"
+echo "--- 22. Install PyPy 3.11 ---"
 if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
 
     # Fetch latest PyPy 3.11 version dynamically, fall back to known version if unavailable
@@ -1409,7 +1441,7 @@ fi
 
 
 echo ""
-echo "--- 22. Install weasyprint ---"
+echo "--- 23. Install weasyprint ---"
 if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get install $APT_FLAGS weasyprint
@@ -1419,7 +1451,7 @@ fi
 
 
 echo ""
-echo "--- 23. Install imagemagick ---"
+echo "--- 24. Install imagemagick ---"
 if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get install $APT_FLAGS imagemagick
@@ -1429,7 +1461,7 @@ fi
 
 
 echo ""
-echo "--- 24. Install nginx ---"
+echo "--- 25. Install nginx ---"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_NGINX" == 'reinstall' ]]; then
         echo "Uninstall nginx"
@@ -1452,7 +1484,7 @@ fi
 
 
 echo ""
-echo "--- 25. Install Valkey ---"
+echo "--- 26. Install Valkey ---"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_VALKEY" == 'reinstall' ]]; then
         echo "Uninstall valkey-server valkey-tools"
@@ -1468,7 +1500,7 @@ fi
 
 
 echo ""
-echo "--- 26. Install MySQL ---"
+echo "--- 27. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
         echo "Uninstall mysql-server mysqltuner mysql-shell"
@@ -1517,7 +1549,7 @@ fi
 
 
 echo ""
-echo "--- 27. Install PostgreSQL $PG_VERSION ---"
+echo "--- 28. Install PostgreSQL $PG_VERSION ---"
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTGRESQL" == 'reinstall' ]]; then
@@ -1585,7 +1617,7 @@ fi
 
 
 echo ""
-echo "--- 28. Install Mosquitto MQTT broker ---"
+echo "--- 29. Install Mosquitto MQTT broker ---"
 if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_MOSQUITTO" == 'reinstall' ]]; then
@@ -1606,7 +1638,7 @@ fi
 
 
 echo ""
-echo "--- 29. Install Postfix (relay-only) ---"
+echo "--- 30. Install Postfix (relay-only) ---"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTFIX" == 'reinstall' ]]; then
@@ -1629,10 +1661,11 @@ fi
 
 
 echo ""
-echo "--- 30. Install Monit ---"
+echo "--- 31. Install Monit ---"
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MONIT" == 'reinstall' ]]; then
         echo "Uninstall monit"
+        rm -rf /etc/monit/conf-enabled
         wait_for_apt
         apt-get purge -y monit  || true
     fi
@@ -1645,7 +1678,7 @@ fi
 
 
 echo ""
-echo "--- 31. Install Webmin ---"
+echo "--- 32. Install Webmin ---"
 if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_WEBMIN" == 'reinstall' ]]; then
         echo "Uninstall webmin"
@@ -1671,7 +1704,7 @@ fi
 
 
 echo ""
-echo "--- 32. Install Grafana ---"
+echo "--- 33. Install Grafana ---"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_GRAFANA" == 'reinstall' ]]; then
         echo "Uninstall grafana"
@@ -1712,7 +1745,7 @@ fi
 
 
 echo ""
-echo "--- 33. Install Forgejo ---"
+echo "--- 34. Install Forgejo ---"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FORGEJO" == 'reinstall' ]]; then
         echo "Uninstall forgejo (deleting folders)"
@@ -1749,7 +1782,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         rm -f forgejo-latest || true
 
         # configure
-        if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
+        if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ || "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]; then
             # Grafana and Forgejo both use port 3000 by default. -> Change Forgejo port
             echo "Installing Forgejo on port $FORGEJO_PORT"
             cat <<EOF > /etc/forgejo/app.ini
@@ -1777,9 +1810,15 @@ EOF
 else
     echo "Skipping Forgejo installation."
 fi
+if [[ "$ISINSTALLED_FORGEJO" == "y" && -z "${FORGEJO_PORT:-}" ]]; then
+    # Resolve FORGEJO_PORT from app.ini if not already set in conf or prompted
+    FORGEJO_PORT=$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo "3000")
+fi
+# Ensure FORGEJO_PORT always has a value to avoid unbound variable errors
+FORGEJO_PORT="${FORGEJO_PORT:-3000}"
 
 echo ""
-echo "--- 34. Disable TCP Transmit Offloading ---"
+echo "--- 35. Disable TCP Transmit Offloading ---"
 if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/disable-offload.service ]]; then
@@ -1797,7 +1836,7 @@ else
 fi
 
 echo ""
-echo "--- 35. Install Fail2Ban ---"
+echo "--- 36. Install Fail2Ban ---"
 if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FAIL2BAN" == 'reinstall' ]]; then
         echo "Uninstall fail2ban"
@@ -1825,7 +1864,7 @@ fi
 
 
 echo ""
-echo "--- 36. Install auditd ---"
+echo "--- 37. Install auditd ---"
 if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_AUDITD" == 'reinstall' ]]; then
         echo "Uninstall auditd"
@@ -1857,7 +1896,7 @@ fi
 
 
 echo ""
-echo "--- 37. Install ip blocklist (ipset + ipsum) ---"
+echo "--- 38. Install ip blocklist (ipset + ipsum) ---"
 if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_IPBLOCK" == 'reinstall' ]]; then
         echo "Uninstall ip blocklist"
@@ -1934,7 +1973,7 @@ fi
 
 
 echo ""
-echo "--- 38. Install Suricata IDS ---"
+echo "--- 39. Install Suricata IDS ---"
 if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # The idea is that wazuh agent monitors /var/log/suricata/eve.json for attacks and responses are configured and triggered via wazuh manager
 
@@ -1999,7 +2038,7 @@ fi
 
 
 echo ""
-echo "--- 39. Install and configure Wazuh Agent (Optional) ---"
+echo "--- 40. Install and configure Wazuh Agent ---"
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_WAZUH" == 'reinstall' ]]; then
@@ -2067,14 +2106,12 @@ fi
 
 
 echo ""
-echo "--- 40. Configure AppArmor ---"
+echo "--- 41. Configure AppArmor ---"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
-    # Install AppArmor utilities if not present
-    if [[ "$APPARMOR_INSTALLED" == "n" ]]; then
-        wait_for_apt
-        apt-get install $APT_FLAGS apparmor apparmor-utils
-    fi
+    # Always ensure utilities and profiles are installed
+    wait_for_apt
+    apt-get install $APT_FLAGS apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra
 
     if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ ]]; then
         # Ensure AppArmor is enabled in grub if not already
@@ -2090,27 +2127,56 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     fi
 
     if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ && "$APPARMOR_ENFORCE" =~ ^[Yy]$ ]]; then
-        echo "  Setting profiles to enforce mode..."
+        echo "  Setting available profiles to enforce mode..."
 
-        # Enforce nginx profile if available
-        if [[ -f /etc/apparmor.d/usr.sbin.nginx ]]; then
-            aa-enforce /etc/apparmor.d/usr.sbin.nginx \
-                && echo "  [V] nginx profile: enforce" \
-                || echo "  [!] nginx profile: failed to enforce"
-        else
-            echo "  [-] nginx profile not found, skipping"
-        fi
+        # Enforce all profiles that exist on disk — works across Ubuntu 24 and 26
+        # since profile availability differs between releases
+        for PROFILE in \
+            "usr.sbin.mysqld" \
+            "usr.sbin.rsyslogd" \
+            "mosquitto" \
+            "usr.sbin.nginx" \
+            "usr.sbin.sshd"; do
+            if [[ -f "/etc/apparmor.d/$PROFILE" ]]; then
+                aa-enforce "/etc/apparmor.d/$PROFILE" \
+                    && echo "  [V] $PROFILE: enforce" \
+                    || echo "  [!] $PROFILE: failed to enforce"
+            else
+                echo "  [-] $PROFILE: no profile available on this release"
+            fi
+        done
 
-        # Enforce sshd profile if available
-        if [[ -f /etc/apparmor.d/usr.sbin.sshd ]]; then
-            aa-enforce /etc/apparmor.d/usr.sbin.sshd \
-                && echo "  [V] sshd profile: enforce" \
-                || echo "  [!] sshd profile: failed to enforce"
-        else
-            echo "  [-] sshd profile not found, skipping"
-        fi
+        # For installed services without profiles, generate a minimal profile
+        # and set to complain mode so aa-logprof can build a proper profile
+        # from real usage. Run aa-logprof after normal use, then aa-enforce.
+        echo ""
+        echo "  Setting installed services without profiles to complain mode..."
+        declare -A APPARMOR_SERVICE_MAP=(
+            ["/usr/sbin/nginx"]="nginx"
+            ["/usr/sbin/postfix"]="postfix"
+            ["/usr/lib/postgresql/$PG_VERSION/bin/postgres"]="postgresql"
+            ["/usr/bin/grafana-server"]="grafana-server"
+            ["/usr/bin/forgejo"]="forgejo"
+        )
+        for SERVICE_BIN in "${!APPARMOR_SERVICE_MAP[@]}"; do
+            SERVICE="${APPARMOR_SERVICE_MAP[$SERVICE_BIN]}"
+            # Skip if binary not installed
+            [[ ! -f "$SERVICE_BIN" ]] && continue
+            # Skip if service not running
+            systemctl is-active --quiet "$SERVICE" 2>/dev/null || continue
+            # Skip if profile already loaded
+            if aa-status 2>/dev/null | grep -qF "$SERVICE_BIN"; then
+                echo "  [-] $(basename $SERVICE_BIN): profile already loaded, skipping"
+                continue
+            fi
+            # Generate minimal profile and set to complain mode
+            aa-genprof "$SERVICE_BIN" -f /dev/null 2>/dev/null || true
+            aa-complain "$SERVICE_BIN" 2>/dev/null \
+                && echo "  [~] $(basename $SERVICE_BIN): complain mode (run sudo aa-logprof after normal use)" \
+                || echo "  [!] $(basename $SERVICE_BIN): failed to set complain mode"
+        done
 
-        # Verify enforce mode is active and log summary
+        # Summary
         echo ""
         echo "  AppArmor status summary:"
         aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are in enforce|processes are unconfined"
@@ -2125,7 +2191,27 @@ fi
 
 
 echo ""
-echo "--- 41. Install configuration files ---"
+echo "--- 42. Install configuration files ---"
+
+# Re-detect installed services now that installation is complete.
+# This updates ISINSTALLED_ variables to include services installed during this run,
+# so config files, Monit links, and restarts apply to all currently installed services.
+echo "Detecting installed services (post-install):"
+check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
+check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
+check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
+check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
+check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
+check_service monit PROMPT_MONIT ISINSTALLED_MONIT
+check_service webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
+check_service grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
+check_service forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
+check_service fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
+check_service auditd PROMPT_AUDITD ISINSTALLED_AUDITD
+check_service suricata PROMPT_SURICATA ISINSTALLED_SURICATA
+check_service wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+
 
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     echo "  Copying MySQL config files"
@@ -2264,6 +2350,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         sed -i "s|%%POSTFIX_RELAY_HOST%%|$POSTFIX_RELAY_HOST|g"      /etc/postfix/main.cf
         sed -i "s|%%POSTFIX_RELAY_PORT%%|$POSTFIX_RELAY_PORT|g"      /etc/postfix/main.cf
         sed -i "s|%%POSTFIX_DOMAIN%%|$POSTFIX_DOMAIN|g"              /etc/postfix/main.cf
+        sed -i "s|%%POSTFIX_SERVER_HOSTNAME%%|$LOCAL_HOSTNAME|g"     /etc/postfix/main.cf
     fi
 
     # Set mailname, otherwise outgoing mail will show the server hostname
@@ -2309,6 +2396,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     if [[ -f $CONFIG_DIR/etc/monit/monitrc ]]; then
         cp $CONFIG_DIR/etc/monit/monitrc /etc/monit/monitrc
 
+        sed -i "s|%%MONIT_HOST_NAME%%|$MONIT_HOST_NAME|g"            /etc/monit/monitrc
         sed -i "s|%%MONIT_MAILSERVER_HOST%%|$MONIT_MAILSERVER_HOST|g"    /etc/monit/monitrc
         sed -i "s|%%MONIT_MAILSERVER_PORT%%|$MONIT_MAILSERVER_PORT|g"    /etc/monit/monitrc
         sed -i "s|%%MONIT_MAILSERVER_USERNAME%%|$MONIT_MAILSERVER_USERNAME|g" /etc/monit/monitrc
@@ -2324,15 +2412,15 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
 
     # Copy and link only the conf-available files for installed services
     for SERVICE in \
-        "$( [[ "$INSTALL_MYSQL"      =~ ^[Yy]$ ]] && echo mysql )" \
-        "$( [[ "$INSTALL_NGINX"      =~ ^[Yy]$ ]] && echo nginx )" \
-        "$( [[ "$INSTALL_VALKEY"     =~ ^[Yy]$ ]] && echo valkey-server )" \
-        "$( [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && echo postgresql )" \
-        "$( [[ "$INSTALL_MOSQUITTO"  =~ ^[Yy]$ ]] && echo mosquitto )" \
-        "$( [[ "$INSTALL_POSTFIX"    =~ ^[Yy]$ ]] && echo postfix )" \
-        "$( [[ "$INSTALL_WEBMIN"     =~ ^[Yy]$ ]] && echo webmin )" \
-        "$( [[ "$INSTALL_GRAFANA"    =~ ^[Yy]$ ]] && echo grafana-server )" \
-        "$( [[ "$INSTALL_FORGEJO"    =~ ^[Yy]$ ]] && echo forgejo )" \
+        "$( [[ "$ISINSTALLED_MYSQL"      == "y" ]] && echo mysql )" \
+        "$( [[ "$ISINSTALLED_NGINX"      == "y" ]] && echo nginx )" \
+        "$( [[ "$ISINSTALLED_VALKEY"     == "y" ]] && echo valkey-server )" \
+        "$( [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && echo postgresql )" \
+        "$( [[ "$ISINSTALLED_MOSQUITTO"  == "y" ]] && echo mosquitto )" \
+        "$( [[ "$ISINSTALLED_POSTFIX"    == "y" ]] && echo postfix )" \
+        "$( [[ "$ISINSTALLED_WEBMIN"     == "y" ]] && echo webmin )" \
+        "$( [[ "$ISINSTALLED_GRAFANA"    == "y" ]] && echo grafana-server )" \
+        "$( [[ "$ISINSTALLED_FORGEJO"    == "y" ]] && echo forgejo )" \
         "openssh-server"; do
         [[ -z "$SERVICE" ]] && continue
         SRC="$CONFIG_DIR/etc/monit/conf-available/$SERVICE"
@@ -2346,23 +2434,46 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
             echo "  Warning: Monit config not found for $SERVICE, skipping."
         fi
     done
+
+    # Remove conf-enabled links for services that are no longer installed
+    declare -A SERVICE_VAR_MAP=(
+        ["mysql"]="ISINSTALLED_MYSQL"
+        ["nginx"]="ISINSTALLED_NGINX"
+        ["valkey-server"]="ISINSTALLED_VALKEY"
+        ["postgresql"]="ISINSTALLED_POSTGRESQL"
+        ["mosquitto"]="ISINSTALLED_MOSQUITTO"
+        ["postfix"]="ISINSTALLED_POSTFIX"
+        ["webmin"]="ISINSTALLED_WEBMIN"
+        ["grafana-server"]="ISINSTALLED_GRAFANA"
+        ["forgejo"]="ISINSTALLED_FORGEJO"
+    )
+    for LINK in /etc/monit/conf-enabled/*; do
+        [[ -L "$LINK" ]] || continue
+        SERVICE=$(basename "$LINK")
+        [[ "$SERVICE" == "openssh-server" ]] && continue
+        ISINSTALLED_VAR="${SERVICE_VAR_MAP[$SERVICE]:-}"
+        if [[ -n "$ISINSTALLED_VAR" && "${!ISINSTALLED_VAR}" == "n" ]]; then
+            rm -f "$LINK"
+            echo "  Removed Monit link for $SERVICE (no longer installed)"
+        fi
+    done
 fi
 
 # Restart services to apply new configs
 echo "  Restarting services to apply configs"
-[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && systemctl restart mysql           || true
-[[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]      && systemctl restart nginx           || true
-[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]     && systemctl restart valkey-server   || true
-[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && systemctl restart postgresql      || true
-[[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]    && systemctl restart postfix         || true
-[[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]    && systemctl restart grafana-server  || true
-[[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]    && systemctl restart forgejo         || true
-[[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]  && systemctl restart mosquitto       || true
-[[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]      && systemctl restart monit           || true
+[[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
+[[ "$ISINSTALLED_NGINX" == "y" ]]      && systemctl restart nginx           || true
+[[ "$ISINSTALLED_VALKEY" == "y" ]]     && systemctl restart valkey-server   || true
+[[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && systemctl restart postgresql      || true
+[[ "$ISINSTALLED_POSTFIX" == "y" ]]    && systemctl restart postfix         || true
+[[ "$ISINSTALLED_GRAFANA" == "y" ]]    && systemctl restart grafana-server  || true
+[[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
+[[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
+[[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
 
 echo "Configuration files installed."
 
-if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
     echo ""
     echo "  Sending Postfix test mail to $POSTFIX_ROOT_ALIAS..."
     echo "Postfix test mail from $(hostname) after provisioning." \
@@ -2372,7 +2483,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
-echo "--- 42. Finalise installation ---"
+echo "--- 43. Finalise installation ---"
 
 sysctl --system
 
@@ -2393,7 +2504,7 @@ systemctl start apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-
 
 
 echo ""
-echo "--- 43. Generating Custom Health Check Script 'ubuntu_health_check.sh' ---"
+echo "--- 44. Generating Custom Health Check Script 'ubuntu_health_check.sh' ---"
 HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
 # We start the file with the header and basic checks.
 # use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
@@ -2410,6 +2521,7 @@ fi
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # --- Function to check service status ---
@@ -2527,6 +2639,54 @@ echo "==========================================="
 if command -v aa-status &>/dev/null; then
     if aa-status --enabled 2>/dev/null; then
         aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are unconfined"
+        echo ""
+        echo "Per-service profile status:"
+
+        check_apparmor() {
+            local label="$1"
+            local profile="$2"
+            local service="$3"
+            if ! systemctl is-active --quiet "$service" 2>/dev/null; then
+                return
+            fi
+            local aa_out
+            aa_out=$(aa-status 2>/dev/null)
+            if ! echo "$aa_out" | grep -qF "$profile"; then
+                echo -e "  $label: ${RED}[NO PROFILE]${NC}"
+                return
+            fi
+            # Extract section headings and profile names, check which section our profile falls under
+            local section
+            section=$(echo "$aa_out" | awk -v prof="$profile" '
+                /profiles are in enforce mode/  { mode="enforce" }
+                /profiles are in complain mode/ { mode="complain" }
+                /profiles are in prompt mode/   { mode="prompt" }
+                /profiles are in kill mode/     { mode="kill" }
+                /profiles are in unconfined/    { mode="unconfined" }
+                index($0, prof) && mode != "" { print mode; exit }
+            ')
+            case "$section" in
+                enforce)    echo -e "  $label: ${GREEN}[ENFORCE]${NC}" ;;
+                complain)   echo -e "  $label: ${YELLOW}[COMPLAIN]${NC}" ;;
+                *)          echo -e "  $label: ${YELLOW}[UNCONFINED]${NC}" ;;
+            esac
+        }
+
+        check_apparmor "Nginx"          "nginx"              "nginx"
+        check_apparmor "MySQL"          "/usr/sbin/mysqld"   "mysql"
+        check_apparmor "PostgreSQL"     "postgres"           "postgresql"
+        check_apparmor "Valkey"         "valkey"             "valkey-server"
+        check_apparmor "Mosquitto"      "mosquitto"          "mosquitto"
+        check_apparmor "Postfix"        "postfix"            "postfix"
+        check_apparmor "Monit"          "monit"              "monit"
+        check_apparmor "Webmin"         "webmin"             "webmin"
+        check_apparmor "Grafana"        "grafana"            "grafana-server"
+        check_apparmor "Forgejo"        "forgejo"            "forgejo"
+        check_apparmor "Fail2Ban"       "fail2ban"           "fail2ban"
+        check_apparmor "Auditd"         "auditd"             "auditd"
+        check_apparmor "Suricata"       "suricata"           "suricata"
+        check_apparmor "Wazuh Agent"    "wazuh"              "wazuh-agent"
+        check_apparmor "SSH"            "sshd"               "ssh"
     else
         echo -e "AppArmor: ${RED}[DISABLED]${NC}"
     fi
@@ -2534,7 +2694,52 @@ else
     echo -e "AppArmor: ${RED}[NOT INSTALLED]${NC}"
 fi
 
+echo ""
+echo "Recent AppArmor denials"
 echo "==========================================="
+DENIALS=$(grep "apparmor=\"DENIED\"" /var/log/syslog 2>/dev/null \
+    | grep -v "ubuntu_pro\|who" \
+    | tail -20)
+if [[ -n "$DENIALS" ]]; then
+    echo "$DENIALS" | grep -oP 'profile="\K[^"]*|operation="\K[^"]*|name="\K[^"]*' \
+        | paste - - - | sort | uniq -c | sort -rn
+else
+    echo "None"
+fi
+
+echo ""
+echo "Port usage"
+echo "==========================================="
+ufw_status() {
+    local port="$1"
+    if ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
+        echo -e "${GREEN}[ALLOWED]${NC}"
+    else
+        echo -e "${RED}[BLOCKED]${NC}"
+    fi
+}
+
+check_port() {
+    local service="$1"
+    local port="$2"
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo -e "  $service ($port): $(ufw_status $port)"
+    fi
+}
+
+check_port "nginx"          "80"
+check_port "nginx"          "443"
+check_port "mysql"          "3306"
+check_port "postgresql"     "5432"
+check_port "valkey-server"  "6379"
+check_port "mosquitto"      "1883"
+check_port "postfix"        "25"
+check_port "monit"          "2812"
+check_port "grafana-server" "3000"
+check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
+check_port "webmin"         "10000"
+
+echo ""
 EOF
 
 chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME $HEALTH_CHECK_SCRIPT
@@ -2546,33 +2751,30 @@ $HEALTH_CHECK_SCRIPT
 echo ""
 echo "--- 44. Setup Complete ---"
 echo "Logfile written to: $LOG_FILE"
-echo "Config backups written to current directory by ubuntu_backup_config.sh"
-echo ""
-echo "Port usage:"
-[[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]      && echo "Installed nginx on ports 80 and 443"
-[[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]  && echo "Installed mosquitto on port 1883"
-[[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]      && echo "Installed monit on port 2812"
-[[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]    && echo "Installed grafana-server on port 3000"
-[[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]] && [[ ! "$INSTALL_GRAFANA" =~ ^[Yy]$ ]] && echo "Installed forgejo on port 3000"
-[[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]] && [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]   && echo "Installed forgejo on port $FORGEJO_PORT"
-[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && echo "Installed mysql on port 3306"
-[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && echo "Installed postgresql on port 5432"
-[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]     && echo "Installed valkey-server on port 6379"
-[[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]     && echo "Installed webmin on port 10000"
+echo "Config backup written to current directory by ubuntu_backup_config.sh"
 
 echo ""
 echo "SSH connect command with port forwards:"
 SSH_CMD="ssh"
-[[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 1883:localhost:1883"
-[[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 2812:localhost:2812"
-[[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3000:localhost:3000"
-[[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L ${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
-[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
-[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 5432:localhost:5432"
-[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 6379:localhost:6379"
-[[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 10000:localhost:10000"
+[[ "$ISINSTALLED_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 1883:localhost:1883"
+[[ "$ISINSTALLED_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 2812:localhost:2812"
+[[ "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3000:localhost:3000"
+[[ "$ISINSTALLED_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L ${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
+[[ "$ISINSTALLED_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
+[[ "$ISINSTALLED_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 5432:localhost:5432"
+[[ "$ISINSTALLED_VALKEY" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 6379:localhost:6379"
+[[ "$ISINSTALLED_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 10000:localhost:10000"
 SSH_CMD="$SSH_CMD $USER_SUDO_USER_USERNAME@$LOCAL_IP"
 echo "$SSH_CMD"
+
+
+if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "AppArmor: nginx, postgresql, postfix, grafana set to complain mode."
+    echo "After normal use, run: sudo aa-logprof"
+    echo "Then to enforce: sudo aa-enforce /etc/apparmor.d/<profile>"
+fi
+
 echo ""
 echo "ACTION REQUIRED: Test SSH login in a NEW window before closing this one or you may be locked out."
 echo "ACTION REQUIRED: Reboot the system to apply all changes."

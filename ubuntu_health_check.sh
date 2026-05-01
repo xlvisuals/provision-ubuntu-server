@@ -10,6 +10,7 @@ fi
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # --- Function to check service status ---
@@ -127,6 +128,54 @@ echo "==========================================="
 if command -v aa-status &>/dev/null; then
     if aa-status --enabled 2>/dev/null; then
         aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are unconfined"
+        echo ""
+        echo "Per-service profile status:"
+
+        check_apparmor() {
+            local label="$1"
+            local profile="$2"
+            local service="$3"
+            if ! systemctl is-active --quiet "$service" 2>/dev/null; then
+                return
+            fi
+            local aa_out
+            aa_out=$(aa-status 2>/dev/null)
+            if ! echo "$aa_out" | grep -qF "$profile"; then
+                echo -e "  $label: ${RED}[NO PROFILE]${NC}"
+                return
+            fi
+            # Extract section headings and profile names, check which section our profile falls under
+            local section
+            section=$(echo "$aa_out" | awk -v prof="$profile" '
+                /profiles are in enforce mode/  { mode="enforce" }
+                /profiles are in complain mode/ { mode="complain" }
+                /profiles are in prompt mode/   { mode="prompt" }
+                /profiles are in kill mode/     { mode="kill" }
+                /profiles are in unconfined/    { mode="unconfined" }
+                index($0, prof) && mode != "" { print mode; exit }
+            ')
+            case "$section" in
+                enforce)    echo -e "  $label: ${GREEN}[ENFORCE]${NC}" ;;
+                complain)   echo -e "  $label: ${YELLOW}[COMPLAIN]${NC}" ;;
+                *)          echo -e "  $label: ${YELLOW}[UNCONFINED]${NC}" ;;
+            esac
+        }
+
+        check_apparmor "Nginx"          "nginx"              "nginx"
+        check_apparmor "MySQL"          "/usr/sbin/mysqld"   "mysql"
+        check_apparmor "PostgreSQL"     "postgres"           "postgresql"
+        check_apparmor "Valkey"         "valkey"             "valkey-server"
+        check_apparmor "Mosquitto"      "mosquitto"          "mosquitto"
+        check_apparmor "Postfix"        "postfix"            "postfix"
+        check_apparmor "Monit"          "monit"              "monit"
+        check_apparmor "Webmin"         "webmin"             "webmin"
+        check_apparmor "Grafana"        "grafana"            "grafana-server"
+        check_apparmor "Forgejo"        "forgejo"            "forgejo"
+        check_apparmor "Fail2Ban"       "fail2ban"           "fail2ban"
+        check_apparmor "Auditd"         "auditd"             "auditd"
+        check_apparmor "Suricata"       "suricata"           "suricata"
+        check_apparmor "Wazuh Agent"    "wazuh"              "wazuh-agent"
+        check_apparmor "SSH"            "sshd"               "ssh"
     else
         echo -e "AppArmor: ${RED}[DISABLED]${NC}"
     fi
@@ -134,4 +183,49 @@ else
     echo -e "AppArmor: ${RED}[NOT INSTALLED]${NC}"
 fi
 
+echo ""
+echo "Recent AppArmor denials"
 echo "==========================================="
+DENIALS=$(grep "apparmor=\"DENIED\"" /var/log/syslog 2>/dev/null \
+    | grep -v "ubuntu_pro\|who" \
+    | tail -20)
+if [[ -n "$DENIALS" ]]; then
+    echo "$DENIALS" | grep -oP 'profile="\K[^"]*|operation="\K[^"]*|name="\K[^"]*' \
+        | paste - - - | sort | uniq -c | sort -rn
+else
+    echo "None"
+fi
+
+echo ""
+echo "Port usage"
+echo "==========================================="
+ufw_status() {
+    local port="$1"
+    if ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
+        echo -e "${GREEN}[ALLOWED]${NC}"
+    else
+        echo -e "${RED}[BLOCKED]${NC}"
+    fi
+}
+
+check_port() {
+    local service="$1"
+    local port="$2"
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo -e "  $service ($port): $(ufw_status $port)"
+    fi
+}
+
+check_port "nginx"          "80"
+check_port "nginx"          "443"
+check_port "mysql"          "3306"
+check_port "postgresql"     "5432"
+check_port "valkey-server"  "6379"
+check_port "mosquitto"      "1883"
+check_port "postfix"        "25"
+check_port "monit"          "2812"
+check_port "grafana-server" "3000"
+check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
+check_port "webmin"         "10000"
+
+echo ""
