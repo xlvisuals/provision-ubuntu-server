@@ -1094,7 +1094,7 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get install $APT_FLAGS apt-show-versions apt-utils btop ca-certificates curl \
     debsums dnsutils git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release \
-    lsof lynis mc micro nano ncdu ne needrestart net-tools nmap p7zip-full p7zip-rar rsync \
+    lsof lynis mc micro nano ncdu ne needrestart net-tools nmap p7zip-full rsync \
     sed speedtest-cli sysstat tmux unattended-upgrades unzip vim vim-gui-common wget zip
 
     if [[ "$(systemd-detect-virt)" == "none" ]]; then
@@ -2550,15 +2550,29 @@ echo "Config backups written to current directory by ubuntu_backup_config.sh"
 echo ""
 echo "Port usage:"
 [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]      && echo "Installed nginx on ports 80 and 443"
-[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]     && echo "Installed valkey-server on port 6379"
-[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && echo "Installed mysql on port 3306"
-[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && echo "Installed postgresql on port 5432"
 [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]  && echo "Installed mosquitto on port 1883"
 [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]      && echo "Installed monit on port 2812"
-[[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]     && echo "Installed webmin on port 10000"
 [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]    && echo "Installed grafana-server on port 3000"
 [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]] && [[ ! "$INSTALL_GRAFANA" =~ ^[Yy]$ ]] && echo "Installed forgejo on port 3000"
 [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]] && [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]   && echo "Installed forgejo on port $FORGEJO_PORT"
+[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && echo "Installed mysql on port 3306"
+[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && echo "Installed postgresql on port 5432"
+[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]     && echo "Installed valkey-server on port 6379"
+[[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]     && echo "Installed webmin on port 10000"
+
+echo ""
+echo "SSH connect command with port forwards:"
+SSH_CMD="ssh"
+[[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 1883:localhost:1883"
+[[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 2812:localhost:2812"
+[[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3000:localhost:3000"
+[[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L ${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
+[[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
+[[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 5432:localhost:5432"
+[[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 6379:localhost:6379"
+[[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 10000:localhost:10000"
+SSH_CMD="$SSH_CMD $USER_SUDO_USER_USERNAME@$LOCAL_IP"
+echo "$SSH_CMD"
 echo ""
 echo "ACTION REQUIRED: Test SSH login in a NEW window before closing this one or you may be locked out."
 echo "ACTION REQUIRED: Reboot the system to apply all changes."
