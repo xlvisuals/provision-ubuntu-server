@@ -1314,8 +1314,27 @@ EOF
     mount -o remount,nosuid,nodev,noexec /run/shm 2>/dev/null || true
     echo "Remounted /run/shm"
 
+
     echo ""
-    echo "--- 19. Ubuntu Pro ---"
+    echo "--- 19. Configure needrestart ---"
+    # Set needrestart to automatic mode so kernel upgrades and service restarts
+    # never prompt during unattended runs
+    if [[ -f /etc/needrestart/needrestart.conf ]]; then
+        sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf \
+            && echo "  needrestart set to automatic mode" \
+            || echo "  Warning: could not update needrestart.conf"
+    fi
+
+    echo ""
+    echo "--- 20. Configure timeouts ---"
+    # Set apt timeout so apt doesn't hang waiting on a temporarily unavailable mirror
+    echo -e "Acquire::http::Timeout \"5\";\nAcquire::https::Timeout \"5\";\nAcquire::Retries \"0\";" \
+        > /etc/apt/apt.conf.d/99timeout
+    echo "  apt timeout set to 5s with no retries"
+
+
+    echo ""
+    echo "--- 21. Ubuntu Pro ---"
     if pro status --format json 2>/dev/null | grep -q '"attached": false'; then
         # Removing Ubuntu Pro can sometimes cause issues with apt on Ubuntu since it's fairly integrated.
         # Safer to just disabling the services
@@ -1329,13 +1348,13 @@ EOF
 
 else
     echo ""
-    echo "--- 13.-19. System Tuning ---"
+    echo "--- 13.-21. System Tuning ---"
     echo "Skipping system tuning steps."
 fi
 
 
 echo ""
-echo "--- 20. Install fonts ---"
+echo "--- 22. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
@@ -1351,7 +1370,7 @@ fi
 
 
 echo ""
-echo "--- 21. Install Python 3.14 ---"
+echo "--- 23. Install Python 3.14 ---"
 if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_CPYTHON314" == 'reinstall' ]]; then
         echo "Uninstall Python 3.14"
@@ -1399,7 +1418,7 @@ fi
 
 
 echo ""
-echo "--- 22. Install PyPy 3.11 ---"
+echo "--- 24. Install PyPy 3.11 ---"
 if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
 
     # Fetch latest PyPy 3.11 version dynamically, fall back to known version if unavailable
@@ -1441,7 +1460,7 @@ fi
 
 
 echo ""
-echo "--- 23. Install weasyprint ---"
+echo "--- 25. Install weasyprint ---"
 if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get install $APT_FLAGS weasyprint
@@ -1451,7 +1470,7 @@ fi
 
 
 echo ""
-echo "--- 24. Install imagemagick ---"
+echo "--- 26. Install imagemagick ---"
 if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get install $APT_FLAGS imagemagick
@@ -1461,7 +1480,7 @@ fi
 
 
 echo ""
-echo "--- 25. Install nginx ---"
+echo "--- 27. Install nginx ---"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_NGINX" == 'reinstall' ]]; then
         echo "Uninstall nginx"
@@ -1484,7 +1503,7 @@ fi
 
 
 echo ""
-echo "--- 26. Install Valkey ---"
+echo "--- 28. Install Valkey ---"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_VALKEY" == 'reinstall' ]]; then
         echo "Uninstall valkey-server valkey-tools"
@@ -1500,7 +1519,7 @@ fi
 
 
 echo ""
-echo "--- 27. Install MySQL ---"
+echo "--- 29. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
         echo "Uninstall mysql-server mysqltuner mysql-shell"
@@ -1549,7 +1568,7 @@ fi
 
 
 echo ""
-echo "--- 28. Install PostgreSQL $PG_VERSION ---"
+echo "--- 30. Install PostgreSQL $PG_VERSION ---"
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTGRESQL" == 'reinstall' ]]; then
@@ -1617,7 +1636,7 @@ fi
 
 
 echo ""
-echo "--- 29. Install Mosquitto MQTT broker ---"
+echo "--- 31. Install Mosquitto MQTT broker ---"
 if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_MOSQUITTO" == 'reinstall' ]]; then
@@ -1638,7 +1657,7 @@ fi
 
 
 echo ""
-echo "--- 30. Install Postfix (relay-only) ---"
+echo "--- 32. Install Postfix (relay-only) ---"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTFIX" == 'reinstall' ]]; then
@@ -1661,7 +1680,7 @@ fi
 
 
 echo ""
-echo "--- 31. Install Monit ---"
+echo "--- 33. Install Monit ---"
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MONIT" == 'reinstall' ]]; then
         echo "Uninstall monit"
@@ -1678,7 +1697,7 @@ fi
 
 
 echo ""
-echo "--- 32. Install Webmin ---"
+echo "--- 34. Install Webmin ---"
 if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_WEBMIN" == 'reinstall' ]]; then
         echo "Uninstall webmin"
@@ -1704,7 +1723,7 @@ fi
 
 
 echo ""
-echo "--- 33. Install Grafana ---"
+echo "--- 35. Install Grafana ---"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_GRAFANA" == 'reinstall' ]]; then
         echo "Uninstall grafana"
@@ -1745,7 +1764,7 @@ fi
 
 
 echo ""
-echo "--- 34. Install Forgejo ---"
+echo "--- 36. Install Forgejo ---"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FORGEJO" == 'reinstall' ]]; then
         echo "Uninstall forgejo (deleting folders)"
@@ -1836,7 +1855,7 @@ else
 fi
 
 echo ""
-echo "--- 36. Install Fail2Ban ---"
+echo "--- 38. Install Fail2Ban ---"
 if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FAIL2BAN" == 'reinstall' ]]; then
         echo "Uninstall fail2ban"
@@ -1864,7 +1883,7 @@ fi
 
 
 echo ""
-echo "--- 37. Install auditd ---"
+echo "--- 39. Install auditd ---"
 if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_AUDITD" == 'reinstall' ]]; then
         echo "Uninstall auditd"
@@ -1896,7 +1915,7 @@ fi
 
 
 echo ""
-echo "--- 38. Install ip blocklist (ipset + ipsum) ---"
+echo "--- 40. Install ip blocklist (ipset + ipsum) ---"
 if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_IPBLOCK" == 'reinstall' ]]; then
         echo "Uninstall ip blocklist"
@@ -1973,7 +1992,7 @@ fi
 
 
 echo ""
-echo "--- 39. Install Suricata IDS ---"
+echo "--- 41. Install Suricata IDS ---"
 if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # The idea is that wazuh agent monitors /var/log/suricata/eve.json for attacks and responses are configured and triggered via wazuh manager
 
@@ -2038,7 +2057,7 @@ fi
 
 
 echo ""
-echo "--- 40. Install and configure Wazuh Agent ---"
+echo "--- 42. Install and configure Wazuh Agent ---"
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_WAZUH" == 'reinstall' ]]; then
@@ -2106,7 +2125,7 @@ fi
 
 
 echo ""
-echo "--- 41. Configure AppArmor ---"
+echo "--- 43 Configure AppArmor ---"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
     # Always ensure utilities and profiles are installed
@@ -2191,7 +2210,7 @@ fi
 
 
 echo ""
-echo "--- 42. Install configuration files ---"
+echo "--- 44. Install configuration files ---"
 
 # Re-detect installed services now that installation is complete.
 # This updates ISINSTALLED_ variables to include services installed during this run,
@@ -2483,7 +2502,7 @@ if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
 fi
 
 echo ""
-echo "--- 43. Finalise installation ---"
+echo "--- 45. Finalise installation ---"
 
 sysctl --system
 
@@ -2504,7 +2523,7 @@ systemctl start apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-
 
 
 echo ""
-echo "--- 44. Generating Custom Health Check Script 'ubuntu_health_check.sh' ---"
+echo "--- 46. Generating Health Check Script 'ubuntu_health_check.sh' ---"
 HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
 # We start the file with the header and basic checks.
 # use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
@@ -2749,7 +2768,7 @@ chmod +x $HEALTH_CHECK_SCRIPT
 $HEALTH_CHECK_SCRIPT
 
 echo ""
-echo "--- 44. Setup Complete ---"
+echo "--- 47. Setup Complete ---"
 echo "Logfile written to: $LOG_FILE"
 echo "Config backup written to current directory by ubuntu_backup_config.sh"
 

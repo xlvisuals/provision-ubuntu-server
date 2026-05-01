@@ -37,14 +37,14 @@ All files must sit in the same directory. The script uses its own location as th
 To start, download the repository. If you have git available:
 ```
 git clone https://github.com/xlvisuals/provision-ubuntu-server.git
-cd provision-ubuntu-server-main
+cd provision-ubuntu-server
 ```
 
 Or without git and unzip, e.g. on a fresh minimized Ubuntu Server installation:
 ```
-wget https://github.com/xlvisuals/provision-ubuntu-server/archive/refs/heads/main.zip -O provision-ubuntu-server-main.zip
-python3 -c "import zipfile; zipfile.ZipFile('provision-ubuntu-server-main.zip').extractall('.')"
-cd provision-ubuntu-server-main
+wget https://github.com/xlvisuals/provision-ubuntu-server/archive/refs/heads/main.zip -O provision-ubuntu-server.zip
+python3 -c "import zipfile; zipfile.ZipFile('provision-ubuntu-server.zip').extractall('.')"
+cd provision-ubuntu-server
 ```
 
 Then run ubuntu_provision.sh 
