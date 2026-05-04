@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Xlvisuals Limited
-# 30 April 2026
+# 3 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -14,7 +14,7 @@
 #   - 8 GB disk space for minimized, 12 GB for standard (+swap)
 #
 # INSTALLS (all optional):
-#   - Web stack:    Nginx, MySQL, PostgreSQL, Valkey, Mosquitto
+#   - Web stack:    Nginx, MySQL, MariaDB, PostgreSQL, Valkey, Mosquitto
 #   - Mail:         Postfix (relay-only; Monit, Grafana, Forgejo can route through it)
 #   - Management:   Webmin, Monit, Grafana, Forgejo
 #   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
@@ -69,7 +69,7 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
     for var in \
         INSTALL_UFW INSTALL_SSH INSTALL_FONTS INSTALL_WEASYPRINT INSTALL_IMAGEMAGICK \
         INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
-        INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
+        INSTALL_MARIADB INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
         INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
         INSTALL_SURICATA INSTALL_WAZUH; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
@@ -296,6 +296,7 @@ echo "Determining installed services:"
 check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
 check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
 check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
 check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
 check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
 check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
@@ -478,6 +479,9 @@ prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" 
 
 prompt_if_unset INSTALL_MYSQL "Would you like to $PROMPT_MYSQL MySQL? (y/n)" n "n"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
+    # Installing both MySQL and MariaDB is not supported. Disabling MariaDB
+    INSTALL_MARIADB=n
+
     # Interactive Password Prompt
     while true; do
         prompt_if_unset MYSQL_PASS         "  MySQL root password" secret
@@ -543,6 +547,58 @@ else
     MYSQL_PASS=''
     #MYSQL_PASS_CONFIRM=''
     MYSQL_PASS_ESCAPED=''
+fi
+
+prompt_if_unset INSTALL_MARIADB "Would you like to $PROMPT_MARIADB MariaDB? (y/n)" n "n"
+if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
+    if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
+        echo "  Warning: Installing both MySQL and MariaDB is not supported. Skipping MariaDB."
+        INSTALL_MARIADB=n
+    else
+        # Reuse MYSQL_ variables — MariaDB uses identical tuning parameters
+        while true; do
+            prompt_if_unset MYSQL_PASS "  MariaDB root password" secret
+            if [ "${#MYSQL_PASS}" -ge 4 ]; then
+                break
+            fi
+            MYSQL_PASS=''
+            echo "  Password is too short. Must be at least 4 characters."
+        done
+        MYSQL_PASS_ESCAPED=$(printf "%s" "$MYSQL_PASS" | sed "s/'/''/g")
+
+        prompt_if_unset MYSQL_BUFFER_POOL_CHUNK_MB "  InnoDB buffer pool chunk size (MB)" n "128"
+        MYSQL_BUFFER_POOL_MB="${MYSQL_BUFFER_POOL_MB:-}"
+        if [[ -z "$MYSQL_BUFFER_POOL_MB" ]]; then
+            TOTAL_MEM_MB=$(free -m | awk '/^Mem:/ {print $2}')
+            BUFFER_POOL_MB=$(( TOTAL_MEM_MB * 30 / 100 ))
+            BUFFER_POOL_MB=$(( (BUFFER_POOL_MB / MYSQL_BUFFER_POOL_CHUNK_MB) * MYSQL_BUFFER_POOL_CHUNK_MB ))
+            if (( BUFFER_POOL_MB < MYSQL_BUFFER_POOL_CHUNK_MB )); then
+                BUFFER_POOL_MB=$MYSQL_BUFFER_POOL_CHUNK_MB
+            fi
+            echo "  Available memory: ${TOTAL_MEM_MB}MB — suggested buffer pool: ${BUFFER_POOL_MB}MB"
+            prompt_if_unset MYSQL_BUFFER_POOL_MB "  InnoDB buffer pool size (MB)" n "$BUFFER_POOL_MB"
+        fi
+        REMAINDER=$(( MYSQL_BUFFER_POOL_MB % MYSQL_BUFFER_POOL_CHUNK_MB ))
+        if (( REMAINDER != 0 )); then
+            CORRECTED=$(( (MYSQL_BUFFER_POOL_MB / MYSQL_BUFFER_POOL_CHUNK_MB) * MYSQL_BUFFER_POOL_CHUNK_MB ))
+            echo "  Warning: buffer pool ${MYSQL_BUFFER_POOL_MB}MB is not a multiple of chunk size ${MYSQL_BUFFER_POOL_CHUNK_MB}MB — adjusting to ${CORRECTED}MB"
+            MYSQL_BUFFER_POOL_MB=$CORRECTED
+        fi
+        prompt_if_unset MYSQL_BUFFER_POOL_INSTANCES "  InnoDB buffer pool instances (1-64)" n "1"
+        prompt_if_unset MYSQL_MAX_CONNECTIONS       "  Max connections"                    n "100"
+        prompt_if_unset MYSQL_LOG_BUFFER_MB         "  InnoDB log buffer size (MB)"        n "64"
+        prompt_if_unset MYSQL_BINLOG_CACHE_MB       "  Binlog cache size (MB)"             n "16"
+        prompt_if_unset MYSQL_JOIN_BUFFER_KB        "  Join buffer size (KB)"              n "512"
+        prompt_if_unset MYSQL_SORT_BUFFER_KB        "  Sort buffer size (KB)"              n "512"
+        prompt_if_unset MYSQL_READ_BUFFER_KB        "  Read buffer size (KB)"              n "128"
+        prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
+    fi
+else
+    # Only clear if MySQL isn't also using them
+    if [[ ! "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
+        MYSQL_PASS=''
+        MYSQL_PASS_ESCAPED=''
+    fi
 fi
 
 prompt_if_unset INSTALL_POSTGRESQL "Would you like to $PROMPT_POSTGRESQL PostgreSQL $PG_VERSION? (y/n)" n "n"
@@ -779,27 +835,27 @@ echo "Configuration complete."
 echo ""
 echo ""
 echo "-- Configuration settings --"
-echo "Add sudo user?           : $USER_CREATE_SUDO_USER"
+echo "Add sudo user?             : $USER_CREATE_SUDO_USER"
 if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
-  echo "           new username : $USER_SUDO_USER_USERNAME"
+  echo "  new username             : $USER_SUDO_USER_USERNAME"
 else
-  echo "      existing username : $USER_SUDO_USER_USERNAME"
+  echo "  existing username        : $USER_SUDO_USER_USERNAME"
 fi
-echo "Configure LVM disks?     : $CONFIGURE_LVM"
+echo "Configure LVM disks?       : $CONFIGURE_LVM"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
-  echo "         Resize LVM?    : ${LVM_DO_RESIZE:-n}"
+  echo "  Resize LVM?              : ${LVM_DO_RESIZE:-n}"
   if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
-    echo "         LVM target GB  : ${LVM_TARGET_GB:-all}"
+    echo "  LVM target GB            : ${LVM_TARGET_GB:-all}"
   fi
 fi
-echo "Configure swap space?    : $CONFIGURE_SWAP"
+echo "Configure swap space?      : $CONFIGURE_SWAP"
 if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ && "$ACTIVE_SWAP" == "No" ]]; then
-  echo "         Swap size (GB) : ${SWAP_SIZE_GB:-2}"
+  echo "  Swap size (GB)           : ${SWAP_SIZE_GB:-2}"
 fi
-echo "Tune system?             : $TUNE_SYSTEM"
+echo "Tune system?               : $TUNE_SYSTEM"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
-  echo "  apt update hour (UTC) : $APT_DAILY_HOUR and $APT_DAILY_HOUR_2 (twice daily)"
-  echo "  apt upgrade hour (UTC): $APT_UPGRADE_HOUR"
+  echo "  apt update hour (UTC)   : $APT_DAILY_HOUR and $APT_DAILY_HOUR_2 (twice daily)"
+  echo "  apt upgrade hour (UTC)  : $APT_UPGRADE_HOUR"
 fi
 echo "Uninstall extra packages?  : $UNINSTALL_PACKAGES"
 echo "Update installed packages? : $UPDATE_PACKAGES"
@@ -808,7 +864,7 @@ echo "Install ufw?               : $INSTALL_UFW"
 echo "Install ssh?               : $INSTALL_SSH"
 echo "Install fonts?             : $INSTALL_FONTS"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
-  echo "  Install MS core fonts    : $INSTALL_MS_FONTS"
+  echo "  Install MS core fonts?   : $INSTALL_MS_FONTS"
 fi
 echo "Install weasyprint?        : $INSTALL_WEASYPRINT"
 echo "Install imagemagick?       : $INSTALL_IMAGEMAGICK"
@@ -816,11 +872,24 @@ echo "Install Python 3.14?       : $INSTALL_CPYTHON314"
 echo "Install Pypy 3.11?         : $INSTALL_PYPY311"
 echo "Install nginx?             : $INSTALL_NGINX"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
-  echo "  nginx worker processes   : $NGINX_WORKER_PROCESSES"
+  echo "    nginx worker processes : $NGINX_WORKER_PROCESSES"
 fi
 echo "Install valkey?            : $INSTALL_VALKEY"
 echo "Install MySQL?             : $INSTALL_MYSQL"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
+  echo "  Buffer pool chunk MB     : $MYSQL_BUFFER_POOL_CHUNK_MB"
+  echo "  Buffer pool MB           : $MYSQL_BUFFER_POOL_MB"
+  echo "  Buffer pool instances    : $MYSQL_BUFFER_POOL_INSTANCES"
+  echo "  Max connections          : $MYSQL_MAX_CONNECTIONS"
+  echo "  Log buffer MB            : $MYSQL_LOG_BUFFER_MB"
+  echo "  Binlog cache MB          : $MYSQL_BINLOG_CACHE_MB"
+  echo "  Join buffer KB           : $MYSQL_JOIN_BUFFER_KB"
+  echo "  Sort buffer KB           : $MYSQL_SORT_BUFFER_KB"
+  echo "  Read buffer KB           : $MYSQL_READ_BUFFER_KB"
+  echo "  Read rnd buffer KB       : $MYSQL_READ_RND_BUFFER_KB"
+fi
+echo "Install MariaDB?           : $INSTALL_MARIADB"
+if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
   echo "  Buffer pool chunk MB     : $MYSQL_BUFFER_POOL_CHUNK_MB"
   echo "  Buffer pool MB           : $MYSQL_BUFFER_POOL_MB"
   echo "  Buffer pool instances    : $MYSQL_BUFFER_POOL_INSTANCES"
@@ -893,40 +962,40 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     fi
   fi
 fi
-echo "Install Forgejo?         : $INSTALL_FORGEJO"
+echo "Install Forgejo?           : $INSTALL_FORGEJO"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
-  echo "  Forgejo domain/ip          : $FORGEJO_DOMAIN"
-  echo "  Forgejo port               : $FORGEJO_PORT"
+  echo "  Forgejo domain/ip        : $FORGEJO_DOMAIN"
+  echo "  Forgejo port             : $FORGEJO_PORT"
   if [[ "$FORGEJO_USE_POSTFIX" =~ ^[Yy]$ ]]; then
-    echo "  Mail via                  : Postfix (localhost:25)"
-    echo "  From address              : $FORGEJO_SMTP_FROM"
+    echo "  Mail via                 : Postfix (localhost:25)"
+    echo "  From address             : $FORGEJO_SMTP_FROM"
   else
-    echo "  Mailer enabled          : $FORGEJO_MAILER_ENABLED"
+    echo "  Mailer enabled           : $FORGEJO_MAILER_ENABLED"
     if [[ "$FORGEJO_MAILER_ENABLED" == "true" ]]; then
-      echo "  SMTP host                 : $FORGEJO_SMTP_ADDR"
-      echo "  SMTP port                 : $FORGEJO_SMTP_PORT"
-      echo "  From address              : $FORGEJO_SMTP_FROM"
-      echo "  SMTP user                 : $FORGEJO_SMTP_USER"
-      echo "  SMTP password             : [set]"
+      echo "  SMTP host                : $FORGEJO_SMTP_ADDR"
+      echo "  SMTP port                : $FORGEJO_SMTP_PORT"
+      echo "  From address             : $FORGEJO_SMTP_FROM"
+      echo "  SMTP user                : $FORGEJO_SMTP_USER"
+      echo "  SMTP password            : [set]"
     fi
   fi
 fi
-echo "Disable TX offloading?       : $DISABLE_TX_OFFLOAD"
+echo "Disable TX offloading?     : $DISABLE_TX_OFFLOAD"
 if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
-  echo "  Interface                  : $PRIMARY_INTERFACE"
+  echo "  Interface                : $PRIMARY_INTERFACE"
 fi
-echo "Install Fail2Ban?            : $INSTALL_FAIL2BAN"
-echo "Install auditd?              : $INSTALL_AUDITD"
-echo "Install IP blocklist?        : $INSTALL_IPBLOCK"
-echo "Install Suricata IDS?        : $INSTALL_SURICATA"
-echo "Install Wazuh Agent?         : $INSTALL_WAZUH"
+echo "Install Fail2Ban?          : $INSTALL_FAIL2BAN"
+echo "Install auditd?            : $INSTALL_AUDITD"
+echo "Install IP blocklist?      : $INSTALL_IPBLOCK"
+echo "Install Suricata IDS?      : $INSTALL_SURICATA"
+echo "Install Wazuh Agent?       : $INSTALL_WAZUH"
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
-  echo "          Wazuh Manager      : $WAZUH_MANAGER"
+  echo "  Wazuh Manager            : $WAZUH_MANAGER"
 fi
-echo "Configure AppArmor?          : $CONFIGURE_APPARMOR"
+echo "Configure AppArmor?        : $CONFIGURE_APPARMOR"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
-  echo "  Enable AppArmor            : $APPARMOR_ENABLE"
-  echo "  Enforce mode               : $APPARMOR_ENFORCE"
+  echo "  Enable AppArmor          : $APPARMOR_ENABLE"
+  echo "  Enforce mode             : $APPARMOR_ENFORCE"
 fi
 
 echo ""
@@ -1317,8 +1386,7 @@ EOF
 
     echo ""
     echo "--- 19. Configure needrestart ---"
-    # Set needrestart to automatic mode so kernel upgrades and service restarts
-    # never prompt during unattended runs
+    # Set needrestart to automatic mode so kernel upgrades and service restarts never prompt during unattended runs
     if [[ -f /etc/needrestart/needrestart.conf ]]; then
         sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf \
             && echo "  needrestart set to automatic mode" \
@@ -1328,8 +1396,7 @@ EOF
     echo ""
     echo "--- 20. Configure timeouts ---"
     # Set apt timeout so apt doesn't hang waiting on a temporarily unavailable mirror
-    echo -e "Acquire::http::Timeout \"5\";\nAcquire::https::Timeout \"5\";\nAcquire::Retries \"0\";" \
-        > /etc/apt/apt.conf.d/99timeout
+    echo -e "Acquire::http::Timeout \"5\";\nAcquire::https::Timeout \"5\";\nAcquire::Retries \"0\";" > /etc/apt/apt.conf.d/99timeout
     echo "  apt timeout set to 5s with no retries"
 
 
@@ -1519,7 +1586,7 @@ fi
 
 
 echo ""
-echo "--- 29. Install MySQL ---"
+echo "--- 29a. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
         echo "Uninstall mysql-server mysqltuner mysql-shell"
@@ -1566,6 +1633,50 @@ else
     echo "Skipping MySQL installation."
 fi
 
+echo ""
+echo "--- 29b. Install MariaDB ---"
+if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
+    if [[ "$PROMPT_MARIADB" == 'reinstall' ]]; then
+        echo "Uninstall mariadb-server"
+        apt-get purge -y mariadb-server mysqltuner || true
+    fi
+
+    wait_for_apt
+    apt-get install $APT_FLAGS mariadb-server mysqltuner
+    systemctl enable --now mariadb.service || echo "Warning: service failed to start"
+
+    echo "Waiting for MariaDB to start..."
+    MYSQL_READY=0
+    for i in {1..6}; do
+        if [ -S /var/run/mysqld/mysqld.sock ]; then
+            MYSQL_READY=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$MYSQL_READY" -ne 1 ]; then
+        echo "Error: MariaDB failed to start"
+        exit 1
+    fi
+
+    # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported)
+    mysql_root <<EOS
+ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASS_ESCAPED}');
+DELETE FROM mysql.user WHERE User='';
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+DROP DATABASE IF EXISTS test;
+FLUSH PRIVILEGES;
+EOS
+
+    mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
+
+    unset MYSQL_PASS
+    unset MYSQL_PASS_ESCAPED
+    echo "MariaDB root password set and security initialized."
+else
+    echo "Skipping MariaDB installation."
+fi
 
 echo ""
 echo "--- 30. Install PostgreSQL $PG_VERSION ---"
@@ -2219,6 +2330,7 @@ echo "Detecting installed services (post-install):"
 check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
 check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
 check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
 check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
 check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
 check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
@@ -2254,6 +2366,26 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
         # limits.conf changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
         mkdir -p /etc/systemd/system/mysql.service.d
         cp $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf /etc/systemd/system/mysql.service.d/override.conf
+    fi
+fi
+
+if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
+    echo "  Copying MariaDB config files"
+    # MariaDB uses the same template as MySQL — reuse mysqld.cnf with same placeholders
+    if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
+        mkdir -p /etc/mysql/mariadb.conf.d/
+        cp $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
+
+        sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%INNODB_BUFFER_POOL_CHUNK_SIZE%%|${MYSQL_BUFFER_POOL_CHUNK_MB}M|g" /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%MAX_CONNECTIONS%%|${MYSQL_MAX_CONNECTIONS}|g"                    /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%INNODB_LOG_BUFFER_SIZE%%|${MYSQL_LOG_BUFFER_MB}M|g"              /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%BINLOG_CACHE_SIZE%%|${MYSQL_BINLOG_CACHE_MB}M|g"                 /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%JOIN_BUFFER_SIZE%%|${MYSQL_JOIN_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%SORT_BUFFER_SIZE%%|${MYSQL_SORT_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%READ_BUFFER_SIZE%%|${MYSQL_READ_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+        sed -i "s|%%READ_RND_BUFFER_SIZE%%|${MYSQL_READ_RND_BUFFER_KB}K|g"           /etc/mysql/mariadb.conf.d/50-server.cnf
     fi
 fi
 
@@ -2432,6 +2564,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # Copy and link only the conf-available files for installed services
     for SERVICE in \
         "$( [[ "$ISINSTALLED_MYSQL"      == "y" ]] && echo mysql )" \
+        "$( [[ "$ISINSTALLED_MARIADB"    == "y" ]] && echo mariadb )" \
         "$( [[ "$ISINSTALLED_NGINX"      == "y" ]] && echo nginx )" \
         "$( [[ "$ISINSTALLED_VALKEY"     == "y" ]] && echo valkey-server )" \
         "$( [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && echo postgresql )" \
@@ -2457,6 +2590,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # Remove conf-enabled links for services that are no longer installed
     declare -A SERVICE_VAR_MAP=(
         ["mysql"]="ISINSTALLED_MYSQL"
+        ["mariadb"]="ISINSTALLED_MARIADB"
         ["nginx"]="ISINSTALLED_NGINX"
         ["valkey-server"]="ISINSTALLED_VALKEY"
         ["postgresql"]="ISINSTALLED_POSTGRESQL"
@@ -2481,6 +2615,7 @@ fi
 # Restart services to apply new configs
 echo "  Restarting services to apply configs"
 [[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
+[[ "$ISINSTALLED_MARIADB" == "y" ]]    && systemctl restart mariadb         || true
 [[ "$ISINSTALLED_NGINX" == "y" ]]      && systemctl restart nginx           || true
 [[ "$ISINSTALLED_VALKEY" == "y" ]]     && systemctl restart valkey-server   || true
 [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && systemctl restart postgresql      || true
@@ -2492,14 +2627,6 @@ echo "  Restarting services to apply configs"
 
 echo "Configuration files installed."
 
-if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
-    echo ""
-    echo "  Sending Postfix test mail to $POSTFIX_ROOT_ALIAS..."
-    echo "Postfix test mail from $(hostname) after provisioning." \
-        | mail -s "Postfix Test - $(hostname)" "$POSTFIX_ROOT_ALIAS" \
-        && echo "  [V] Test mail sent. Check $POSTFIX_ROOT_ALIAS." \
-        || echo "  [!] Test mail failed. Check: sudo tail -n 20 /var/log/mail.log"
-fi
 
 echo ""
 echo "--- 45. Finalise installation ---"
@@ -2640,6 +2767,7 @@ ufw status | grep -q "active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${R
 check_service "nginx" "NGINX Web Server"
 check_service "valkey-server" "Valkey Server"
 check_service "mysql" "MySQL Server"
+check_service "mariadb" "MariaDB Server"
 check_service "postgresql" "PostgreSQL Server"
 check_service "mosquitto" "Mosquitto Broker"
 check_service "monit" "Monit Server"
@@ -2693,6 +2821,7 @@ if command -v aa-status &>/dev/null; then
 
         check_apparmor "Nginx"          "nginx"              "nginx"
         check_apparmor "MySQL"          "/usr/sbin/mysqld"   "mysql"
+        check_apparmor "MariaDB"        "/usr/sbin/mariadbd" "mariadb"
         check_apparmor "PostgreSQL"     "postgres"           "postgresql"
         check_apparmor "Valkey"         "valkey"             "valkey-server"
         check_apparmor "Mosquitto"      "mosquitto"          "mosquitto"
@@ -2749,6 +2878,7 @@ check_port() {
 check_port "nginx"          "80"
 check_port "nginx"          "443"
 check_port "mysql"          "3306"
+check_port "mariadb"        "3306"
 check_port "postgresql"     "5432"
 check_port "valkey-server"  "6379"
 check_port "mosquitto"      "1883"
@@ -2767,8 +2897,108 @@ chmod +x $HEALTH_CHECK_SCRIPT
 # Run health check
 $HEALTH_CHECK_SCRIPT
 
+
+
+
 echo ""
-echo "--- 47. Setup Complete ---"
+echo "--- 48. Smoke Tests ---"
+
+smoke_ok()   { echo "  [V] $1"; }
+smoke_warn() { echo "  [!] $1"; }
+smoke_skip() { echo "  [-] $1 (not installed)"; }
+
+smoke_http() {
+    local label="$1" url="$2" expected="$3" extra_args="${4:-}"
+    local code
+    code=$(curl -s -o /dev/null -w "%{http_code}" $extra_args --max-time 5 "$url" 2>/dev/null)
+    if [[ "$code" == "$expected" || "$code" =~ ^(200|301|302|401|403)$ && "$expected" == "ok" ]]; then
+        smoke_ok "$label: HTTP $code"
+    else
+        smoke_warn "$label: unexpected HTTP $code (expected $expected) — check service logs"
+    fi
+}
+
+# HTTP/HTTPS checks
+if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
+    smoke_http "Nginx HTTP"     "http://localhost"       "ok"
+    smoke_http "Nginx HTTPS"    "https://localhost"      "ok" "-k"
+else smoke_skip "Nginx"; fi
+
+if [[ "$ISINSTALLED_GRAFANA" == "y" ]]; then
+    smoke_http "Grafana"        "http://localhost:3000"  "ok"
+else smoke_skip "Grafana"; fi
+
+if [[ "$ISINSTALLED_FORGEJO" == "y" ]]; then
+    smoke_http "Forgejo"        "http://localhost:${FORGEJO_PORT}" "ok"
+else smoke_skip "Forgejo"; fi
+
+if [[ "$ISINSTALLED_MONIT" == "y" ]]; then
+    smoke_http "Monit"          "http://localhost:2812"  "401"
+else smoke_skip "Monit"; fi
+
+if [[ "$ISINSTALLED_WEBMIN" == "y" ]]; then
+    smoke_http "Webmin"         "https://localhost:10000" "ok" "-k"
+else smoke_skip "Webmin"; fi
+
+# Database checks
+if [[ "$ISINSTALLED_MYSQL" == "y" ]]; then
+    if mysql_root -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MySQL: connection OK"
+    else
+        smoke_warn "MySQL: connection failed — check root password and service status"
+    fi
+else smoke_skip "MySQL"; fi
+
+if [[ "$ISINSTALLED_MARIADB" == "y" ]]; then
+    if mysql_root -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MariaDB: connection OK"
+    else
+        smoke_warn "MariaDB: connection failed — check root password and service status"
+    fi
+else smoke_skip "MariaDB"; fi
+
+if [[ "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+    if sudo -u postgres psql -c "SELECT 1;" &>/dev/null; then
+        smoke_ok "PostgreSQL: connection OK"
+    else
+        smoke_warn "PostgreSQL: connection failed — check service status"
+    fi
+else smoke_skip "PostgreSQL"; fi
+
+if [[ "$ISINSTALLED_VALKEY" == "y" ]]; then
+    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+        smoke_ok "Valkey: PONG received"
+    else
+        smoke_warn "Valkey: no PONG — check service status"
+    fi
+else smoke_skip "Valkey"; fi
+
+if [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]; then
+    # Publish a test message and subscribe to receive it (2s timeout)
+    mosquitto_pub -t "_smoke_test" -m "ok" -q 0 2>/dev/null
+    MSG=$(mosquitto_sub -t "_smoke_test" -C 1 -W 2 2>/dev/null)
+    if [[ "$MSG" == "ok" ]]; then
+        smoke_ok "Mosquitto: pub/sub OK"
+    else
+        smoke_warn "Mosquitto: pub/sub failed — check service status"
+    fi
+else smoke_skip "Mosquitto"; fi
+
+# Postfix test email
+if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
+    echo ""
+    echo "  Sending Postfix test mail to $POSTFIX_ROOT_ALIAS..."
+    echo "Postfix test mail from $(hostname) after provisioning." \
+        | mail -s "Postfix Test - $(hostname)" "$POSTFIX_ROOT_ALIAS" \
+        && smoke_ok "Postfix: test mail sent to $POSTFIX_ROOT_ALIAS" \
+        || smoke_warn "Postfix: test mail failed — check: sudo tail -n 20 /var/log/mail.log"
+else smoke_skip "Postfix"; fi
+
+
+
+
+echo ""
+echo "--- 49. Setup Complete ---"
 echo "Logfile written to: $LOG_FILE"
 echo "Config backup written to current directory by ubuntu_backup_config.sh"
 
@@ -2780,6 +3010,7 @@ SSH_CMD="ssh"
 [[ "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3000:localhost:3000"
 [[ "$ISINSTALLED_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L ${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
 [[ "$ISINSTALLED_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
+[[ "$ISINSTALLED_MARIADB" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
 [[ "$ISINSTALLED_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 5432:localhost:5432"
 [[ "$ISINSTALLED_VALKEY" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 6379:localhost:6379"
 [[ "$ISINSTALLED_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 10000:localhost:10000"

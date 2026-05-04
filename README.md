@@ -1,7 +1,7 @@
 # Ubuntu Server Provisioning
 
 An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server to 
-quickly provision a secure webserver with Auditd, Fail2Ban, Forgejo, Grafana, Monit, Mosquitto, MySQL, Nginx, Postfix, PostgreSQL, Suricata, Valkey, Wazuh Agent, Webmin.
+quickly provision a secure webserver with **Auditd**, **Fail2Ban**, **Forgejo**, **Grafana**, **Monit**, **Mosquitto**, **MySQL**, **MariaDBL**, **Nginx**, **Postfix**, **PostgreSQL**, **Suricata**, **Valkey**, **Wazuh Agent**, **Webmin**.
 The script is re-entrant, but best run on a fresh **minimized** or **standard** install.
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts.
 
@@ -117,6 +117,7 @@ INSTALL_PYPY311=y
 INSTALL_NGINX=y
 INSTALL_VALKEY=y
 INSTALL_MYSQL=y
+INSTALL_MARIADB=n
 INSTALL_POSTGRESQL=y
 INSTALL_MOSQUITTO=y
 INSTALL_POSTFIX=y
@@ -133,7 +134,7 @@ INSTALL_WAZUH=y
 # Fonts tuning
 INSTALL_MS_FONTS=y
 
-# MySQL tuning - leave blank to use auto-calculated defaults based on available memory
+# MySQL/MariaDB tuning - leave blank to use auto-calculated defaults based on available memory
 MYSQL_BUFFER_POOL_MB=
 MYSQL_BUFFER_POOL_INSTANCES=
 MYSQL_BUFFER_POOL_CHUNK_MB=128
@@ -146,7 +147,6 @@ MYSQL_READ_BUFFER_KB=128
 MYSQL_READ_RND_BUFFER_KB=1024
 # Passwords intentionally omitted - will always be prompted:
 # MYSQL_PASS=
-# MYSQL_PASS_CONFIRM=
 
 # PostgreSQL tuning - leave blank to use auto-calculated defaults based on available memory
 PG_MAX_CONNECTIONS=100
@@ -245,13 +245,14 @@ The script walks you through each step with a `y/n` prompt. If a `ubuntu_provisi
 
 **Web Stack**
 
-| Package | Default Port | Notes |
-|---|---|---|
-| Nginx | 80, 443 | |
-| MySQL Server | 3306 | Tunable InnoDB parameters; auto-calculated from RAM if left blank |
-| PostgreSQL 18 | 5432 | Tunable memory and parallelism parameters; auto-calculated from RAM/CPU if left blank |
-| Valkey | 6379 | Redis-compatible cache |
-| Mosquitto | 1883 | MQTT broker |
+| Package        | Default Port | Notes                                                                                                    |
+|----------------|---|----------------------------------------------------------------------------------------------------------|
+| Nginx          | 80, 443 |                                                                                                          |
+| MySQL Server   | 3306 | Tunable InnoDB parameters; auto-calculated from RAM if left blank                                        |
+| MariaDB Server | 3306 | Alternative to MySQL. Tunable InnoDB parameters; auto-calculated from RAM if left blank |
+| PostgreSQL 18  | 5432 | Tunable memory and parallelism parameters; auto-calculated from RAM/CPU if left blank                    |
+| Valkey         | 6379 | Redis-compatible cache                                                                                   |
+| Mosquitto      | 1883 | MQTT broker                                                                                              |
 
 **Mail**
 
@@ -296,21 +297,22 @@ The script walks you through each step with a `y/n` prompt. If a `ubuntu_provisi
 
 ## Port Reference
 
-| Service | Port | UFW |
-|---|---|---|
-| SSH | 22 | allowed |
-| Nginx HTTP | 80 | allowed |
-| Nginx HTTPS | 443 | allowed |
-| MySQL | 3306 | blocked |
-| PostgreSQL | 5432 | blocked |
-| Valkey | 6379 | blocked |
-| Mosquitto | 1883 | blocked |
-| Postfix | 25 | blocked |
-| Monit | 2812 | blocked |
-| Grafana | 3000 | blocked |
-| Forgejo (standalone) | 3000 | blocked |
+| Service                | Port | UFW |
+|------------------------|---|---|
+| SSH                    | 22 | allowed |
+| Nginx HTTP             | 80 | allowed |
+| Nginx HTTPS            | 443 | allowed |
+| MySQL                  | 3306 | blocked |
+| MariaDB                | 3306 | blocked |
+| PostgreSQL             | 5432 | blocked |
+| Valkey                 | 6379 | blocked |
+| Mosquitto              | 1883 | blocked |
+| Postfix                | 25 | blocked |
+| Monit                  | 2812 | blocked |
+| Grafana                | 3000 | blocked |
+| Forgejo (standalone)   | 3000 | blocked |
 | Forgejo (with Grafana) | 3030 | blocked |
-| Webmin | 10000 | blocked |
+| Webmin                 | 10000 | blocked |
 
 ---
 
