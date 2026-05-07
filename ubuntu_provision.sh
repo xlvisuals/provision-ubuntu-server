@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Xlvisuals Limited
-# 3 May 2026
+# 7 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -91,49 +91,97 @@ CONFIG_DIR="$SCRIPT_DIR"
 # Exit when any command fails silently
 set -Eeuo pipefail
 
-save_config() {
-    if [[ "${1:-}" ]]; then
-        config_output_file=$1
-    else
-        config_output_file="provision_$(date +%F_%H%M%S).conf"
-    fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|APT_|DISABLE_|LVM_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|PROMPT_|LOCAL_)" \
-        | grep -v "PASSWORD\|PASS\|SECRET" \
-        > $config_output_file
-    echo "Configuration parameters written to '$config_output_file'. "
-}
+# Set colors
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
 
-# Easier debugging
-
-on_error() {
-    local exit_code=$?
-    local line="$1"
-    set +e
-    trap - ERR EXIT
-    if [[ $exit_code -ne 0 ]]; then
-        config_debug_file="provision_debug.conf"
-        echo ""
-        echo "Error: Script failed at line $line (exit code $exit_code) — dumping variables to file"
-        save_config "$config_debug_file"
-        echo ""
-        echo "Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
-        echo ""
-    fi
-    exit $exit_code
-}
-
-
-#trap 'echo "ERROR on line $LINENO"' ERR
-trap 'on_error $LINENO' ERR
+# reset color after using one of the colors above
+NC='\033[0m'
 
 # Prevents any apt prompts from breaking the script.
 export DEBIAN_FRONTEND=noninteractive
 
 # auto-confirm and faster installs
 APT_FLAGS="-y -o Dpkg::Use-Pty=0"
+APT_PACKAGES_NOT_INSTALLED=()
 
+# Initialize arrays to track stop/start of autoupdate services
+APT_SERVICES_AUTOUPDATE=("apt-daily.service" "apt-daily.timer" "apt-daily-upgrade.service" "apt-daily-upgrade.timer")
+APT_SERVICES_AUTOUPDATE_STOPPED=()
 
 # helper functions
+
+save_config() {
+    if [[ "${1:-}" ]]; then
+        config_output_file=$1
+    else
+        config_output_file="provision_$(date +%F_%H%M%S).conf"
+    fi
+    set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
+        | grep -v "PASSWORD\|PASS\|SECRET" \
+        > $config_output_file
+    echo "Configuration parameters written to '$config_output_file'. "
+}
+
+stop_autoupdate() {
+    for UNIT in "${APT_SERVICES[@]}"; do
+        if systemctl is-active --quiet "$UNIT"; then
+            echo "Stopping $UNIT ..."
+            systemctl stop --no-block "$UNIT" > /dev/null 2>&1
+            # Add to tracking list
+            APT_SERVICES_AUTOUPDATE_STOPPED+=("$UNIT")
+        fi
+    done
+}
+
+restart_autoupdate() {
+    # Only loop through the ones we actually stopped
+    for UNIT in "${APT_SERVICES_AUTOUPDATE_STOPPED[@]}"; do
+        echo "Restarting $UNIT ..."
+        systemctl start --no-block "$UNIT" > /dev/null 2>&1
+    done
+
+    # Clear the list after restarting
+    APT_SERVICES_AUTOUPDATE_STOPPED=()
+}
+
+on_error() {
+    local exit_code=$?
+    local line="$1"
+    set +e
+    trap - ERR EXIT
+
+    # restart autoupdate services if stopped
+    restart_autoupdate
+
+    if [[ $exit_code -ne 0 ]]; then
+        config_debug_file="provision_debug.conf"
+        echo ""
+        echo "Error: Script failed at line $line (exit code $exit_code)."
+        save_config "$config_debug_file"
+        echo "Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
+        echo ""
+    fi
+    exit $exit_code
+}
+
+on_ctrl_c() {
+    echo ""
+
+    # restart autoupdate services if stopped
+    restart_autoupdate
+
+    if [[ "${USER_SUDO_USER_USERNAME:-}" ]]; then
+        config_debug_file="provision_aborted.conf"
+        echo ""
+        echo "Aborting."
+        save_config "$config_debug_file"
+        echo "Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
+        echo ""
+    fi
+    exit 0
+}
 
 check_service() {
     local service="$1"
@@ -174,33 +222,46 @@ wait_for_apt() {
   done
 }
 
+apt_install() {
+    if ! apt-get install $APT_FLAGS "$@" 2>&1; then
+        echo "  [!] Warning: failed to install package(s): $*"
+        echo "  [!] Continuing — some functionality may be missing"
+        APT_PACKAGES_NOT_INSTALLED+=("$@")
+    fi
+}
+
 prompt_if_unset() {
     local varname="$1"
     local prompt="$2"
     local silent="${3:-n}"
     local default="${4:-}"
 
-    # The - (with no default value) tells bash to return an empty string if the variable is unset
     if [[ -z "${!varname-}" ]]; then
         if [[ "$silent" == "secret" ]]; then
-            read -rsp "$prompt : " "$varname"; echo ""
+            while true; do
+                read -rsp "$prompt : " "$varname"; echo ""
+                [[ -n "${!varname}" ]] && break
+                echo "  Value cannot be empty."
+            done
         else
             if [[ -n "$default" ]]; then
                 read -rp "$prompt [$default]: " "$varname"
-                # If user just hit Enter, use the default
                 if [[ -z "${!varname}" ]]; then
                     printf -v "$varname" '%s' "$default"
                 fi
             else
-                read -rp "$prompt : " "$varname"
+                while true; do
+                    read -rp "$prompt : " "$varname"
+                    [[ -n "${!varname}" ]] && break
+                    echo "  Value cannot be empty."
+                done
             fi
         fi
     else
-        # variable is set, print it
         if [[ "$silent" == "secret" ]]; then
-            echo "$prompt : [set]";
+            echo "$prompt : [set]"
         else
-          echo "$prompt : ${!varname}";
+            echo "$prompt : ${!varname}"
         fi
     fi
 }
@@ -208,7 +269,7 @@ prompt_if_unset() {
 mysql_root() {
     local defaults_file=$(mktemp)
     chmod 600 "$defaults_file"
-    echo -e "[client]\npassword=$MYSQL_PASS" > "$defaults_file"
+    echo -e "[client]\npassword=$MYSQL_PASSWORD" > "$defaults_file"
     if mysql -u root "$@" 2>/dev/null; then
         rm -f "$defaults_file"
         return 0
@@ -220,6 +281,10 @@ mysql_root() {
     fi
 }
 
+# Write config on error and abort
+trap 'on_error $LINENO' ERR
+trap on_ctrl_c SIGINT
+
 # LOGGING SETUP
 LOG_FILE="/var/log/ubuntu_provision_$(date +%F_%H%M%S).log"
 # Use 'exec' to redirect STDOUT and STDERR through 'tee'
@@ -230,13 +295,9 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 ## Main
 ## --------------------------------------------
 
-
 echo "Xlvisuals Ubuntu LTS server provisioning"
 echo "Provisioning started: $(date)"
 echo "Logging to: $LOG_FILE"
-
-echo "Stopping unattended upgrades"
-systemctl stop apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer
 
 # Detect network IP, just for logging
 echo "--- 1. Detecting network and system parameters  ---"
@@ -356,7 +417,7 @@ else
     # If run via sudo, offer the current user as the default
     if [[ -n "$REAL_USER" && "$REAL_USER" != "root" ]]; then
         #read -p "Use current user '$REAL_USER' for setup?    (y/n)" USER_USE_CURRENT_USERNAME
-        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'?         (y/n)" n "y"
+        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'?          (y/n)" n "y"
         if [[ "$USER_USE_CURRENT_USERNAME" =~ ^[Yy]$ || -z "$USER_USE_CURRENT_USERNAME" ]]; then
             USER_SUDO_USER_USERNAME=$REAL_USER
         fi
@@ -381,7 +442,7 @@ if [[ -z "$USER_SUDO_USER_USERNAME" ]]; then
 fi
 
 ## LVM
-prompt_if_unset CONFIGURE_LVM "Would you like to configure LVM disks? (y/n)" n "n"
+prompt_if_unset CONFIGURE_LVM "Would you like to configure LVM disks? (y/n)" n "y"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
     # 1. Check if the logical volume exists
     # 2. Check if the Volume Group has more than 0 free space
@@ -395,7 +456,7 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
 
         if [ "$LVM_FREE_SPACE" -gt 0 ]; then
             echo "  LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
-            prompt_if_unset LVM_DO_RESIZE "  Resize root LVM? (y/n)" n "n"
+            prompt_if_unset LVM_DO_RESIZE "  Resize root LVM? (y/n)" n "y"
             if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
                 prompt_if_unset LVM_TARGET_GB "  Enter target size in GB (or type 'all')" n "all"
             fi
@@ -409,7 +470,7 @@ fi
 
 ## SWAP
 ACTIVE_SWAP=''
-prompt_if_unset CONFIGURE_SWAP "Would you like to configure swap space? (y/n)" n "n"
+prompt_if_unset CONFIGURE_SWAP "Would you like to configure swap space? (y/n)" n "y"
 if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     CURRENT_SWAP_ACTIVE=$(tail -n +2 /proc/swaps)
     if [ -z "$CURRENT_SWAP_ACTIVE" ]; then
@@ -425,87 +486,114 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-prompt_if_unset TUNE_SYSTEM "Would you like to tune the system? (y/n)" n "n"
+prompt_if_unset TUNE_SYSTEM "Would you like to tune the system? (y/n)" n "y"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
     while true; do
-        prompt_if_unset APT_DAILY_HOUR "  Hour to run apt-get update (0-23)" n "10"
-        if [[ "$APT_DAILY_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+        prompt_if_unset AUTO_UPDATE_DAILY_HOUR "  Hour to run apt-get update (0-23)" n "10"
+        if [[ "$AUTO_UPDATE_DAILY_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
             break
         fi
-        APT_DAILY_HOUR=''
+        AUTO_UPDATE_DAILY_HOUR=''
         echo "  Invalid hour. Please enter a number between 0 and 23."
     done
     # apt-daily (fetch) runs twice daily, 12 hours apart
-    APT_DAILY_HOUR_2=$(( (APT_DAILY_HOUR + 12) % 24 ))
+    AUTO_UPDATE_DAILY_HOUR_2=$(( (AUTO_UPDATE_DAILY_HOUR + 12) % 24 ))
     while true; do
-        prompt_if_unset APT_UPGRADE_HOUR "  Hour to run apt-get upgrade (0-23)" n "$(( (APT_DAILY_HOUR + 1) % 24 ))"
-        if [[ "$APT_UPGRADE_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+        prompt_if_unset AUTO_UPGRADE_DAILY_HOUR "  Hour to run apt-get upgrade (0-23)" n "$(( (AUTO_UPDATE_DAILY_HOUR + 1) % 24 ))"
+        if [[ "$AUTO_UPGRADE_DAILY_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
             break
         fi
-        APT_UPGRADE_HOUR=''
+        AUTO_UPGRADE_DAILY_HOUR=''
         echo "  Invalid hour. Please enter a number between 0 and 23."
     done
 fi
 
-prompt_if_unset UNINSTALL_PACKAGES "Would you like to uninstall packages? (y/n)" n "n"
+prompt_if_unset UNINSTALL_PACKAGES "Would you like to uninstall packages? (y/n)" n "y"
 
-prompt_if_unset UPDATE_PACKAGES "Would you like to update packages? (y/n)" n "n"
+prompt_if_unset UPDATE_PACKAGES "Would you like to update packages? (y/n)" n "y"
 
-prompt_if_unset INSTALL_PACKAGES "Would you like to install new packages? (y/n)" n "n"
+prompt_if_unset INSTALL_PACKAGES "Would you like to install new packages? (y/n)" n "y"
 
-prompt_if_unset INSTALL_UFW "Would you like to configure ufw? (y/n)" n "n"
+prompt_if_unset INSTALL_UFW "Would you like to configure ufw? (y/n)" n "y"
 
-prompt_if_unset INSTALL_SSH "Would you like to configure ssh? (y/n)" n "n"
+prompt_if_unset INSTALL_SSH "Would you like to configure ssh? (y/n)" n "y"
 
-prompt_if_unset INSTALL_FONTS "Would you like to install fonts? (y/n)" n "n"
+prompt_if_unset INSTALL_FONTS "Would you like to install fonts? (y/n)" n "y"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     prompt_if_unset INSTALL_MS_FONTS "   Install Microsoft core fonts? (y/n)" n "y"
 fi
 
-prompt_if_unset INSTALL_WEASYPRINT "Would you like to $PROMPT_WEASYPRINT weasyprint? (y/n)" n "n"
+[[ "$PROMPT_WEASYPRINT" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_WEASYPRINT "Would you like to $PROMPT_WEASYPRINT weasyprint? (y/n)" n $default_val
 
-prompt_if_unset INSTALL_IMAGEMAGICK "Would you like to $PROMPT_IMAGEMAGICK imagemagick? (y/n)" n "n"
+[[ "$PROMPT_IMAGEMAGICK" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_IMAGEMAGICK "Would you like to $PROMPT_IMAGEMAGICK imagemagick? (y/n)" n $default_val
 
-prompt_if_unset INSTALL_CPYTHON314 "Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n "n"
+[[ "$PROMPT_CPYTHON314" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_CPYTHON314 "Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n $default_val
+if [[ ! "$INSTALL_CPYTHON314" =~ ^[Yy]$ && $PROMPT_CPYTHON314 == "reinstall" ]]; then
+    # Python installed and choice is do not reinstall python. Check if important packages are installed.
+    PYTHON_PACKAGES=("python3.14-venv" "pipx")
+    PYTHON_PACKAGES_TO_INSTALL=()
 
-prompt_if_unset INSTALL_PYPY311 "Would you like to $PROMPT_PYPY311 Pypy 3.11? (y/n)" n "n"
+    for PKG in "${PYTHON_PACKAGES[@]}"; do
+        # -W (show) -f (format) checks if the package is installed
+        if ! dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q "install ok installed"; then
+            echo "  Package $PKG is missing."
+            PYTHON_PACKAGES_TO_INSTALL+=("$PKG")
+        fi
+    done
 
-prompt_if_unset INSTALL_NGINX "Would you like to $PROMPT_NGINX nginx? (y/n)" n "n"
+    if [ ${#PYTHON_PACKAGES_TO_INSTALL[@]} -ne 0 ]; then
+        INSTALL_CPYTHON314=""
+        prompt_if_unset INSTALL_CPYTHON314 "  Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n $default_val
+    fi
+fi
+
+
+#[[ "$PROMPT_PYPY311" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
+prompt_if_unset INSTALL_PYPY311 "Would you like to $PROMPT_PYPY311 Pypy 3.11? (y/n)" n $default_val
+
+[[ "$PROMPT_NGINX" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_NGINX "Would you like to $PROMPT_NGINX nginx? (y/n)" n $default_val
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   prompt_if_unset NGINX_WORKER_PROCESSES "  nginx worker processes?" n "$PROCESSOR_COUNT"
 fi
 
-prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" n "n"
+[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" n $default_val
 
-prompt_if_unset INSTALL_MYSQL "Would you like to $PROMPT_MYSQL MySQL? (y/n)" n "n"
+[[ "$PROMPT_MYSQL" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_MYSQL "Would you like to $PROMPT_MYSQL MySQL? (y/n)" n $default_val
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     # Installing both MySQL and MariaDB is not supported. Disabling MariaDB
     INSTALL_MARIADB=n
 
     # Interactive Password Prompt
     while true; do
-        prompt_if_unset MYSQL_PASS         "  MySQL root password" secret
-        if [ "${#MYSQL_PASS}" -ge 4 ]; then
+        prompt_if_unset MYSQL_PASSWORD         "  MySQL root password" secret
+        if [ "${#MYSQL_PASSWORD}" -ge 4 ]; then
             break
         fi
-        MYSQL_PASS=''
+        MYSQL_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
 
-#        prompt_if_unset MYSQL_PASS_CONFIRM "  MySQL root password (confirm)" secret
-#        if [ "$MYSQL_PASS" == "$MYSQL_PASS_CONFIRM" ] && [ "${#MYSQL_PASS}" -ge 4 ]; then
+#        prompt_if_unset MYSQL_PASSWORD_CONFIRM "  MySQL root password (confirm)" secret
+#        if [ "$MYSQL_PASSWORD" == "$MYSQL_PASSWORD_CONFIRM" ] && [ "${#MYSQL_PASSWORD}" -ge 4 ]; then
 #            break
-#        elif [ "${#MYSQL_PASS}" -lt 4 ]; then
-#            MYSQL_PASS=''
-#            MYSQL_PASS_CONFIRM=''
+#        elif [ "${#MYSQL_PASSWORD}" -lt 4 ]; then
+#            MYSQL_PASSWORD=''
+#            MYSQL_PASSWORD_CONFIRM=''
 #            echo "  Password is too short. Must be at least 4 characters."
 #        else
-#            MYSQL_PASS=''
-#            MYSQL_PASS_CONFIRM=''
+#            MYSQL_PASSWORD=''
+#            MYSQL_PASSWORD_CONFIRM=''
 #            echo "  Passwords do not match. Please try again."
 #        fi
     done
     # Escape for SQL, including ' " \ $
-    MYSQL_PASS_ESCAPED=$(printf "%s" "$MYSQL_PASS" | sed "s/'/''/g")
+    MYSQL_PASSWORD_ESCAPED=$(printf "%s" "$MYSQL_PASSWORD" | sed "s/'/''/g")
 
     # Get chunk size first - pool size must be a multiple of it
     prompt_if_unset MYSQL_BUFFER_POOL_CHUNK_MB "  InnoDB buffer pool chunk size (MB)" n "128"
@@ -544,12 +632,13 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
 
 else
-    MYSQL_PASS=''
-    #MYSQL_PASS_CONFIRM=''
-    MYSQL_PASS_ESCAPED=''
+    MYSQL_PASSWORD=''
+    #MYSQL_PASSWORD_CONFIRM=''
+    MYSQL_PASSWORD_ESCAPED=''
 fi
 
-prompt_if_unset INSTALL_MARIADB "Would you like to $PROMPT_MARIADB MariaDB? (y/n)" n "n"
+[[ "$PROMPT_MARIADB" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_MARIADB "Would you like to $PROMPT_MARIADB MariaDB? (y/n)" n  $default_val
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
         echo "  Warning: Installing both MySQL and MariaDB is not supported. Skipping MariaDB."
@@ -557,14 +646,14 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     else
         # Reuse MYSQL_ variables — MariaDB uses identical tuning parameters
         while true; do
-            prompt_if_unset MYSQL_PASS "  MariaDB root password" secret
-            if [ "${#MYSQL_PASS}" -ge 4 ]; then
+            prompt_if_unset MYSQL_PASSWORD "  MariaDB root password" secret
+            if [ "${#MYSQL_PASSWORD}" -ge 4 ]; then
                 break
             fi
-            MYSQL_PASS=''
+            MYSQL_PASSWORD=''
             echo "  Password is too short. Must be at least 4 characters."
         done
-        MYSQL_PASS_ESCAPED=$(printf "%s" "$MYSQL_PASS" | sed "s/'/''/g")
+        MYSQL_PASSWORD_ESCAPED=$(printf "%s" "$MYSQL_PASSWORD" | sed "s/'/''/g")
 
         prompt_if_unset MYSQL_BUFFER_POOL_CHUNK_MB "  InnoDB buffer pool chunk size (MB)" n "128"
         MYSQL_BUFFER_POOL_MB="${MYSQL_BUFFER_POOL_MB:-}"
@@ -596,20 +685,21 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
 else
     # Only clear if MySQL isn't also using them
     if [[ ! "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
-        MYSQL_PASS=''
-        MYSQL_PASS_ESCAPED=''
+        MYSQL_PASSWORD=''
+        MYSQL_PASSWORD_ESCAPED=''
     fi
 fi
 
-prompt_if_unset INSTALL_POSTGRESQL "Would you like to $PROMPT_POSTGRESQL PostgreSQL $PG_VERSION? (y/n)" n "n"
+[[ "$PROMPT_POSTGRESQL" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_POSTGRESQL "Would you like to $PROMPT_POSTGRESQL PostgreSQL $PG_VERSION? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
     # Interactive password prompt with 4-character minimum
     while true; do
-        prompt_if_unset PG_PASS "  PostgreSQL superuser (postgres) password" secret
-        if [ "${#PG_PASS}" -ge 4 ]; then
+        prompt_if_unset PG_PASSWORD "  PostgreSQL superuser (postgres) password" secret
+        if [ "${#PG_PASSWORD}" -ge 4 ]; then
             break
         fi
-        PG_PASS=''
+        PG_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
     done
 
@@ -636,15 +726,17 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
     prompt_if_unset PG_MAX_PARALLEL_WORKERS_PG "  Max parallel workers per gather (= cores/2)" n "$TEMP_MAX_PARALLEL_WORKERS_P"
     prompt_if_unset PG_EFFECTIVE_IO_CONCURRENCY "  Effective IO concurrency (SSD=100+, HDD=1)" n "100"
 else
-    PG_PASS=''
-    PG_PASS_ESCAPED=''
+    PG_PASSWORD=''
+    PG_PASSWORD_ESCAPED=''
 fi
 
-prompt_if_unset INSTALL_MOSQUITTO "Would you like to $PROMPT_MOSQUITTO Mosquitto? (y/n)" n "n"
+[[ "$PROMPT_MOSQUITTO" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_MOSQUITTO "Would you like to $PROMPT_MOSQUITTO Mosquitto? (y/n)" n  $default_val
 
-prompt_if_unset INSTALL_POSTFIX "Would you like to $PROMPT_POSTFIX Postfix (relay-only SMTP)? (y/n)" n "n"
+[[ "$PROMPT_POSTFIX" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_POSTFIX "Would you like to $PROMPT_POSTFIX Postfix (relay-only SMTP)? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
-    prompt_if_unset POSTFIX_RELAY_HOST      "  SMTP relay host"                          n
+    prompt_if_unset POSTFIX_RELAY_HOST      "  SMTP relay host (mailserver address)"     n
     prompt_if_unset POSTFIX_RELAY_PORT      "  SMTP relay port"                          n "587"
     prompt_if_unset POSTFIX_RELAY_USERNAME  "  SMTP relay username"                      n
     while true; do
@@ -656,9 +748,16 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         echo "  Password is too short. Must be at least 4 characters."
     done
     TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
+    TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
+    if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
+        TEMP_POSTFIX_FROM_ADDRESS="$POSTFIX_RELAY_USERNAME"
+    else
+        TEMP_POSTFIX_FROM_ADDRESS="root@${POSTFIX_DOMAIN}"
+    fi
+
     prompt_if_unset POSTFIX_DOMAIN          "  Mail domain (used in From address)"       n $TEMP_POSTFIX_DOMAIN
-    prompt_if_unset POSTFIX_FROM_ADDRESS    "  From address (e.g. root@domain.com)"      n "root@${POSTFIX_DOMAIN}"
-    prompt_if_unset POSTFIX_ROOT_ALIAS      "  Forward root mail to"                     n
+    prompt_if_unset POSTFIX_FROM_ADDRESS    "  From address (e.g. root@domain.com)"      n $TEMP_POSTFIX_FROM_ADDRESS
+    prompt_if_unset POSTFIX_ROOT_ALIAS      "  Forward local root mail to (root alias)"  n $POSTFIX_FROM_ADDRESS
 else
     POSTFIX_RELAY_HOST=''
     POSTFIX_RELAY_PORT=''
@@ -669,7 +768,8 @@ else
     POSTFIX_ROOT_ALIAS=''
 fi
 
-prompt_if_unset INSTALL_MONIT "Would you like to $PROMPT_MONIT Monit? (y/n)" n "n"
+[[ "$PROMPT_MONIT" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_MONIT "Would you like to $PROMPT_MONIT Monit? (y/n)" n  $default_val
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # allow conf file to override, fall back to hostname, never prompt
 	  MONIT_HOST_NAME="${MONIT_HOST_NAME:-$LOCAL_HOSTNAME}"
@@ -709,13 +809,15 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
 	    MONIT_ADMIN_PASSWORD=''
 	    echo "  Password is too short. Must be at least 4 characters."
 	done
-	prompt_if_unset MONIT_ALERT_RECIPIENT     "  Alert recipient address" n
+	POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-}"
+	prompt_if_unset MONIT_ALERT_RECIPIENT     "  Alert recipient address" n $POSTFIX_ROOT_ALIAS
 fi
 
+[[ "$PROMPT_WEBMIN" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n  $default_val
 
-prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n "n"
-
-prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n "n"
+[[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         prompt_if_unset GRAFANA_USE_POSTFIX "  Send Grafana alerts via Postfix? (y/n)" n "y"
@@ -755,7 +857,8 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-prompt_if_unset INSTALL_FORGEJO "Would you like to $PROMPT_FORGEJO Forgejo? (y/n)" n "n"
+[[ "$PROMPT_FORGEJO" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_FORGEJO "Would you like to $PROMPT_FORGEJO Forgejo? (y/n)" n  $default_val
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
         # If already set to 3000 (Grafana's port), clear it so the prompt fires
@@ -801,12 +904,22 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         fi
     fi
 fi
-prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "n"
-prompt_if_unset INSTALL_FAIL2BAN "Would you like to $PROMPT_FAIL2BAN Fail2Ban? (y/n)" n "n"
-prompt_if_unset INSTALL_AUDITD "Would you like to $PROMPT_AUDITD auditd? (y/n)" n "n"
-prompt_if_unset INSTALL_IPBLOCK "Would you like to $PROMPT_IPBLOCK IP blocklist? (y/n)" n "n"
-prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata IDS? (y/n)" n "n"
-prompt_if_unset INSTALL_WAZUH "Would you like to $PROMPT_WAZUH Wazuh Agent? (y/n)" n "n"
+prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "y"
+
+[[ "$PROMPT_FAIL2BAN" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_FAIL2BAN "Would you like to $PROMPT_FAIL2BAN Fail2Ban? (y/n)" n  $default_val
+
+[[ "$PROMPT_AUDITD" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_AUDITD "Would you like to $PROMPT_AUDITD auditd? (y/n)" n  $default_val
+
+[[ "$PROMPT_IPBLOCK" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_IPBLOCK "Would you like to $PROMPT_IPBLOCK IP blocklist? (y/n)" n  $default_val
+
+[[ "$PROMPT_SURICATA" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata IDS? (y/n)" n  $default_val
+
+[[ "$PROMPT_WAZUH" == "install" ]] && default_val="y" || default_val="n"
+prompt_if_unset INSTALL_WAZUH "Would you like to $PROMPT_WAZUH Wazuh Agent? (y/n)" n  $default_val
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
     # Interactive Manager host prompt
     while true; do
@@ -821,7 +934,6 @@ else
     WAZUH_MANAGER=''
 fi
 
-echo ""
 prompt_if_unset CONFIGURE_APPARMOR "Would you like to configure AppArmor? (y/n)" n "y"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     echo "  AppArmor status: installed=$APPARMOR_INSTALLED, enabled=$APPARMOR_ENABLED, mode=$APPARMOR_CURRENT_MODE"
@@ -854,8 +966,8 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ && "$ACTIVE_SWAP" == "No" ]]; then
 fi
 echo "Tune system?               : $TUNE_SYSTEM"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
-  echo "  apt update hour (UTC)   : $APT_DAILY_HOUR and $APT_DAILY_HOUR_2 (twice daily)"
-  echo "  apt upgrade hour (UTC)  : $APT_UPGRADE_HOUR"
+  echo "  apt update hour (UTC)   : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
+  echo "  apt upgrade hour (UTC)  : $AUTO_UPGRADE_DAILY_HOUR"
 fi
 echo "Uninstall extra packages?  : $UNINSTALL_PACKAGES"
 echo "Update installed packages? : $UPDATE_PACKAGES"
@@ -1002,15 +1114,32 @@ echo ""
 save_config
 
 echo ""
-read -rp "Configuration printed above. Proceed with installation? (y/n) " CONFIRM_APPLY
-if [[ ! "$CONFIRM_APPLY" =~ ^[Yy]$ ]]; then
-    echo "Aborted by user."
-    exit 0
-fi
+while true; do
+    read -rp "Configuration printed above. Proceed with installation? (y/n) " CONFIRM_APPLY
 
+    case "$CONFIRM_APPLY" in
+        [Yy]*)
+            # If yes, break the loop and continue the script
+            break
+            ;;
+        [Nn]*)
+            echo "Aborted by user."
+            exit 0
+            ;;
+        *)
+            echo "Invalid input. Please enter 'y' for yes or 'n' for no."
+            ;;
+    esac
+done
 
 echo ""
-echo "--- 3. Backup current configuration ---"
+echo "--- 3. Preparation ---"
+
+echo ""
+echo "Stopping unattended upgrades"
+stop_autoupdate
+
+echo "Backup current configuration"
 BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
 if [[ -f "$BACKUP_SCRIPT" ]]; then
     bash "$BACKUP_SCRIPT" "pre-apply"
@@ -1018,6 +1147,7 @@ if [[ -f "$BACKUP_SCRIPT" ]]; then
 else
     echo "Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
 fi
+
 
 
 ## Apply settings
@@ -1072,7 +1202,7 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
             echo "LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
 
             #read -p "Resize root LVM? (y/n)" LVM_DO_RESIZE
-            prompt_if_unset LVM_DO_RESIZE "Resize root LVM? (y/n)" n "n"
+            prompt_if_unset LVM_DO_RESIZE "Resize root LVM? (y/n)" n "y"
             if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
                 #read -p "Enter target size in GB (or type 'all'): " LVM_TARGET_GB
                 prompt_if_unset LVM_TARGET_GB "Enter target size in GB (or type 'all')" n "all"
@@ -1180,14 +1310,15 @@ echo ""
 echo "--- 9. Install recommended tools ---"
 if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt-get install $APT_FLAGS apt-show-versions apt-utils btop ca-certificates curl \
-    debsums dnsutils git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release \
-    lsof lynis mc micro nano ncdu ne needrestart net-tools nmap p7zip-full rsync \
-    sed speedtest-cli sysstat tmux unattended-upgrades unzip vim vim-gui-common wget zip
+    apt_install apt-file apt-show-versions apt-utils arping btop ca-certificates curl debsums dnsutils \
+          git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof lynis mc micro mtr nano ncdu ne \
+          needrestart net-tools nethogs nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute \
+          unattended-upgrades unzip vim vim-gui-common wget zip
+    apt-file update
 
     if [[ "$(systemd-detect-virt)" == "none" ]]; then
         echo "Bare metal detected. Installing smartmontools"
-        apt-get install $APT_FLAGS smartmontools
+        apt_install smartmontools
     else
         echo "Running in $(systemd-detect-virt). Skipping smartmontools installation."
     fi
@@ -1200,7 +1331,7 @@ echo ""
 echo "--- 10. Install and configure ufw firewall ---"
 if [[ "$INSTALL_UFW" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt-get install $APT_FLAGS ufw rsyslog
+    apt_install ufw rsyslog
     ufw default allow outgoing
     ufw default deny incoming
     ufw allow 22/tcp
@@ -1219,7 +1350,7 @@ echo ""
 echo "--- 11. Install and configure OpenSSH ---"
 if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt-get install $APT_FLAGS openssh-server
+    apt_install openssh-server
 
     # SSH Key Logic: Prompt for ssh key if none exists
     mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
@@ -1303,9 +1434,9 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
     echo ""
     echo "--- 15. Override update timer settings ---"
     mkdir -p /etc/systemd/system/apt-daily.timer.d/
-    echo -e "[Timer]\nOnCalendar=*-*-* ${APT_DAILY_HOUR},${APT_DAILY_HOUR_2}:00" > /etc/systemd/system/apt-daily.timer.d/override.conf
+    echo -e "[Timer]\nOnCalendar=*-*-* ${AUTO_UPDATE_DAILY_HOUR},${AUTO_UPDATE_DAILY_HOUR_2}:00" > /etc/systemd/system/apt-daily.timer.d/override.conf
     mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d/
-    echo -e "[Timer]\nOnCalendar=*-*-* ${APT_UPGRADE_HOUR}:00" > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
+    echo -e "[Timer]\nOnCalendar=*-*-* ${AUTO_UPGRADE_DAILY_HOUR}:00" > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
     systemctl daemon-reload
 
     echo ""
@@ -1425,10 +1556,10 @@ echo "--- 22. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
-    apt-get install $APT_FLAGS fonts-liberation fonts-freefont-ttf
+    apt_install fonts-liberation fonts-freefont-ttf
     if [[ "$INSTALL_MS_FONTS" =~ ^[Yy]$ ]]; then
         echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
-        apt-get install $APT_FLAGS ttf-mscorefonts-installer
+        apt_install ttf-mscorefonts-installer
     fi
     fc-cache -f -v
 else
@@ -1449,7 +1580,7 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
         # On Ubuntu 24.04, system python is 3.12. Install 3.14 via deadsnakes PPA.
         wait_for_apt
         add-apt-repository -y ppa:deadsnakes/ppa
-        apt-get update && apt-get install $APT_FLAGS python3.14-full python3.14-venv pipx
+        apt-get update && apt_install python3.14-full python3.14-venv pipx
 
         # Keep 3.12 as default, 3.14 available explicitly via python3.14
         if command -v python3.12 &>/dev/null; then
@@ -1460,7 +1591,7 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     elif [[ "$VERSION_ID" == "26.04" ]]; then
         # On Ubuntu 26.04, system python is 3.14. Just ensure venv and pipx are present.
         wait_for_apt
-        apt-get update && apt-get install $APT_FLAGS python3.14-venv pipx
+        apt-get update && apt_install python3.14-venv pipx
     fi
 
     # Install virtualenv globally via pipx
@@ -1481,6 +1612,7 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     echo "Python 3.14 and packaging tools (pipx/virtualenv) installed."
 else
     echo "Skipping Python 3.14 installation."
+
 fi
 
 
@@ -1530,7 +1662,7 @@ echo ""
 echo "--- 25. Install weasyprint ---"
 if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt-get install $APT_FLAGS weasyprint
+    apt_install weasyprint
 else
     echo "Skipping weasyprint installation."
 fi
@@ -1540,7 +1672,7 @@ echo ""
 echo "--- 26. Install imagemagick ---"
 if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt-get install $APT_FLAGS imagemagick
+    apt_install imagemagick
 else
     echo "Skipping imagemagick installation."
 fi
@@ -1556,7 +1688,7 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     fi
     wait_for_apt
     # apache2-utils needed for htpasswd utility
-    apt-get install $APT_FLAGS nginx apache2-utils
+    apt_install nginx apache2-utils
     usermod -a -G $USER_SUDO_USER_USERNAME www-data
     systemctl enable --now nginx || true
 
@@ -1578,7 +1710,7 @@ if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
         apt-get purge -y valkey-server valkey-tools || true
     fi
     wait_for_apt
-    apt-get install $APT_FLAGS valkey-server valkey-tools
+    apt_install valkey-server valkey-tools
     systemctl enable --now valkey-server || true
 else
     echo "Skipping Valkey installation."
@@ -1594,7 +1726,7 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS mysql-server mysqltuner mysql-shell
+    apt_install mysql-server mysqltuner mysql-shell
     systemctl enable --now mysql.service || echo "Warning: service failed to start"
 
     # Wait for MySQL to create the socket file before proceeding
@@ -1615,7 +1747,7 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
 
     # Secure MySQL using the provided password
     mysql_root <<EOS
-ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASS_ESCAPED}';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASSWORD_ESCAPED}';
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 DROP DATABASE IF EXISTS test;
@@ -1624,10 +1756,13 @@ EOS
 
     mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
 
-    # Clear the variable from memory for security
-    unset MYSQL_PASS
-    #unset MYSQL_PASS_CONFIRM
-    unset MYSQL_PASS_ESCAPED
+    # Create a passwordless read-only healthcheck user for the health check script
+    mysql_root <<EOS
+CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
+GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
+FLUSH PRIVILEGES;
+EOS
+
     echo "MySQL root password set and security initialized."
 else
     echo "Skipping MySQL installation."
@@ -1638,11 +1773,11 @@ echo "--- 29b. Install MariaDB ---"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MARIADB" == 'reinstall' ]]; then
         echo "Uninstall mariadb-server"
-        apt-get purge -y mariadb-server mysqltuner || true
+        apt-get purge -y mariadb-server mariadb-client mariadb-client-compat mysqltuner || true
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS mariadb-server mysqltuner
+    apt_install mariadb-server mariadb-client mariadb-client-compat mysqltuner
     systemctl enable --now mariadb.service || echo "Warning: service failed to start"
 
     echo "Waiting for MariaDB to start..."
@@ -1662,17 +1797,22 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
 
     # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported)
     mysql_root <<EOS
-ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASS_ESCAPED}');
+ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASSWORD_ESCAPED}');
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 DROP DATABASE IF EXISTS test;
 FLUSH PRIVILEGES;
 EOS
 
-    mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
+    mariadb-tzinfo-to-sql /usr/share/zoneinfo | mysql_root mysql
 
-    unset MYSQL_PASS
-    unset MYSQL_PASS_ESCAPED
+    # Create a passwordless read-only healthcheck user for the health check script
+    mysql_root <<EOS
+CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
+GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
+FLUSH PRIVILEGES;
+EOS
+
     echo "MariaDB root password set and security initialized."
 else
     echo "Skipping MariaDB installation."
@@ -1715,14 +1855,14 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
         apt-get update -y
 
         # Install PostgreSQL 18
-        apt-get install $APT_FLAGS postgresql-$PG_VERSION
-        apt-get install $APT_FLAGS postgresql-client-$PG_VERSION
+        apt_install postgresql-$PG_VERSION
+        apt_install postgresql-client-$PG_VERSION
 
         # Optional: Install Useful PostgreSQL Tools
-        apt-get install $APT_FLAGS postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3
+        apt_install postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3
 
         # Prevent automatically installing v16 by using one of the two:
-        # apt-get install $APT_FLAGS postgresql-$PG_VERSION postgresql-client-$PG_VERSION --no-install-recommends
+        # apt_install postgresql-$PG_VERSION postgresql-client-$PG_VERSION --no-install-recommends
         # apt-get purge -y postgresql-16 || true
 
         echo "PostgreSQL version installed:"
@@ -1757,7 +1897,7 @@ if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS mosquitto mosquitto-clients
+    apt_install mosquitto mosquitto-clients
     mkdir -p /var/log/mosquitto/ /var/run/mosquitto/
     chown mosquitto: /var/log/mosquitto
 
@@ -1779,7 +1919,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS postfix mailutils libsasl2-modules
+    apt_install postfix mailutils libsasl2-modules
 
     # Postfix config is applied after installation alongside other services.
     # We just ensure the service is enabled here; section 36 restarts it
@@ -1800,7 +1940,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
         apt-get purge -y monit  || true
     fi
     wait_for_apt
-    apt-get install $APT_FLAGS monit
+    apt_install monit
     systemctl enable --now monit.service || echo "Warning: service failed to start"
 else
     echo "Skipping Monit installation."
@@ -1823,7 +1963,7 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
         sh /tmp/webmin-setup-repo.sh --force
         rm -f /tmp/webmin-setup-repo.sh
         wait_for_apt
-        apt-get install $APT_FLAGS webmin --install-recommends
+        apt_install webmin --install-recommends
         systemctl enable --now webmin.service || echo "Warning: service failed to start"
     else
         echo "Could not download Webmin setup script. Skipping installation."
@@ -1858,7 +1998,7 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
         apt-get update
         sleep 1
         wait_for_apt
-        apt-get install $APT_FLAGS grafana
+        apt_install grafana
 
         # ensure group grafana exists
         if ! getent group grafana >/dev/null; then
@@ -1975,7 +2115,7 @@ if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS fail2ban
+    apt_install fail2ban
     cat <<'EOF' > /etc/fail2ban/jail.local
 [sshd]
 enabled = true
@@ -2003,7 +2143,7 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS auditd
+    apt_install auditd
     systemctl enable --now auditd.service || echo "Warning: service failed to start"
 
     # Configuring Auditd Rules for Wazuh
@@ -2015,6 +2155,9 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     sed -i 's/^-a always,exit -F arch=b64 -S connect -F auid>=1000 -F auid!=4294967295 -F key=export/#&/' /etc/audit/rules.d/audit.rules
     sed -i '/-u chrony/s/^/#/' /etc/audit/rules.d/audit.rules
     sed -i '/-u ntp/s/^/#/' /etc/audit/rules.d/audit.rules
+
+    # increase the backlog limit
+    echo "-b 8192" > /etc/audit/rules.d/00-backlog.conf
 
     augenrules --load
 
@@ -2062,7 +2205,7 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt-get install $APT_FLAGS ipset
+    apt_install ipset
 
     # Backup the original ufw after.init if not already backed up
     if [ ! -f /etc/ufw/after.init.orig ]; then
@@ -2135,7 +2278,7 @@ if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # Then install suricata with a 'force-overwrite' flag just in case
     wait_for_apt
     apt-get purge -y suricata-update
-    apt-get install $APT_FLAGS -o Dpkg::Options::="--force-overwrite" suricata
+    apt_install -o Dpkg::Options::="--force-overwrite" suricata
 
     # Configure Suricata to use the correct network interface. Commented, because seems to be taken care of by 'apt-get install'
     # Update the interface in the config file
@@ -2193,7 +2336,7 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
             apt-get update
 
             wait_for_apt
-            apt-get install $APT_FLAGS wazuh-agent
+            apt_install wazuh-agent
 
             # Configure Manager Address
             sed -i "s/<address>MANAGER_IP<\/address>/<address>$WAZUH_MANAGER<\/address>/" /var/ossec/etc/ossec.conf
@@ -2241,7 +2384,7 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
     # Always ensure utilities and profiles are installed
     wait_for_apt
-    apt-get install $APT_FLAGS apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra
+    apt_install apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra
 
     if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ ]]; then
         # Ensure AppArmor is enabled in grub if not already
@@ -2300,7 +2443,7 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
                 continue
             fi
             # Generate minimal profile and set to complain mode
-            aa-genprof "$SERVICE_BIN" -f /dev/null 2>/dev/null || true
+            # hangs waiting for input: aa-genprof "$SERVICE_BIN" -f /dev/null 2>/dev/null || true
             aa-complain "$SERVICE_BIN" 2>/dev/null \
                 && echo "  [~] $(basename $SERVICE_BIN): complain mode (run sudo aa-logprof after normal use)" \
                 || echo "  [!] $(basename $SERVICE_BIN): failed to set complain mode"
@@ -2344,7 +2487,7 @@ check_service suricata PROMPT_SURICATA ISINSTALLED_SURICATA
 check_service wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
 
 
-if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
     echo "  Copying MySQL config files"
 
     if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
@@ -2363,13 +2506,13 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     fi
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf ]]; then
-        # limits.conf changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
         mkdir -p /etc/systemd/system/mysql.service.d
         cp $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf /etc/systemd/system/mysql.service.d/override.conf
     fi
 fi
 
-if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ && "$ISINSTALLED_MARIADB" == "y" ]]; then
     echo "  Copying MariaDB config files"
     # MariaDB uses the same template as MySQL — reuse mysqld.cnf with same placeholders
     if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
@@ -2389,7 +2532,7 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_NGINX" =~ ^[Yy]$ && "$ISINSTALLED_NGINX" == "y" ]]; then
     echo "  Copying Nginx config files"
     if [[ -f $CONFIG_DIR/etc/nginx/nginx/nginx.conf ]]; then
         cp $CONFIG_DIR/etc/nginx/nginx.conf /etc/nginx/nginx.conf
@@ -2402,20 +2545,20 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     fi
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf ]]; then
-        # limits.conf changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
         mkdir -p /etc/systemd/system/nginx.service.d
         cp $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf /etc/systemd/system/nginx.service.d/override.conf
     fi
 fi
 
-if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ && "$ISINSTALLED_VALKEY" == "y" ]]; then
     echo "  Copying Valkey config files"
     if [[ -f $CONFIG_DIR/etc/valkey/valkey.conf ]]; then
         cp $CONFIG_DIR/etc/valkey/valkey.conf /etc/valkey/valkey.conf
     fi
 fi
 
-if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ && "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
     echo "  Copying PostgreSQL config files"
     PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
     PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
@@ -2438,22 +2581,18 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
     fi
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf ]]; then
-        # limits.conf changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
         mkdir -p /etc/systemd/system/postgresql.service.d
         cp $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf /etc/systemd/system/postgresql.service.d/override.conf
     fi
 
     # Set superuser password (PostgreSQL must be running)
     echo "  Setting PostgreSQL superuser password..."
-    PG_PASS_ESCAPED=$(printf "%s" "$PG_PASS" | sed "s/'/''/g")
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${PG_PASS_ESCAPED}';" || true
-
-    # Clear the variable from memory for security
-    unset PG_PASS
-    unset PG_PASS_ESCAPED
+    PG_PASSWORD_ESCAPED=$(printf "%s" "$PG_PASSWORD" | sed "s/'/''/g")
+    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${PG_PASSWORD_ESCAPED}';" || true
 fi
 
-if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ && "$ISINSTALLED_GRAFANA" == "y" ]]; then
     echo "  Copying Grafana config files"
 
     if [[ -f $CONFIG_DIR/etc/grafana/grafana.ini ]]; then
@@ -2473,7 +2612,7 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ && "$ISINSTALLED_FORGEJO" == "y" ]]; then
     echo "  Copying Forgejo config files"
     if [[ -f $CONFIG_DIR/etc/forgejo/app.ini ]]; then
         cp $CONFIG_DIR/etc/forgejo/app.ini /etc/forgejo/app.ini
@@ -2492,7 +2631,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ && "$ISINSTALLED_POSTFIX" == "y" ]]; then
     echo "  Configuring Postfix relay"
 
     if [[ -f $CONFIG_DIR/etc/postfix/main.cf ]]; then
@@ -2541,7 +2680,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     systemctl enable --now postfix || echo "Warning: could not start postfix"
 fi
 
-if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
     echo "  Copying Monit config files"
 
     if [[ -f $CONFIG_DIR/etc/monit/monitrc ]]; then
@@ -2612,6 +2751,105 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     done
 fi
 
+
+# Wazuh Agent log monitoring configuration
+if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ && "$ISINSTALLED_WAZUH" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
+    echo "  Configuring Wazuh log monitoring..."
+
+    append_localfile_to_ossec() {
+        local guard="$1"
+        local xml="$2"
+        if ! grep -qF "$guard" /var/ossec/etc/ossec.conf; then
+            printf "\n<ossec_config>\n%s\n</ossec_config>\n" "$xml" \
+                >> /var/ossec/etc/ossec.conf
+            echo "  [+] Added log monitor: $guard"
+        else
+            echo "  [=] Already present: $guard"
+        fi
+    }
+
+    append_localfile_to_ossec "/var/log/syslog" \
+'  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/syslog</location>
+  </localfile>'
+
+    if [[ "$ISINSTALLED_AUDITD" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/audit/audit.log" \
+'  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/nginx/access.log" \
+'  <localfile>
+    <log_format>apache</log_format>
+    <location>/var/log/nginx/access.log</location>
+  </localfile>
+  <localfile>
+    <log_format>apache</log_format>
+    <location>/var/log/nginx/error.log</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/mysql/error.log" \
+'  <localfile>
+    <log_format>mysql_log</log_format>
+    <location>/var/log/mysql/error.log</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+        append_localfile_to_ossec "postgresql-${PG_VERSION}-main.log" \
+"  <localfile>
+    <log_format>postgresql_log</log_format>
+    <location>/var/log/postgresql/postgresql-${PG_VERSION}-main.log</location>
+  </localfile>"
+    fi
+
+    if [[ "$ISINSTALLED_GRAFANA" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/grafana/grafana.log" \
+'  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/grafana/grafana.log</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_FORGEJO" == "y" ]]; then
+        append_localfile_to_ossec "/var/lib/forgejo/log/gitea.log" \
+'  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/lib/forgejo/log/gitea.log</location>
+  </localfile>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/lib/forgejo/log/access.log</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_SURICATA" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/suricata/eve.json" \
+'  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/suricata/eve.json</location>
+  </localfile>'
+    fi
+
+    if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
+        append_localfile_to_ossec "/var/log/mail.log" \
+'  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/mail.log</location>
+  </localfile>'
+    fi
+
+    echo "  Wazuh log monitoring configured."
+fi
+
+
 # Restart services to apply new configs
 echo "  Restarting services to apply configs"
 [[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
@@ -2624,6 +2862,8 @@ echo "  Restarting services to apply configs"
 [[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
 [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
 [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
+[[ "$ISINSTALLED_WAZUH" == "y" ]]      && systemctl restart wazuh-agent     || true
+
 
 echo "Configuration files installed."
 
@@ -2645,12 +2885,12 @@ else
 fi
 apt-get -y autoremove || true
 
-echo "Restarting unattended upgrades (takes a while)"
-systemctl start apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer || true
+echo "Restarting unattended upgrades"
+restart_autoupdate
 
 
 echo ""
-echo "--- 46. Generating Health Check Script 'ubuntu_health_check.sh' ---"
+echo "--- 46. Generating Health Check Script ---"
 HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
 # We start the file with the header and basic checks.
 # use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
@@ -2889,7 +3129,106 @@ check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/ap
 check_port "webmin"         "10000"
 
 echo ""
+echo "Smoke Tests"
+echo "==========================================="
+
+smoke_ok()   { echo -e "  ${GREEN}[V]${NC} $1"; }
+smoke_warn() { echo -e "  ${RED}[!]${NC} $1"; }
+smoke_skip() { echo "  [-] $1 (not installed)"; }
+
+smoke_http() {
+    local label="$1" url="$2" expected="$3" extra_args="${4:-}"
+    local code
+    # set -4 to use ipv4, since curl might use ipv6 otherwise which will fail for e.g. monit
+    code=$(curl -s -o /dev/null -w "%{http_code}" -4 $extra_args --max-time 5 "$url" 2>/dev/null || true)
+    if [[ -z "$code" || "$code" == "000" ]]; then
+        smoke_warn "$label: could not connect — is the service running?"
+    elif [[ "$code" == "$expected" || ( "$code" =~ ^(200|301|302|401|403)$ && "$expected" == "ok" ) ]]; then
+        smoke_ok "$label: HTTP $code"
+    else
+        smoke_warn "$label: unexpected HTTP $code (expected $expected)"
+    fi
+}
+
+# HTTP checks
+if systemctl is-active --quiet nginx 2>/dev/null; then
+    smoke_http "Nginx HTTP"  "http://localhost"  "ok"
+    if [[ -f /etc/letsencrypt/live/*/fullchain.pem ]] || grep -qr "ssl_certificate" /etc/nginx/sites-enabled/ 2>/dev/null; then
+        smoke_http "Nginx HTTPS" "https://localhost" "ok" "-k"
+    else
+        smoke_skip "Nginx HTTPS (no SSL certificate configured)"
+    fi
+else smoke_skip "Nginx"; fi
+
+if systemctl is-active --quiet grafana-server 2>/dev/null; then
+    smoke_http "Grafana" "http://localhost:3000" "ok"
+else smoke_skip "Grafana"; fi
+
+if systemctl is-active --quiet forgejo 2>/dev/null; then
+    FORGEJO_HC_PORT=$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)
+    smoke_http "Forgejo" "http://localhost:${FORGEJO_HC_PORT}" "ok"
+else smoke_skip "Forgejo"; fi
+
+if systemctl is-active --quiet monit 2>/dev/null; then
+    smoke_http "Monit" "http://localhost:2812" "401"
+else smoke_skip "Monit"; fi
+
+if systemctl is-active --quiet webmin 2>/dev/null; then
+    smoke_http "Webmin" "https://localhost:10000" "ok" "-k"
+else smoke_skip "Webmin"; fi
+
+# Database checks
+if systemctl is-active --quiet mysql 2>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MySQL: connection OK"
+    else
+        smoke_warn "MySQL: connection failed — check service status"
+    fi
+else smoke_skip "MySQL"; fi
+
+if systemctl is-active --quiet mariadb 2>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MariaDB: connection OK"
+    else
+        smoke_warn "MariaDB: connection failed — check service status"
+    fi
+else smoke_skip "MariaDB"; fi
+
+if systemctl is-active --quiet postgresql 2>/dev/null; then
+    if sudo -u postgres psql -c "SELECT 1;" &>/dev/null; then
+        smoke_ok "PostgreSQL: connection OK"
+    else
+        smoke_warn "PostgreSQL: connection failed — check service status"
+    fi
+else smoke_skip "PostgreSQL"; fi
+
+if systemctl is-active --quiet valkey-server 2>/dev/null; then
+    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+        smoke_ok "Valkey: PONG received"
+    else
+        smoke_warn "Valkey: no PONG — check service status"
+    fi
+else smoke_skip "Valkey"; fi
+
+if systemctl is-active --quiet mosquitto 2>/dev/null; then
+    TMPFILE=$(mktemp)
+    mosquitto_sub -t "_smoke_test" -C 1 -W 3 > "$TMPFILE" 2>/dev/null &
+    MSUB_PID=$!
+    sleep 0.3
+    mosquitto_pub -t "_smoke_test" -m "ok" -q 0 2>/dev/null || true
+    wait $MSUB_PID || true
+    MSG=$(cat "$TMPFILE")
+    rm -f "$TMPFILE"
+    if [[ "$MSG" == "ok" ]]; then
+        smoke_ok "Mosquitto: pub/sub OK"
+    else
+        smoke_warn "Mosquitto: pub/sub failed — check service status"
+    fi
+else smoke_skip "Mosquitto"; fi
+
+echo ""
 EOF
+echo "Script $HEALTH_CHECK_SCRIPT created"
 
 chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME $HEALTH_CHECK_SCRIPT
 chmod +x $HEALTH_CHECK_SCRIPT
@@ -2898,107 +3237,48 @@ chmod +x $HEALTH_CHECK_SCRIPT
 $HEALTH_CHECK_SCRIPT
 
 
-
-
 echo ""
-echo "--- 48. Smoke Tests ---"
+echo "--- 48. Postfix Test ---"
 
-smoke_ok()   { echo "  [V] $1"; }
-smoke_warn() { echo "  [!] $1"; }
-smoke_skip() { echo "  [-] $1 (not installed)"; }
-
-smoke_http() {
-    local label="$1" url="$2" expected="$3" extra_args="${4:-}"
-    local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" $extra_args --max-time 5 "$url" 2>/dev/null)
-    if [[ "$code" == "$expected" || "$code" =~ ^(200|301|302|401|403)$ && "$expected" == "ok" ]]; then
-        smoke_ok "$label: HTTP $code"
-    else
-        smoke_warn "$label: unexpected HTTP $code (expected $expected) — check service logs"
-    fi
-}
-
-# HTTP/HTTPS checks
-if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
-    smoke_http "Nginx HTTP"     "http://localhost"       "ok"
-    smoke_http "Nginx HTTPS"    "https://localhost"      "ok" "-k"
-else smoke_skip "Nginx"; fi
-
-if [[ "$ISINSTALLED_GRAFANA" == "y" ]]; then
-    smoke_http "Grafana"        "http://localhost:3000"  "ok"
-else smoke_skip "Grafana"; fi
-
-if [[ "$ISINSTALLED_FORGEJO" == "y" ]]; then
-    smoke_http "Forgejo"        "http://localhost:${FORGEJO_PORT}" "ok"
-else smoke_skip "Forgejo"; fi
-
-if [[ "$ISINSTALLED_MONIT" == "y" ]]; then
-    smoke_http "Monit"          "http://localhost:2812"  "401"
-else smoke_skip "Monit"; fi
-
-if [[ "$ISINSTALLED_WEBMIN" == "y" ]]; then
-    smoke_http "Webmin"         "https://localhost:10000" "ok" "-k"
-else smoke_skip "Webmin"; fi
-
-# Database checks
-if [[ "$ISINSTALLED_MYSQL" == "y" ]]; then
-    if mysql_root -e "SELECT 1;" mysql &>/dev/null; then
-        smoke_ok "MySQL: connection OK"
-    else
-        smoke_warn "MySQL: connection failed — check root password and service status"
-    fi
-else smoke_skip "MySQL"; fi
-
-if [[ "$ISINSTALLED_MARIADB" == "y" ]]; then
-    if mysql_root -e "SELECT 1;" mysql &>/dev/null; then
-        smoke_ok "MariaDB: connection OK"
-    else
-        smoke_warn "MariaDB: connection failed — check root password and service status"
-    fi
-else smoke_skip "MariaDB"; fi
-
-if [[ "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-    if sudo -u postgres psql -c "SELECT 1;" &>/dev/null; then
-        smoke_ok "PostgreSQL: connection OK"
-    else
-        smoke_warn "PostgreSQL: connection failed — check service status"
-    fi
-else smoke_skip "PostgreSQL"; fi
-
-if [[ "$ISINSTALLED_VALKEY" == "y" ]]; then
-    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
-        smoke_ok "Valkey: PONG received"
-    else
-        smoke_warn "Valkey: no PONG — check service status"
-    fi
-else smoke_skip "Valkey"; fi
-
-if [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]; then
-    # Publish a test message and subscribe to receive it (2s timeout)
-    mosquitto_pub -t "_smoke_test" -m "ok" -q 0 2>/dev/null
-    MSG=$(mosquitto_sub -t "_smoke_test" -C 1 -W 2 2>/dev/null)
-    if [[ "$MSG" == "ok" ]]; then
-        smoke_ok "Mosquitto: pub/sub OK"
-    else
-        smoke_warn "Mosquitto: pub/sub failed — check service status"
-    fi
-else smoke_skip "Mosquitto"; fi
-
-# Postfix test email
+# HTTP, database, Valkey and Mosquitto tests are in the health check script.
+# Only the Postfix test email runs here since we don't want it firing on every health check.
 if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
     echo ""
     echo "  Sending Postfix test mail to $POSTFIX_ROOT_ALIAS..."
     echo "Postfix test mail from $(hostname) after provisioning." \
         | mail -s "Postfix Test - $(hostname)" "$POSTFIX_ROOT_ALIAS" \
-        && smoke_ok "Postfix: test mail sent to $POSTFIX_ROOT_ALIAS" \
-        || smoke_warn "Postfix: test mail failed — check: sudo tail -n 20 /var/log/mail.log"
-else smoke_skip "Postfix"; fi
+        && echo "  [V] Test mail sent to $POSTFIX_ROOT_ALIAS." \
+        || echo "  [!] Test mail failed — check: sudo tail -n 20 /var/log/mail.log"
+else
+    echo "  Postfix not installed — skipping test email."
+fi
 
 
+# Clear password variables
+unset MYSQL_PASSWORD
+unset MYSQL_PASSWORD_ESCAPED
+unset PG_PASSWORD
+unset PG_PASSWORD_ESCAPED
+unset MONIT_MAILSERVER_PASSWORD
+unset POSTFIX_RELAY_PASSWORD
+unset GRAFANA_SMTP_PASSWORD
+unset FORGEJO_SMTP_PASSWORD
 
 
 echo ""
 echo "--- 49. Setup Complete ---"
+
+if [ ${#APT_PACKAGES_NOT_INSTALLED[@]} -ne 0 ]; then
+    echo "Failed packages"
+    echo "==========================================="
+    echo "The following packages could NOT be installed"
+    for PKG in "${APT_PACKAGES_NOT_INSTALLED[@]}"; do
+        echo -e "  ${RED}[!]${NC} $PKG"; }
+    done
+    echo ""
+fi
+
+
 echo "Logfile written to: $LOG_FILE"
 echo "Config backup written to current directory by ubuntu_backup_config.sh"
 

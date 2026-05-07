@@ -1,7 +1,7 @@
 # Ubuntu Server Provisioning
 
 An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server to 
-quickly provision a secure webserver with **Auditd**, **Fail2Ban**, **Forgejo**, **Grafana**, **Monit**, **Mosquitto**, **MySQL**, **MariaDBL**, **Nginx**, **Postfix**, **PostgreSQL**, **Suricata**, **Valkey**, **Wazuh Agent**, **Webmin**.
+quickly provision a secure webserver with **Auditd**, **Fail2Ban**, **Forgejo**, **Grafana**, **Monit**, **Mosquitto**, **MySQL**, **MariaDB**, **Nginx**, **Postfix**, **PostgreSQL**, **Suricata**, **Valkey**, **Wazuh Agent**, **Webmin**.
 The script is re-entrant, but best run on a fresh **minimized** or **standard** install.
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts.
 
@@ -94,8 +94,8 @@ LVM_TARGET_GB=all
 CONFIGURE_SWAP=y
 SWAP_SIZE_GB=2
 TUNE_SYSTEM=y
-APT_DAILY_HOUR=10
-APT_UPGRADE_HOUR=11
+AUTO_UPDATE_DAILY_HOUR=10
+AUTO_UPGRADE_DAILY_HOUR=11
 DISABLE_TX_OFFLOAD=n
 CONFIGURE_APPARMOR=y
 APPARMOR_ENABLE=y
@@ -146,7 +146,7 @@ MYSQL_SORT_BUFFER_KB=512
 MYSQL_READ_BUFFER_KB=128
 MYSQL_READ_RND_BUFFER_KB=1024
 # Passwords intentionally omitted - will always be prompted:
-# MYSQL_PASS=
+# MYSQL_PASSWORD=
 
 # PostgreSQL tuning - leave blank to use auto-calculated defaults based on available memory
 PG_MAX_CONNECTIONS=100
@@ -445,7 +445,20 @@ After provisioning, a custom health check script is generated at:
 /home/<username>/ubuntu_health_check.sh
 ```
 
-Run it any time (as root) to get a colour-coded status report covering SSH config, swap settings, UFW state, and every installed service.
+Run it any time (as root) to get a colour-coded status report covering:
+
+- SSH configuration
+- Swap and disk usage
+- Memory usage
+- TCP transmit offloading status
+- Failed systemd units
+- Recent failed SSH logins
+- Pending package updates
+- Service status for all installed services
+- AppArmor profile status per service
+- Recent AppArmor denials
+- Port usage with UFW allow/block status
+- **Smoke tests** — HTTP connectivity checks for Nginx, Grafana, Forgejo, Monit, and Webmin; database connection tests for MySQL/MariaDB (via a passwordless `healthcheck` user), PostgreSQL, and Valkey; and a Mosquitto pub/sub test
 
 ```bash
 sudo ~/ubuntu_health_check.sh
@@ -455,6 +468,8 @@ sudo ~/ubuntu_health_check.sh
 
 ## Notes
 
+- **MySQL / MariaDB health check user:** a passwordless `healthcheck@localhost` user with SELECT-only access is created during installation. The health check script uses this user for connection tests — no root credentials are stored anywhere in the health check script.
+- **curl and IPv6:** on Ubuntu 26.04, curl prefers IPv6 when connecting to `localhost`. The health check smoke tests use `curl -4` to force IPv4, ensuring consistent behaviour regardless of how `localhost` resolves on the system.
 - **Idempotent-friendly:** the script detects already-installed services and prompts to `reinstall` rather than blindly overwriting. On re-runs, services that were skipped are still detected as installed and their configs updated.
 - **`INSTALL_DEFAULT`:** set this in the conf file to apply a default `y` or `n` to all `INSTALL_` and `CONFIGURE_` variables not explicitly set. Useful for targeted re-runs — e.g. `INSTALL_DEFAULT=n` with `INSTALL_POSTFIX=y` to update only Postfix.
 - **SSH lockout prevention:** if you choose to harden SSH, the script requires a valid public key before proceeding — it will abort rather than risk locking you out.
@@ -480,8 +495,8 @@ sudo ~/ubuntu_health_check.sh
 - Does not configure network interfaces or disk partitions beyond LVM resizing and swap creation.
 - Does not back up or restore MySQL/PostgreSQL databases — only service configuration files.
 - Requires internet access at runtime to download packages and (for Forgejo and PyPy) fetch the latest release version.
-- `limits.conf` changes only apply to PAM-authenticated sessions. Services managed by systemd use their own `LimitNOFILE` directives in their unit files.
-- All blocked services are only accessible via localhost or through Nginx as a reverse proxy.
+- `/etc/security/limits.d/` changes only apply to PAM-authenticated sessions. Services managed by systemd use their own `LimitNOFILE` directives in their unit files or overrides.
+- All blocked services are only accessible via localhost or through Nginx as a reverse proxy (not configured).
 
 ---
 

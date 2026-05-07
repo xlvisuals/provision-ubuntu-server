@@ -110,6 +110,7 @@ ufw status | grep -q "active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${R
 check_service "nginx" "NGINX Web Server"
 check_service "valkey-server" "Valkey Server"
 check_service "mysql" "MySQL Server"
+check_service "mariadb" "MariaDB Server"
 check_service "postgresql" "PostgreSQL Server"
 check_service "mosquitto" "Mosquitto Broker"
 check_service "monit" "Monit Server"
@@ -163,6 +164,7 @@ if command -v aa-status &>/dev/null; then
 
         check_apparmor "Nginx"          "nginx"              "nginx"
         check_apparmor "MySQL"          "/usr/sbin/mysqld"   "mysql"
+        check_apparmor "MariaDB"        "/usr/sbin/mariadbd" "mariadb"
         check_apparmor "PostgreSQL"     "postgres"           "postgresql"
         check_apparmor "Valkey"         "valkey"             "valkey-server"
         check_apparmor "Mosquitto"      "mosquitto"          "mosquitto"
@@ -219,6 +221,7 @@ check_port() {
 check_port "nginx"          "80"
 check_port "nginx"          "443"
 check_port "mysql"          "3306"
+check_port "mariadb"        "3306"
 check_port "postgresql"     "5432"
 check_port "valkey-server"  "6379"
 check_port "mosquitto"      "1883"
@@ -227,5 +230,103 @@ check_port "monit"          "2812"
 check_port "grafana-server" "3000"
 check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
 check_port "webmin"         "10000"
+
+echo ""
+echo "Smoke Tests"
+echo "==========================================="
+
+smoke_ok()   { echo -e "  ${GREEN}[V]${NC} $1"; }
+smoke_warn() { echo -e "  ${RED}[!]${NC} $1"; }
+smoke_skip() { echo "  [-] $1 (not installed)"; }
+
+smoke_http() {
+    local label="$1" url="$2" expected="$3" extra_args="${4:-}"
+    local code
+    # set -4 to use ipv4, since curl might use ipv6 otherwise which will fail for e.g. monit
+    code=$(curl -s -o /dev/null -w "%{http_code}" -4 $extra_args --max-time 5 "$url" 2>/dev/null || true)
+    if [[ -z "$code" || "$code" == "000" ]]; then
+        smoke_warn "$label: could not connect — is the service running?"
+    elif [[ "$code" == "$expected" || ( "$code" =~ ^(200|301|302|401|403)$ && "$expected" == "ok" ) ]]; then
+        smoke_ok "$label: HTTP $code"
+    else
+        smoke_warn "$label: unexpected HTTP $code (expected $expected)"
+    fi
+}
+
+# HTTP checks
+if systemctl is-active --quiet nginx 2>/dev/null; then
+    smoke_http "Nginx HTTP"  "http://localhost"  "ok"
+    if [[ -f /etc/letsencrypt/live/*/fullchain.pem ]] || grep -qr "ssl_certificate" /etc/nginx/sites-enabled/ 2>/dev/null; then
+        smoke_http "Nginx HTTPS" "https://localhost" "ok" "-k"
+    else
+        smoke_skip "Nginx HTTPS (no SSL certificate configured)"
+    fi
+else smoke_skip "Nginx"; fi
+
+if systemctl is-active --quiet grafana-server 2>/dev/null; then
+    smoke_http "Grafana" "http://localhost:3000" "ok"
+else smoke_skip "Grafana"; fi
+
+if systemctl is-active --quiet forgejo 2>/dev/null; then
+    FORGEJO_HC_PORT=$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)
+    smoke_http "Forgejo" "http://localhost:${FORGEJO_HC_PORT}" "ok"
+else smoke_skip "Forgejo"; fi
+
+if systemctl is-active --quiet monit 2>/dev/null; then
+    smoke_http "Monit" "http://localhost:2812" "401"
+else smoke_skip "Monit"; fi
+
+if systemctl is-active --quiet webmin 2>/dev/null; then
+    smoke_http "Webmin" "https://localhost:10000" "ok" "-k"
+else smoke_skip "Webmin"; fi
+
+# Database checks
+if systemctl is-active --quiet mysql 2>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MySQL: connection OK"
+    else
+        smoke_warn "MySQL: connection failed — check service status"
+    fi
+else smoke_skip "MySQL"; fi
+
+if systemctl is-active --quiet mariadb 2>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+        smoke_ok "MariaDB: connection OK"
+    else
+        smoke_warn "MariaDB: connection failed — check service status"
+    fi
+else smoke_skip "MariaDB"; fi
+
+if systemctl is-active --quiet postgresql 2>/dev/null; then
+    if sudo -u postgres psql -c "SELECT 1;" &>/dev/null; then
+        smoke_ok "PostgreSQL: connection OK"
+    else
+        smoke_warn "PostgreSQL: connection failed — check service status"
+    fi
+else smoke_skip "PostgreSQL"; fi
+
+if systemctl is-active --quiet valkey-server 2>/dev/null; then
+    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+        smoke_ok "Valkey: PONG received"
+    else
+        smoke_warn "Valkey: no PONG — check service status"
+    fi
+else smoke_skip "Valkey"; fi
+
+if systemctl is-active --quiet mosquitto 2>/dev/null; then
+    TMPFILE=$(mktemp)
+    mosquitto_sub -t "_smoke_test" -C 1 -W 3 > "$TMPFILE" 2>/dev/null &
+    MSUB_PID=$!
+    sleep 0.3
+    mosquitto_pub -t "_smoke_test" -m "ok" -q 0 2>/dev/null || true
+    wait $MSUB_PID || true
+    MSG=$(cat "$TMPFILE")
+    rm -f "$TMPFILE"
+    if [[ "$MSG" == "ok" ]]; then
+        smoke_ok "Mosquitto: pub/sub OK"
+    else
+        smoke_warn "Mosquitto: pub/sub failed — check service status"
+    fi
+else smoke_skip "Mosquitto"; fi
 
 echo ""
