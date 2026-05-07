@@ -1579,19 +1579,24 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     if [[ "$VERSION_ID" == "24.04" ]]; then
         # On Ubuntu 24.04, system python is 3.12. Install 3.14 via deadsnakes PPA.
         wait_for_apt
-        add-apt-repository -y ppa:deadsnakes/ppa
-        apt-get update && apt_install python3.14-full python3.14-venv pipx
+        if add-apt-repository -y ppa:deadsnakes/ppa 2>&1; then
+            apt-get update
+            apt_install python3.14-full python3.14-venv pipx
 
-        # Keep 3.12 as default, 3.14 available explicitly via python3.14
-        if command -v python3.12 &>/dev/null; then
-            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
-            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1
+            # Keep 3.12 as default, 3.14 available explicitly via python3.14
+            if command -v python3.12 &>/dev/null; then
+                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
+                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1
+            fi
+        else
+            echo "  [!] Warning: deadsnakes PPA unavailable — skipping Python 3.14 installation"
+            APT_PACKAGES_NOT_INSTALLED+=("python3.14-full" "python3.14-venv" "pipx")
         fi
 
     elif [[ "$VERSION_ID" == "26.04" ]]; then
         # On Ubuntu 26.04, system python is 3.14. Just ensure venv and pipx are present.
         wait_for_apt
-        apt-get update && apt_install python3.14-venv pipx
+        apt_install python3.14-venv pipx
     fi
 
     # Install virtualenv globally via pipx
@@ -1852,7 +1857,7 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
 
         # Update package lists
         wait_for_apt
-        apt-get update -y
+        apt-get update
 
         # Install PostgreSQL 18
         apt_install postgresql-$PG_VERSION
@@ -3273,7 +3278,7 @@ if [ ${#APT_PACKAGES_NOT_INSTALLED[@]} -ne 0 ]; then
     echo "==========================================="
     echo "The following packages could NOT be installed"
     for PKG in "${APT_PACKAGES_NOT_INSTALLED[@]}"; do
-        echo -e "  ${RED}[!]${NC} $PKG"; }
+        echo -e "  ${RED}[!]${NC} $PKG"
     done
     echo ""
 fi
