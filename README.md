@@ -65,6 +65,100 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 
 ---
 
+## Example Run
+
+Below is a typical interactive session showing all prompts for a full installation. Values shown are examples — your defaults will vary based on detected system state and previously installed services.
+
+```
+Configure installation options:
+Would you like to add a new sudo user? (y/n) : n
+Use current user 'example'? (y/n) : y
+Would you like to configure LVM disks? (y/n) : y
+  LVM detected, but no free space remains in Volume Group. Skipping.
+Would you like to configure swap space? (y/n) : y
+  Active swap detected. No changes.
+Would you like to tune the system? (y/n) : y
+  Hour to run apt-get update (0-23) : 10
+  Hour to run apt-get upgrade (0-23) : 11
+Would you like to uninstall packages? (y/n) : y
+Would you like to update packages? (y/n) : y
+Would you like to install new packages? (y/n) : y
+Would you like to configure ufw? (y/n) : y
+Would you like to configure ssh? (y/n) : y
+Would you like to install fonts? (y/n) : y
+   Install Microsoft core fonts? (y/n) : y
+Would you like to reinstall weasyprint? (y/n) : y
+Would you like to reinstall imagemagick? (y/n) : y
+Would you like to reinstall Python 3.14? (y/n) : y
+Would you like to install Pypy 3.11? (y/n) : n
+Would you like to reinstall nginx? (y/n) : y
+  nginx worker processes? : 2
+Would you like to reinstall valkey? (y/n) : y
+Would you like to reinstall MySQL? (y/n) : n
+Would you like to reinstall MariaDB? (y/n) : y
+  MariaDB root password : ********
+  InnoDB buffer pool chunk size (MB) : 128
+  InnoDB buffer pool instances (1-64) : 1
+  Max connections : 100
+  InnoDB log buffer size (MB) : 64
+  Binlog cache size (MB) : 16
+  Join buffer size (KB) : 512
+  Sort buffer size (KB) : 512
+  Read buffer size (KB) : 128
+  Read rnd buffer size (KB) : 1024
+Would you like to reinstall PostgreSQL 18? (y/n) : y
+  PostgreSQL superuser (postgres) password : ********
+  Max connections : 100
+  Available memory: 3868MB, CPU cores: 2
+  Suggested: shared_buffers=967MB, work_mem=9MB, effective_cache_size=2320MB
+  Shared buffers (MB) : 837
+  Work mem (MB) : 8
+  Effective cache size (MB) : 2010
+  Max worker processes (= cores) : 2
+  Max parallel workers (= cores) : 2
+  Max parallel workers per gather (= cores/2) : 1
+  Effective IO concurrency (SSD=100+, HDD=1) : 100
+Would you like to reinstall Mosquitto? (y/n) : y
+Would you like to reinstall Postfix (relay-only SMTP)? (y/n) : y
+  SMTP relay host (mailserver address) : mail.example.com
+  SMTP relay port : 587
+  SMTP relay username : example@example.com
+  SMTP relay password : ********
+  Mail domain (used in From address) : example.com
+  From address (e.g. root@domain.com) : example@example.com
+  Forward local root mail to (root alias) : example@example.com
+Would you like to reinstall Monit? (y/n) : y
+  Send Monit alerts via Postfix? (y/n) : y
+  Alert sender address : monit@example.com
+  Monit admin username : admin
+  Monit admin password : ********
+  Alert recipient address : example@example.com
+Would you like to reinstall Webmin? (y/n) : y
+Would you like to install Grafana? (y/n) : y
+  Send Grafana alerts via Postfix? (y/n) : y
+  From address : grafana@example.com
+  From name : Grafana
+Would you like to install Forgejo? (y/n) : y
+  Port 3000 is in use by Grafana. Enter Forgejo port : 3030
+  Enter Forgejo domain or ip : 172.16.71.131
+  Send Forgejo mail via Postfix? (y/n) : y
+  From address : forgejo@example.com
+Would you like to disable TCP transmit offloading? (y/n) : n
+Would you like to install Fail2Ban? (y/n) : y
+Would you like to install auditd? (y/n) : y
+Would you like to install IP blocklist? (y/n) : y
+Would you like to install Suricata IDS? (y/n) : y
+Would you like to install Wazuh Agent? (y/n) : y
+  Enter IP or Hostname of Wazuh Manager : 172.16.71.2
+Would you like to configure AppArmor? (y/n) : y
+  AppArmor status: installed=y, enabled=y, mode=enforce
+  Enable AppArmor? (y/n) : y
+  Set profiles to enforce mode? (y/n) : y
+Configuration complete.
+```
+
+---
+
 ## Configuration File
 
 For automated or repeatable deployments, create `ubuntu_provision.conf` in the same directory as the script. Any variable set in the conf file will skip its interactive prompt. Variables left unset will still be prompted at runtime. Passwords are always prompted interactively and are never read from the conf file.

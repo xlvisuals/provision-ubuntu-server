@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Xlvisuals Limited
-# 7 May 2026
+# 8 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -263,7 +263,7 @@ prompt_if_unset() {
         fi
     else
         if [[ "$silent" == "secret" ]]; then
-            echo "$prompt : [set]"
+            echo "$prompt : ********"
         else
             echo "$prompt : ${!varname}"
         fi
@@ -421,7 +421,7 @@ else
     # If run via sudo, offer the current user as the default
     if [[ -n "$REAL_USER" && "$REAL_USER" != "root" ]]; then
         #read -p "Use current user '$REAL_USER' for setup?    (y/n)" USER_USE_CURRENT_USERNAME
-        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'?          (y/n)" n "y"
+        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'? (y/n)" n "y"
         if [[ "$USER_USE_CURRENT_USERNAME" =~ ^[Yy]$ || -z "$USER_USE_CURRENT_USERNAME" ]]; then
             USER_SUDO_USER_USERNAME=$REAL_USER
         fi
@@ -1016,14 +1016,14 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
   echo "  Max parallel workers     : $PG_MAX_PARALLEL_WORKERS"
   echo "  Max parallel w/gather    : $PG_MAX_PARALLEL_WORKERS_PG"
   echo "  Effective IO concurr.    : $PG_EFFECTIVE_IO_CONCURRENCY"
-  echo "  Superuser password       : [set]"
+  echo "  Superuser password       : ********"
 fi
 echo "Install Mosquitto?         : $INSTALL_MOSQUITTO"
 echo "Install Postfix?           : $INSTALL_POSTFIX"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
   echo "  Relay host               : $POSTFIX_RELAY_HOST:$POSTFIX_RELAY_PORT"
   echo "  Relay username           : $POSTFIX_RELAY_USERNAME"
-  echo "  Relay password           : [set]"
+  echo "  Relay password           : ********"
   echo "  Mail domain              : $POSTFIX_DOMAIN"
   echo "  From address             : $POSTFIX_FROM_ADDRESS"
   echo "  Root alias               : $POSTFIX_ROOT_ALIAS"
@@ -1037,17 +1037,17 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     echo "  Mail server host       : $MONIT_MAILSERVER_HOST"
     echo "  Mail server port       : $MONIT_MAILSERVER_PORT"
     echo "  Mail server username   : $MONIT_MAILSERVER_USERNAME"
-    echo "  Mail server password   : [set]"
+    echo "  Mail server password   : ********"
   fi
   echo "  Monit admin username     : $MONIT_ADMIN_USERNAME"
-  echo "  Monit admin password     : [set]"
+  echo "  Monit admin password     : ********"
   echo "  Alert sender             : $MONIT_ALERT_SENDER"
   echo "  Alert recipient          : $MONIT_ALERT_RECIPIENT"
 fi
 echo "Install Webmin?            : $INSTALL_WEBMIN"
 echo "Install Grafana?           : $INSTALL_GRAFANA"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
-  echo "  Random secret            : [set]"
+  echo "  Random secret            : ********"
 
   if [[ "$GRAFANA_USE_POSTFIX" =~ ^[Yy]$ ]]; then
     echo "  Mail via                 : Postfix (localhost:25)"
@@ -1059,7 +1059,7 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
       echo "  SMTP host              : $GRAFANA_SMTP_HOST"
       echo "  SMTP port              : $GRAFANA_SMTP_PORT"
       echo "  SMTP user              : $GRAFANA_SMTP_USER"
-      echo "  SMTP password          : [set]"
+      echo "  SMTP password          : ********"
       echo "  From address           : $GRAFANA_SMTP_FROM_ADDRESS"
       echo "  From name              : $GRAFANA_SMTP_FROM_NAME"
       echo "  EHLO identity          : $GRAFANA_SMTP_EHLO_IDENTITY"
@@ -1081,7 +1081,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
       echo "  SMTP port                : $FORGEJO_SMTP_PORT"
       echo "  From address             : $FORGEJO_SMTP_FROM"
       echo "  SMTP user                : $FORGEJO_SMTP_USER"
-      echo "  SMTP password            : [set]"
+      echo "  SMTP password            : ********"
     fi
   fi
 fi
