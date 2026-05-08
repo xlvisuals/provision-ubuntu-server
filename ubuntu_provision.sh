@@ -118,8 +118,8 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
-        | grep -v "PASSWORD\|PASS\|SECRET" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
+        | grep -v "PASSWORD\|PASS\|SECRET|" \
         > $config_output_file
     echo "Configuration parameters written to '$config_output_file'. "
 }
@@ -188,7 +188,7 @@ check_service() {
     local var="$2"
     local installed_var="${3:-}"
 
-    if systemctl status "$service" &>/dev/null; then
+    if systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service"; then
         echo "- $service is already installed"
         printf -v "$var" "reinstall"
         [[ -n "$installed_var" ]] && printf -v "$installed_var" "y"
@@ -223,11 +223,14 @@ wait_for_apt() {
 }
 
 apt_install() {
+    # Unix convention: 0 means "no error"
     if ! apt-get install $APT_FLAGS "$@" 2>&1; then
         echo "  [!] Warning: failed to install package(s): $*"
         echo "  [!] Continuing — some functionality may be missing"
         APT_PACKAGES_NOT_INSTALLED+=("$@")
+        return 1
     fi
+    return 0
 }
 
 prompt_if_unset() {
@@ -236,6 +239,7 @@ prompt_if_unset() {
     local silent="${3:-n}"
     local default="${4:-}"
 
+    # echo "  prompt_if_unset(): varname='$varname', value='${!varname-}', prompt='$prompt', silent='$silent', default='$default'"
     if [[ -z "${!varname-}" ]]; then
         if [[ "$silent" == "secret" ]]; then
             while true; do
@@ -456,9 +460,9 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
 
         if [ "$LVM_FREE_SPACE" -gt 0 ]; then
             echo "  LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
-            prompt_if_unset LVM_DO_RESIZE "  Resize root LVM? (y/n)" n "y"
-            if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
-                prompt_if_unset LVM_TARGET_GB "  Enter target size in GB (or type 'all')" n "all"
+            prompt_if_unset LVM_RESIZE_VOLUME "  Resize root LVM? (y/n)" n "y"
+            if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
+                prompt_if_unset LVM_RESIZE_TARGET_GB "  Enter target size in GB (or type 'all')" n "all"
             fi
         else
             echo "  LVM detected, but no free space remains in Volume Group. Skipping."
@@ -572,7 +576,7 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
 
     # Interactive Password Prompt
     while true; do
-        prompt_if_unset MYSQL_PASSWORD         "  MySQL root password" secret
+        prompt_if_unset MYSQL_PASSWORD         "  MySQL root password" secret $
         if [ "${#MYSQL_PASSWORD}" -ge 4 ]; then
             break
         fi
@@ -630,11 +634,6 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     prompt_if_unset MYSQL_SORT_BUFFER_KB        "  Sort buffer size (KB)"              n "512"
     prompt_if_unset MYSQL_READ_BUFFER_KB        "  Read buffer size (KB)"              n "128"
     prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
-
-else
-    MYSQL_PASSWORD=''
-    #MYSQL_PASSWORD_CONFIRM=''
-    MYSQL_PASSWORD_ESCAPED=''
 fi
 
 [[ "$PROMPT_MARIADB" == "install" ]] && default_val="y" || default_val="n"
@@ -681,12 +680,6 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
         prompt_if_unset MYSQL_SORT_BUFFER_KB        "  Sort buffer size (KB)"              n "512"
         prompt_if_unset MYSQL_READ_BUFFER_KB        "  Read buffer size (KB)"              n "128"
         prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
-    fi
-else
-    # Only clear if MySQL isn't also using them
-    if [[ ! "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
-        MYSQL_PASSWORD=''
-        MYSQL_PASSWORD_ESCAPED=''
     fi
 fi
 
@@ -955,9 +948,9 @@ else
 fi
 echo "Configure LVM disks?       : $CONFIGURE_LVM"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
-  echo "  Resize LVM?              : ${LVM_DO_RESIZE:-n}"
-  if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
-    echo "  LVM target GB            : ${LVM_TARGET_GB:-all}"
+  echo "  Resize LVM?              : ${LVM_RESIZE_VOLUME:-n}"
+  if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
+    echo "  LVM target GB            : ${LVM_RESIZE_TARGET_GB:-all}"
   fi
 fi
 echo "Configure swap space?      : $CONFIGURE_SWAP"
@@ -1114,23 +1107,28 @@ echo ""
 save_config
 
 echo ""
-while true; do
-    read -rp "Configuration printed above. Proceed with installation? (y/n) " CONFIRM_APPLY
 
-    case "$CONFIRM_APPLY" in
-        [Yy]*)
-            # If yes, break the loop and continue the script
-            break
-            ;;
-        [Nn]*)
-            echo "Aborted by user."
-            exit 0
-            ;;
-        *)
-            echo "Invalid input. Please enter 'y' for yes or 'n' for no."
-            ;;
-    esac
-done
+if [[ "${FORCE_APPLY:-}" =~ ^[Yy]$ ]]; then
+    echo "Proceed with installation confirmed by FORCE_APPLY variable."
+else
+    while true; do
+        read -rp "Configuration printed above. Proceed with installation? (y/n) " CONFIRM_APPLY
+
+        case "$CONFIRM_APPLY" in
+            [Yy]*)
+                # If yes, break the loop and continue the script
+                break
+                ;;
+            [Nn]*)
+                echo "Aborted by user."
+                exit 0
+                ;;
+            *)
+                echo "Invalid input. Please enter 'y' for yes or 'n' for no."
+                ;;
+        esac
+    done
+fi
 
 echo ""
 echo "--- 3. Preparation ---"
@@ -1201,16 +1199,16 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
             #echo "LVM detected with $LVM_FREE_SPACE free extents."
             echo "LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
 
-            #read -p "Resize root LVM? (y/n)" LVM_DO_RESIZE
-            prompt_if_unset LVM_DO_RESIZE "Resize root LVM? (y/n)" n "y"
-            if [[ "$LVM_DO_RESIZE" =~ ^[Yy]$ ]]; then
-                #read -p "Enter target size in GB (or type 'all'): " LVM_TARGET_GB
-                prompt_if_unset LVM_TARGET_GB "Enter target size in GB (or type 'all')" n "all"
+            #read -p "Resize root LVM? (y/n)" LVM_RESIZE_VOLUME
+            prompt_if_unset LVM_RESIZE_VOLUME "Resize root LVM? (y/n)" n "y"
+            if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
+                #read -p "Enter target size in GB (or type 'all'): " LVM_RESIZE_TARGET_GB
+                prompt_if_unset LVM_RESIZE_TARGET_GB "Enter target size in GB (or type 'all')" n "all"
 
-                if [ "$LVM_TARGET_GB" == "all" ]; then
+                if [ "$LVM_RESIZE_TARGET_GB" == "all" ]; then
                     lvextend -l +100%FREE "$LV_PATH"
                 else
-                    lvextend -L "${LVM_TARGET_GB}G" "$LV_PATH"
+                    lvextend -L "${LVM_RESIZE_TARGET_GB}G" "$LV_PATH"
                 fi
                 resize2fs "$LV_PATH"
             fi
@@ -1296,13 +1294,16 @@ fi
 
 
 echo ""
-echo "--- 8. Update system packages ---"
+echo "--- 8. Upgrade system packages ---"
 if [[ "$UPDATE_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt-get update
     apt-get -y full-upgrade
 else
-    echo "Skipping update."
+    # always update, but not ugprade
+    wait_for_apt
+    apt-get update
+    echo "Skipping upgrade."
 fi
 
 
@@ -1318,7 +1319,7 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
 
     if [[ "$(systemd-detect-virt)" == "none" ]]; then
         echo "Bare metal detected. Installing smartmontools"
-        apt_install smartmontools
+        apt_install smartmontools || true
     else
         echo "Running in $(systemd-detect-virt). Skipping smartmontools installation."
     fi
@@ -1331,17 +1332,20 @@ echo ""
 echo "--- 10. Install and configure ufw firewall ---"
 if [[ "$INSTALL_UFW" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt_install ufw rsyslog
-    ufw default allow outgoing
-    ufw default deny incoming
-    ufw allow 22/tcp
-    if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
-        ufw allow 80/tcp
-        ufw allow 443/tcp
+    if apt_install ufw rsyslog; then
+        ufw default allow outgoing
+        ufw default deny incoming
+        ufw allow 22/tcp
+        if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
+            ufw allow 80/tcp
+            ufw allow 443/tcp
+        fi
+        ufw --force enable
+        sed -i 's/#& stop/\& stop/' /etc/rsyslog.d/20-ufw.conf
+        systemctl restart rsyslog || true
+    else
+        echo "  [!] Firewall installation failed — skipping configuration"
     fi
-    ufw --force enable
-    sed -i 's/#& stop/\& stop/' /etc/rsyslog.d/20-ufw.conf
-    systemctl restart rsyslog || true
 else
     echo "Skipping ufw installation."
 fi
@@ -1350,38 +1354,38 @@ echo ""
 echo "--- 11. Install and configure OpenSSH ---"
 if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt_install openssh-server
+    if apt_install openssh-server; then
 
-    # SSH Key Logic: Prompt for ssh key if none exists
-    mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
-    chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME /home/$USER_SUDO_USER_USERNAME/.ssh
-    chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
-    AUTH_KEYS="/home/$USER_SUDO_USER_USERNAME/.ssh/authorized_keys"
-    if [ ! -f "$AUTH_KEYS" ] || [ ! -s "$AUTH_KEYS" ]; then
-        echo "SSH KEY SETUP"
-        echo "No existing keys found for $USER_SUDO_USER_USERNAME."
-        echo "Please paste your SSH PUBLIC KEY (starts with ssh-rsa, ssh-ed25519, etc.):"
-        read -r SSH_PUBLIC_KEY
-        if [ -n "$SSH_PUBLIC_KEY" ]; then
-            mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
-            echo "$SSH_PUBLIC_KEY" > "$AUTH_KEYS"
-            chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
-            chmod 600 "$AUTH_KEYS"
-            chown -R $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME /home/$USER_SUDO_USER_USERNAME/.ssh
-            echo "SSH key installed for $USER_SUDO_USER_USERNAME."
+        # SSH Key Logic: Prompt for ssh key if none exists
+        mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
+        chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME /home/$USER_SUDO_USER_USERNAME/.ssh
+        chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
+        AUTH_KEYS="/home/$USER_SUDO_USER_USERNAME/.ssh/authorized_keys"
+        if [ ! -f "$AUTH_KEYS" ] || [ ! -s "$AUTH_KEYS" ]; then
+            echo "SSH KEY SETUP"
+            echo "No existing keys found for $USER_SUDO_USER_USERNAME."
+            echo "Please paste your SSH PUBLIC KEY (starts with ssh-rsa, ssh-ed25519, etc.):"
+            read -r SSH_PUBLIC_KEY
+            if [ -n "$SSH_PUBLIC_KEY" ]; then
+                mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
+                echo "$SSH_PUBLIC_KEY" > "$AUTH_KEYS"
+                chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
+                chmod 600 "$AUTH_KEYS"
+                chown -R $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME /home/$USER_SUDO_USER_USERNAME/.ssh
+                echo "SSH key installed for $USER_SUDO_USER_USERNAME."
+            else
+                #echo "WARNING: No SSH key provided! You will be locked out after SSH hardening."
+                echo "ERROR: No SSH key installed. Aborting to prevent lockout."
+                exit 1
+            fi
         else
-            #echo "WARNING: No SSH key provided! You will be locked out after SSH hardening."
-            echo "ERROR: No SSH key installed. Aborting to prevent lockout."
-            exit 1
+            echo "SSH keys already present in $AUTH_KEYS. Skipping prompt."
         fi
-    else
-        echo "SSH keys already present in $AUTH_KEYS. Skipping prompt."
-    fi
 
-    echo "Hardening ssh..."
-    # Override file ensures custom settings take precedence in Ubuntu 26.04.
-    # Using <<EOF, not <<'EOF', so that $USER_SUDO_USER_USERNAME is replaced.
-    cat <<EOF > /etc/ssh/sshd_config.d/01-$USER_SUDO_USER_USERNAME-hardened.conf
+        echo "Hardening ssh..."
+        # Override file ensures custom settings take precedence in Ubuntu 26.04.
+        # Using <<EOF, not <<'EOF', so that $USER_SUDO_USER_USERNAME is replaced.
+        cat <<EOF > /etc/ssh/sshd_config.d/01-$USER_SUDO_USER_USERNAME-hardened.conf
 UsePAM yes
 PermitRootLogin no
 ChallengeResponseAuthentication no
@@ -1401,8 +1405,11 @@ IgnoreRhosts yes
 AuthenticationMethods publickey
 PrintMotd yes
 EOF
-    # sshd is an alias to ssh
-    systemctl restart ssh || true
+        # sshd is an alias to ssh
+        systemctl restart ssh || true
+    else
+        echo "  [!] OpenSSH installation failed — skipping configuration"
+    fi
 else
     echo "Skipping OpenSSH installation."
 fi
@@ -1556,10 +1563,14 @@ echo "--- 22. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
-    apt_install fonts-liberation fonts-freefont-ttf
+    if apt_install fonts-liberation fonts-freefont-ttf; then
+        echo "Installed Liberation and Freefont fonts."
+    fi;
     if [[ "$INSTALL_MS_FONTS" =~ ^[Yy]$ ]]; then
         echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
-        apt_install ttf-mscorefonts-installer
+        if apt_install ttf-mscorefonts-installer; then
+            echo "Installed Microsoft fonts."
+        fi
     fi
     fc-cache -f -v
 else
@@ -1581,12 +1592,13 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
         wait_for_apt
         if add-apt-repository -y ppa:deadsnakes/ppa 2>&1; then
             apt-get update
-            apt_install python3.14-full python3.14-venv pipx
+            if apt_install python3.14-full python3.14-venv pipx; then
 
-            # Keep 3.12 as default, 3.14 available explicitly via python3.14
-            if command -v python3.12 &>/dev/null; then
-                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
-                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1
+                # Keep 3.12 as default, 3.14 available explicitly via python3.14
+                if command -v python3.12 &>/dev/null; then
+                    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
+                    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1
+                fi
             fi
         else
             echo "  [!] Warning: deadsnakes PPA unavailable — skipping Python 3.14 installation"
@@ -1596,7 +1608,7 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     elif [[ "$VERSION_ID" == "26.04" ]]; then
         # On Ubuntu 26.04, system python is 3.14. Just ensure venv and pipx are present.
         wait_for_apt
-        apt_install python3.14-venv pipx
+        apt_install python3.14-venv pipx || true
     fi
 
     # Install virtualenv globally via pipx
@@ -1667,7 +1679,7 @@ echo ""
 echo "--- 25. Install weasyprint ---"
 if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt_install weasyprint
+    apt_install weasyprint || true
 else
     echo "Skipping weasyprint installation."
 fi
@@ -1677,7 +1689,7 @@ echo ""
 echo "--- 26. Install imagemagick ---"
 if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    apt_install imagemagick
+    apt_install imagemagick || true
 else
     echo "Skipping imagemagick installation."
 fi
@@ -1693,7 +1705,7 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     fi
     wait_for_apt
     # apache2-utils needed for htpasswd utility
-    apt_install nginx apache2-utils
+    apt_install nginx apache2-utils || true
     usermod -a -G $USER_SUDO_USER_USERNAME www-data
     systemctl enable --now nginx || true
 
@@ -1715,8 +1727,9 @@ if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
         apt-get purge -y valkey-server valkey-tools || true
     fi
     wait_for_apt
-    apt_install valkey-server valkey-tools
-    systemctl enable --now valkey-server || true
+    if apt_install valkey-server valkey-tools; then
+        systemctl enable --now valkey-server || true
+    fi
 else
     echo "Skipping Valkey installation."
 fi
@@ -1726,32 +1739,32 @@ echo ""
 echo "--- 29a. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
-        echo "Uninstall mysql-server mysqltuner mysql-shell"
-        apt-get purge -y mysql-server mysqltuner || true
+        echo "Uninstall mysql-server mysql-shell mysqltuner"
+        apt-get purge -y mysql-server mysql-shell mysqltuner || true
     fi
 
     wait_for_apt
-    apt_install mysql-server mysqltuner mysql-shell
-    systemctl enable --now mysql.service || echo "Warning: service failed to start"
+    if apt_install mysql-server mysql-shell mysqltuner; then
+        systemctl enable --now mysql.service || echo "Warning: service failed to start"
 
-    # Wait for MySQL to create the socket file before proceeding
-    echo "Waiting for MySQL to start..."
-    MYSQL_READY=0
-    for i in {1..6}; do
-        if [ -S /var/run/mysqld/mysqld.sock ]; then
-            MYSQL_READY=1
-            break
+        # Wait for MySQL to create the socket file before proceeding
+        echo "Waiting for MySQL to start..."
+        MYSQL_READY=0
+        for i in {1..6}; do
+            if [ -S /var/run/mysqld/mysqld.sock ]; then
+                MYSQL_READY=1
+                break
+            fi
+            sleep 1
+        done
+
+        if [ "$MYSQL_READY" -ne 1 ]; then
+            echo "Error: MySQL failed to start"
+            exit 1
         fi
-        sleep 1
-    done
 
-    if [ "$MYSQL_READY" -ne 1 ]; then
-        echo "Error: MySQL failed to start"
-        exit 1
-    fi
-
-    # Secure MySQL using the provided password
-    mysql_root <<EOS
+        # Secure MySQL using the provided password. Does the same as mysql_secure_installation
+        mysql_root <<EOS
 ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASSWORD_ESCAPED}';
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
@@ -1759,16 +1772,19 @@ DROP DATABASE IF EXISTS test;
 FLUSH PRIVILEGES;
 EOS
 
-    mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
+        mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
 
-    # Create a passwordless read-only healthcheck user for the health check script
-    mysql_root <<EOS
+        # Create a passwordless read-only healthcheck user for the health check script
+        mysql_root <<EOS
 CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
 GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
-    echo "MySQL root password set and security initialized."
+        echo "MySQL root password set and security initialized."
+    else
+        echo "  [!] MySQL installation failed — skipping configuration"
+    fi
 else
     echo "Skipping MySQL installation."
 fi
@@ -1778,30 +1794,30 @@ echo "--- 29b. Install MariaDB ---"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MARIADB" == 'reinstall' ]]; then
         echo "Uninstall mariadb-server"
-        apt-get purge -y mariadb-server mariadb-client mariadb-client-compat mysqltuner || true
+        apt-get purge -y mariadb-server mariadb-client mysqltuner || true
     fi
 
     wait_for_apt
-    apt_install mariadb-server mariadb-client mariadb-client-compat mysqltuner
-    systemctl enable --now mariadb.service || echo "Warning: service failed to start"
+    if apt_install mariadb-server mariadb-client mysqltuner; then
+        systemctl enable --now mariadb.service || echo "Warning: service failed to start"
 
-    echo "Waiting for MariaDB to start..."
-    MYSQL_READY=0
-    for i in {1..6}; do
-        if [ -S /var/run/mysqld/mysqld.sock ]; then
-            MYSQL_READY=1
-            break
+        echo "Waiting for MariaDB to start..."
+        MYSQL_READY=0
+        for i in {1..6}; do
+            if [ -S /var/run/mysqld/mysqld.sock ]; then
+                MYSQL_READY=1
+                break
+            fi
+            sleep 1
+        done
+
+        if [ "$MYSQL_READY" -ne 1 ]; then
+            echo "Error: MariaDB failed to start"
+            exit 1
         fi
-        sleep 1
-    done
 
-    if [ "$MYSQL_READY" -ne 1 ]; then
-        echo "Error: MariaDB failed to start"
-        exit 1
-    fi
-
-    # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported)
-    mysql_root <<EOS
+        # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported)
+        mysql_root <<EOS
 ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASSWORD_ESCAPED}');
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
@@ -1809,16 +1825,42 @@ DROP DATABASE IF EXISTS test;
 FLUSH PRIVILEGES;
 EOS
 
-    mariadb-tzinfo-to-sql /usr/share/zoneinfo | mysql_root mysql
+        mariadb-tzinfo-to-sql /usr/share/zoneinfo | mysql_root mysql
 
-    # Create a passwordless read-only healthcheck user for the health check script
-    mysql_root <<EOS
+        # Create a passwordless read-only healthcheck user for the health check script
+        mysql_root <<EOS
 CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
 GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
-    echo "MariaDB root password set and security initialized."
+        echo "MariaDB root password set and security initialized."
+
+        # Create MySQL compatibility symlinks for operator convenience.
+        # mariadb-client-compat (which provides these) is only available from Ubuntu 25.04+,
+        # so we create them manually on all supported releases for consistency.
+        echo "  Creating MySQL compatibility symlinks..."
+        declare -A MARIADB_COMPAT_MAP=(
+            ["mysql"]="mariadb"
+            ["mysqladmin"]="mariadb-admin"
+            ["mysqldump"]="mariadb-dump"
+            ["mysqlcheck"]="mariadb-check"
+            ["mysqlimport"]="mariadb-import"
+            ["mysqlshow"]="mariadb-show"
+            ["mysqlslap"]="mariadb-slap"
+            ["mysql_secure_installation"]="mariadb-secure-installation"
+            ["mysql_tzinfo_to_sql"]="mariadb-tzinfo-to-sql"
+        )
+        for mysql_cmd in "${!MARIADB_COMPAT_MAP[@]}"; do
+            mariadb_cmd="${MARIADB_COMPAT_MAP[$mysql_cmd]}"
+            if command -v "$mariadb_cmd" &>/dev/null && ! command -v "$mysql_cmd" &>/dev/null; then
+                ln -sf "$(command -v $mariadb_cmd)" "/usr/local/bin/$mysql_cmd"
+                echo "  [+] $mysql_cmd -> $mariadb_cmd"
+            fi
+        done
+    else
+        echo "  [!] MariaDB installation failed — skipping configuration"
+    fi
 else
     echo "Skipping MariaDB installation."
 fi
@@ -1859,30 +1901,34 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
         wait_for_apt
         apt-get update
 
-        # Install PostgreSQL 18
-        apt_install postgresql-$PG_VERSION
-        apt_install postgresql-client-$PG_VERSION
-
-        # Optional: Install Useful PostgreSQL Tools
-        apt_install postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3
-
         # Prevent automatically installing v16 by using one of the two:
         # apt_install postgresql-$PG_VERSION postgresql-client-$PG_VERSION --no-install-recommends
         # apt-get purge -y postgresql-16 || true
 
-        echo "PostgreSQL version installed:"
-        psql --version
+        # Install PostgreSQL 18
+        if apt_install postgresql-$PG_VERSION; then
+            apt_install postgresql-client-$PG_VERSION || true
 
-        # Detect cluster path
-        PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
-        PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
+            # Optional: Install Useful PostgreSQL Tools
+            apt_install postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3 || true
 
-        echo "Backing up configuration..."
-        cp "$PG_CONF" "${PG_CONF}.bak"
-        cp "$PG_HBA" "${PG_HBA}.bak"
+            echo "PostgreSQL version installed:"
+            psql --version
 
-        echo "Enabling PostgreSQL..."
-        systemctl enable --now postgresql || echo "Warning: service failed to start"
+            # Detect cluster path
+            PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
+            PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
+
+            echo "Backing up configuration..."
+            cp "$PG_CONF" "${PG_CONF}.bak"
+            cp "$PG_HBA" "${PG_HBA}.bak"
+
+            echo "Enabling PostgreSQL..."
+            systemctl enable --now postgresql || echo "Warning: service failed to start"
+        else
+            echo "  [!] PostgreSQL ${PG_VERSION} installation failed — skipping configuration"
+        fi
+
     else
         echo "Could not download gpg key. Skipping installation."
     fi
@@ -1902,11 +1948,14 @@ if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt_install mosquitto mosquitto-clients
-    mkdir -p /var/log/mosquitto/ /var/run/mosquitto/
-    chown mosquitto: /var/log/mosquitto
+    if apt_install mosquitto mosquitto-clients; then
+        mkdir -p /var/log/mosquitto/ /var/run/mosquitto/
+        chown mosquitto: /var/log/mosquitto
 
-    systemctl enable --now mosquitto.service || echo "Warning: service failed to start"
+        systemctl enable --now mosquitto.service || echo "Warning: service failed to start"
+    else
+        echo "  [!] mosquitto installation failed — skipping configuration"
+    fi
 else
     echo "Skipping Mosquitto MQTT broker installation."
 fi
@@ -1924,12 +1973,15 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt_install postfix mailutils libsasl2-modules
+    if apt_install postfix mailutils libsasl2-modules; then
 
-    # Postfix config is applied after installation alongside other services.
-    # We just ensure the service is enabled here; section 36 restarts it
-    # after main.cf and sasl_passwd are in place.
-    systemctl enable postfix || echo "Warning: could not enable postfix"
+        # Postfix config is applied after installation alongside other services.
+        # We just ensure the service is enabled here; section 36 restarts it
+        # after main.cf and sasl_passwd are in place.
+        systemctl enable postfix || echo "Warning: could not enable postfix"
+    else
+        echo "  [!] postfix installation failed — skipping configuration"
+    fi
 else
     echo "Skipping Postfix installation."
 fi
@@ -1945,8 +1997,11 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
         apt-get purge -y monit  || true
     fi
     wait_for_apt
-    apt_install monit
-    systemctl enable --now monit.service || echo "Warning: service failed to start"
+    if apt_install monit; then
+        systemctl enable --now monit.service || echo "Warning: service failed to start"
+    else
+        echo "  [!] monit installation failed — skipping configuration"
+    fi
 else
     echo "Skipping Monit installation."
 fi
@@ -1968,8 +2023,11 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
         sh /tmp/webmin-setup-repo.sh --force
         rm -f /tmp/webmin-setup-repo.sh
         wait_for_apt
-        apt_install webmin --install-recommends
-        systemctl enable --now webmin.service || echo "Warning: service failed to start"
+        if apt_install webmin --install-recommends; then
+            systemctl enable --now webmin.service || echo "Warning: service failed to start"
+        else
+            echo "  [!] webmin installation failed — skipping configuration"
+        fi
     else
         echo "Could not download Webmin setup script. Skipping installation."
     fi
@@ -2003,14 +2061,16 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
         apt-get update
         sleep 1
         wait_for_apt
-        apt_install grafana
-
-        # ensure group grafana exists
-        if ! getent group grafana >/dev/null; then
-            groupadd grafana
+        if apt_install grafana; then
+            # ensure group grafana exists
+            if ! getent group grafana >/dev/null; then
+                groupadd grafana
+            fi
+            usermod -a -G grafana $USER_SUDO_USER_USERNAME
+            systemctl enable --now grafana-server.service || echo "Warning: service failed to start"
+        else
+          echo "  [!] Grafana installation failed — skipping configuration"
         fi
-        usermod -a -G grafana $USER_SUDO_USER_USERNAME
-        systemctl enable --now grafana-server.service || echo "Warning: service failed to start"
     else
         echo "Could not download gpg key. Skipping installation."
     fi
@@ -2120,8 +2180,8 @@ if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt_install fail2ban
-    cat <<'EOF' > /etc/fail2ban/jail.local
+    if apt_install fail2ban; then
+        cat <<'EOF' > /etc/fail2ban/jail.local
 [sshd]
 enabled = true
 port = 22
@@ -2132,7 +2192,10 @@ bantime = 1h
 bantime.increment = true
 bantime.factor = 2
 EOF
-    systemctl enable --now fail2ban.service
+        systemctl enable --now fail2ban.service
+    else
+        echo "  [!] Fail2Ban installation failed — skipping configuration"
+    fi
 else
     echo "Skipping Fail2Ban installation."
 fi
@@ -2148,26 +2211,30 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt_install auditd
-    systemctl enable --now auditd.service || echo "Warning: service failed to start"
+    if apt_install auditd; then
+        systemctl enable --now auditd.service || echo "Warning: service failed to start"
 
-    # Configuring Auditd Rules for Wazuh
-    # Install a basic set of rules (e.g., tracking execve, file deletions, etc.)
-    curl -s https://raw.githubusercontent.com/Neo23x0/auditd/master/audit.rules -o /etc/audit/rules.d/audit.rules
+        # Configuring Auditd Rules for Wazuh
+        # Install a basic set of rules (e.g., tracking execve, file deletions, etc.)
+        curl -s https://raw.githubusercontent.com/Neo23x0/auditd/master/audit.rules -o /etc/audit/rules.d/audit.rules
 
-    # FIX: Comment out rules for users that don't exist on this system
-    # This prevents the "Unknown user" errors from breaking the rule load
-    sed -i 's/^-a always,exit -F arch=b64 -S connect -F auid>=1000 -F auid!=4294967295 -F key=export/#&/' /etc/audit/rules.d/audit.rules
-    sed -i '/-u chrony/s/^/#/' /etc/audit/rules.d/audit.rules
-    sed -i '/-u ntp/s/^/#/' /etc/audit/rules.d/audit.rules
+        # FIX: Comment out rules for users that don't exist on this system
+        # This prevents the "Unknown user" errors from breaking the rule load
+        sed -i 's/^-a always,exit -F arch=b64 -S connect -F auid>=1000 -F auid!=4294967295 -F key=export/#&/' /etc/audit/rules.d/audit.rules
+        sed -i '/-u chrony/s/^/#/' /etc/audit/rules.d/audit.rules
+        sed -i '/-u ntp/s/^/#/' /etc/audit/rules.d/audit.rules
 
-    # increase the backlog limit
-    echo "-b 8192" > /etc/audit/rules.d/00-backlog.conf
+        # increase the backlog limit
+        echo "-b 8192" > /etc/audit/rules.d/00-backlog.conf
 
-    augenrules --load
+        augenrules --load
 
-    echo "Verify auditd rules are loaded (this should show a long list without errors)"
-    auditctl -l | head -n 20 || true
+        echo "Verify auditd rules are loaded (this should show a long list without errors)"
+        auditctl -l | head -n 20 || true
+    else
+        echo "  [!] auditd installation failed — skipping configuration"
+    fi
+
 else
     echo "Skipping auditd installation."
 fi
@@ -2210,41 +2277,44 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     fi
 
     wait_for_apt
-    apt_install ipset
+    if apt_install ipset; then
 
-    # Backup the original ufw after.init if not already backed up
-    if [ ! -f /etc/ufw/after.init.orig ]; then
-        cp /etc/ufw/after.init /etc/ufw/after.init.orig
+        # Backup the original ufw after.init if not already backed up
+        if [ ! -f /etc/ufw/after.init.orig ]; then
+            cp /etc/ufw/after.init /etc/ufw/after.init.orig
+        fi
+
+        # Use a temporary directory for the git clone
+        TEMP_DIR=$(mktemp -d)
+        git clone https://github.com/poddmo/ufw-blocklist.git "$TEMP_DIR"
+
+        # Install the ufw-blocklist files
+        if [ -f "$TEMP_DIR/after.init" ]; then
+            cp "$TEMP_DIR/after.init" /etc/ufw/after.init
+            chown root:root /etc/ufw/after.init
+            chmod 750 /etc/ufw/after.init
+        fi
+        if [ -f "$TEMP_DIR/ufw-blocklist-ipsum" ]; then
+            cp "$TEMP_DIR/ufw-blocklist-ipsum" /etc/cron.daily/ufw-blocklist-ipsum
+            chown root:root /etc/cron.daily/ufw-blocklist-ipsum
+            chmod 750 /etc/cron.daily/ufw-blocklist-ipsum
+        fi
+
+        # Download an initial IP blocklist from IPsum (Level 4: IPs found in 4+ blacklists)
+        curl -sS -f --compressed -o /etc/ipsum.4.txt 'https://raw.githubusercontent.com/stamparm/ipsum/master/levels/4.txt'
+        chmod 640 /etc/ipsum.4.txt
+
+        # Clean up temp directory
+        rm -rf "$TEMP_DIR"
+
+        # Initialize ipset and reload UFW to apply the blocklist
+        /etc/ufw/after.init start
+
+        # Ensure UFW is reloaded to recognize the new after.init logic
+        ufw reload
+    else
+        echo "  [!] IP blocklist installation failed — skipping configuration"
     fi
-
-    # Use a temporary directory for the git clone
-    TEMP_DIR=$(mktemp -d)
-    git clone https://github.com/poddmo/ufw-blocklist.git "$TEMP_DIR"
-
-    # Install the ufw-blocklist files
-    if [ -f "$TEMP_DIR/after.init" ]; then
-        cp "$TEMP_DIR/after.init" /etc/ufw/after.init
-        chown root:root /etc/ufw/after.init
-        chmod 750 /etc/ufw/after.init
-    fi
-    if [ -f "$TEMP_DIR/ufw-blocklist-ipsum" ]; then
-        cp "$TEMP_DIR/ufw-blocklist-ipsum" /etc/cron.daily/ufw-blocklist-ipsum
-        chown root:root /etc/cron.daily/ufw-blocklist-ipsum
-        chmod 750 /etc/cron.daily/ufw-blocklist-ipsum
-    fi
-
-    # Download an initial IP blocklist from IPsum (Level 4: IPs found in 4+ blacklists)
-    curl -sS -f --compressed -o /etc/ipsum.4.txt 'https://raw.githubusercontent.com/stamparm/ipsum/master/levels/4.txt'
-    chmod 640 /etc/ipsum.4.txt
-
-    # Clean up temp directory
-    rm -rf "$TEMP_DIR"
-
-    # Initialize ipset and reload UFW to apply the blocklist
-    /etc/ufw/after.init start
-
-    # Ensure UFW is reloaded to recognize the new after.init logic
-    ufw reload
 else
     echo "Skipping IP blocklist installation."
 fi
@@ -2283,33 +2353,36 @@ if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # Then install suricata with a 'force-overwrite' flag just in case
     wait_for_apt
     apt-get purge -y suricata-update
-    apt_install -o Dpkg::Options::="--force-overwrite" suricata
+    if apt_install -o Dpkg::Options::="--force-overwrite" suricata; then
 
-    # Configure Suricata to use the correct network interface. Commented, because seems to be taken care of by 'apt-get install'
-    # Update the interface in the config file
-    # echo "Configure suricate to use interface $PRIMARY_INTERFACE"
-    # sed -i "s/interface: eth0/interface: $PRIMARY_INTERFACE/g" /etc/suricata/suricata.yaml
-    # sed -i "s/^\s*-\s*interface:.*/  - interface: $PRIMARY_INTERFACE/" /etc/suricata/suricata.yaml
-    sed -i "s/interface: .*/interface: $PRIMARY_INTERFACE/" /etc/suricata/suricata.yaml
+        # Configure Suricata to use the correct network interface. Commented, because seems to be taken care of by 'apt-get install'
+        # Update the interface in the config file
+        # echo "Configure suricate to use interface $PRIMARY_INTERFACE"
+        # sed -i "s/interface: eth0/interface: $PRIMARY_INTERFACE/g" /etc/suricata/suricata.yaml
+        # sed -i "s/^\s*-\s*interface:.*/  - interface: $PRIMARY_INTERFACE/" /etc/suricata/suricata.yaml
+        sed -i "s/interface: .*/interface: $PRIMARY_INTERFACE/" /etc/suricata/suricata.yaml
 
-    # Enable community-id for easier log correlation with other tools
-    sed -i 's/community-id: false/community-id: true/' /etc/suricata/suricata.yaml
+        # Enable community-id for easier log correlation with other tools
+        sed -i 's/community-id: false/community-id: true/' /etc/suricata/suricata.yaml
 
-    # Update rules. Installs /var/lib/suricata/rules/suricata.rules
-    suricata-update --no-test || true
+        # Update rules. Installs /var/lib/suricata/rules/suricata.rules
+        suricata-update --no-test || true
 
-    echo "Verify suricata config file /etc/suricata/suricata.yaml"
-    suricata -T -c /etc/suricata/suricata.yaml || echo "Warning: Suricata config test returned warnings"
+        echo "Verify suricata config file /etc/suricata/suricata.yaml"
+        suricata -T -c /etc/suricata/suricata.yaml || echo "Warning: Suricata config test returned warnings"
 
-    # Enable and start service
-    systemctl enable --now suricata.service || echo "Warning: service failed to start"
+        # Enable and start service
+        systemctl enable --now suricata.service || echo "Warning: service failed to start"
 
-    # Verify Suricata is running in IDS mode
-    systemctl status suricata --no-pager -l | head -n 20
-    echo "Suricata installed on interface: $PRIMARY_INTERFACE. Logs at /var/log/suricata/eve.json"
+        # Verify Suricata is running in IDS mode
+        systemctl status suricata --no-pager -l | head -n 20
+        echo "Suricata installed on interface: $PRIMARY_INTERFACE. Logs at /var/log/suricata/eve.json"
 
-    # Note To watch live what's going on, run:
-    # tail -f /var/log/suricata/eve.json | jq
+        # Note To watch live what's going on, run:
+        # tail -f /var/log/suricata/eve.json | jq
+    else
+        echo "  [!] Suricata IDS installation failed — skipping configuration"
+    fi
 else
     echo "Skipping Suricata IDS installation."
 fi
@@ -2341,14 +2414,14 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
             apt-get update
 
             wait_for_apt
-            apt_install wazuh-agent
+            if apt_install wazuh-agent; then
 
-            # Configure Manager Address
-            sed -i "s/<address>MANAGER_IP<\/address>/<address>$WAZUH_MANAGER<\/address>/" /var/ossec/etc/ossec.conf
+                # Configure Manager Address
+                sed -i "s/<address>MANAGER_IP<\/address>/<address>$WAZUH_MANAGER<\/address>/" /var/ossec/etc/ossec.conf
 
-            # Define the log paths correctly
-            # Note: We use a temporary file to hold the XML block
-            cat <<'EOF' > /tmp/wazuh_logs.xml
+                # Define the log paths correctly
+                # Note: We use a temporary file to hold the XML block
+                cat <<'EOF' > /tmp/wazuh_logs.xml
   <localfile>
     <log_format>json</log_format>
     <location>/var/log/suricata/eve.json</location>
@@ -2359,19 +2432,22 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
   </localfile>
 EOF
 
-            # Clean up any previous failed attempts to avoid duplicates/errors
-            #sed -i '/\/var\/log\/suricata\/eve.json/d' /var/ossec/etc/ossec.conf
-            #sed -i '/\/var\/log\/audit\/audit.log/d' /var/ossec/etc/ossec.conf
+                # Clean up any previous failed attempts to avoid duplicates/errors
+                #sed -i '/\/var\/log\/suricata\/eve.json/d' /var/ossec/etc/ossec.conf
+                #sed -i '/\/var\/log\/audit\/audit.log/d' /var/ossec/etc/ossec.conf
 
-            # Insert the block BEFORE the very first closing </ossec_config> tag
-            # This ensures it stays within the global config but outside sub-blocks
-            if ! grep -q "/var/log/suricata/eve.json" /var/ossec/etc/ossec.conf; then
-                sed -i "/<\/ossec_config>/e cat /tmp/wazuh_logs.xml" /var/ossec/etc/ossec.conf
+                # Insert the block BEFORE the very first closing </ossec_config> tag
+                # This ensures it stays within the global config but outside sub-blocks
+                if ! grep -q "/var/log/suricata/eve.json" /var/ossec/etc/ossec.conf; then
+                    sed -i "/<\/ossec_config>/e cat /tmp/wazuh_logs.xml" /var/ossec/etc/ossec.conf
+                fi
+
+                rm -f /tmp/wazuh_logs.xml || true
+
+                systemctl enable --now wazuh-agent.service || echo "Warning: service failed to start"
+            else
+                echo "  [!] Wazuh Agent installation failed — skipping configuration"
             fi
-
-            rm -f /tmp/wazuh_logs.xml || true
-
-            systemctl enable --now wazuh-agent.service || echo "Warning: service failed to start"
         else
             echo "Could not download gpg key. Skipping installation."
         fi
@@ -2389,76 +2465,78 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
     # Always ensure utilities and profiles are installed
     wait_for_apt
-    apt_install apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra
+    if apt_install apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra; then
 
-    if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ ]]; then
-        # Ensure AppArmor is enabled in grub if not already
-        if ! grep -q "apparmor=1" /etc/default/grub; then
-            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 apparmor=1 security=apparmor"/' /etc/default/grub
-            update-grub
+        if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ ]]; then
+            # Ensure AppArmor is enabled in grub if not already
+            if ! grep -q "apparmor=1" /etc/default/grub; then
+                sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 apparmor=1 security=apparmor"/' /etc/default/grub
+                update-grub
+            fi
+            systemctl enable --now apparmor || echo "Warning: could not enable AppArmor"
+            echo "  AppArmor enabled."
+        else
+            systemctl disable apparmor || true
+            echo "  AppArmor disabled."
         fi
-        systemctl enable --now apparmor || echo "Warning: could not enable AppArmor"
-        echo "  AppArmor enabled."
-    else
-        systemctl disable apparmor || true
-        echo "  AppArmor disabled."
-    fi
 
-    if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ && "$APPARMOR_ENFORCE" =~ ^[Yy]$ ]]; then
-        echo "  Setting available profiles to enforce mode..."
+        if [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ && "$APPARMOR_ENFORCE" =~ ^[Yy]$ ]]; then
+            echo "  Setting available profiles to enforce mode..."
 
-        # Enforce all profiles that exist on disk — works across Ubuntu 24 and 26
-        # since profile availability differs between releases
-        for PROFILE in \
-            "usr.sbin.mysqld" \
-            "usr.sbin.rsyslogd" \
-            "mosquitto" \
-            "usr.sbin.nginx" \
-            "usr.sbin.sshd"; do
-            if [[ -f "/etc/apparmor.d/$PROFILE" ]]; then
-                aa-enforce "/etc/apparmor.d/$PROFILE" \
-                    && echo "  [V] $PROFILE: enforce" \
-                    || echo "  [!] $PROFILE: failed to enforce"
-            else
-                echo "  [-] $PROFILE: no profile available on this release"
-            fi
-        done
+            # Enforce all profiles that exist on disk — works across Ubuntu 24 and 26
+            # since profile availability differs between releases
+            for PROFILE in \
+                "usr.sbin.mysqld" \
+                "usr.sbin.rsyslogd" \
+                "mosquitto" \
+                "usr.sbin.nginx" \
+                "usr.sbin.sshd"; do
+                if [[ -f "/etc/apparmor.d/$PROFILE" ]]; then
+                    aa-enforce "/etc/apparmor.d/$PROFILE" \
+                        && echo "  [V] $PROFILE: enforce" \
+                        || echo "  [!] $PROFILE: failed to enforce"
+                else
+                    echo "  [-] $PROFILE: no profile available on this release"
+                fi
+            done
 
-        # For installed services without profiles, generate a minimal profile
-        # and set to complain mode so aa-logprof can build a proper profile
-        # from real usage. Run aa-logprof after normal use, then aa-enforce.
-        echo ""
-        echo "  Setting installed services without profiles to complain mode..."
-        declare -A APPARMOR_SERVICE_MAP=(
-            ["/usr/sbin/nginx"]="nginx"
-            ["/usr/sbin/postfix"]="postfix"
-            ["/usr/lib/postgresql/$PG_VERSION/bin/postgres"]="postgresql"
-            ["/usr/bin/grafana-server"]="grafana-server"
-            ["/usr/bin/forgejo"]="forgejo"
-        )
-        for SERVICE_BIN in "${!APPARMOR_SERVICE_MAP[@]}"; do
-            SERVICE="${APPARMOR_SERVICE_MAP[$SERVICE_BIN]}"
-            # Skip if binary not installed
-            [[ ! -f "$SERVICE_BIN" ]] && continue
-            # Skip if service not running
-            systemctl is-active --quiet "$SERVICE" 2>/dev/null || continue
-            # Skip if profile already loaded
-            if aa-status 2>/dev/null | grep -qF "$SERVICE_BIN"; then
-                echo "  [-] $(basename $SERVICE_BIN): profile already loaded, skipping"
-                continue
-            fi
-            # Generate minimal profile and set to complain mode
-            # hangs waiting for input: aa-genprof "$SERVICE_BIN" -f /dev/null 2>/dev/null || true
-            aa-complain "$SERVICE_BIN" 2>/dev/null \
-                && echo "  [~] $(basename $SERVICE_BIN): complain mode (run sudo aa-logprof after normal use)" \
-                || echo "  [!] $(basename $SERVICE_BIN): failed to set complain mode"
-        done
+            # For installed services without profiles, generate a minimal profile
+            # and set to complain mode so aa-logprof can build a proper profile
+            # from real usage. Run aa-logprof after normal use, then aa-enforce.
+            echo ""
+            echo "  Setting installed services without profiles to complain mode..."
+            declare -A APPARMOR_SERVICE_MAP=(
+                ["/usr/sbin/nginx"]="nginx"
+                ["/usr/sbin/postfix"]="postfix"
+                ["/usr/lib/postgresql/$PG_VERSION/bin/postgres"]="postgresql"
+                ["/usr/bin/grafana-server"]="grafana-server"
+                ["/usr/bin/forgejo"]="forgejo"
+            )
+            for SERVICE_BIN in "${!APPARMOR_SERVICE_MAP[@]}"; do
+                SERVICE="${APPARMOR_SERVICE_MAP[$SERVICE_BIN]}"
+                # Skip if binary not installed
+                [[ ! -f "$SERVICE_BIN" ]] && continue
+                # Skip if service not running
+                systemctl is-active --quiet "$SERVICE" 2>/dev/null || continue
+                # Skip if profile already loaded
+                if aa-status 2>/dev/null | grep -qF "$SERVICE_BIN"; then
+                    echo "  [-] $(basename $SERVICE_BIN): profile already loaded, skipping"
+                    continue
+                fi
+                # Generate minimal profile and set to complain mode
+                # hangs waiting for input: aa-genprof "$SERVICE_BIN" -f /dev/null 2>/dev/null || true
+                aa-complain "$SERVICE_BIN" 2>/dev/null \
+                    && echo "  [~] $(basename $SERVICE_BIN): complain mode (run sudo aa-logprof after normal use)" \
+                    || echo "  [!] $(basename $SERVICE_BIN): failed to set complain mode"
+            done
 
-        # Summary
-        echo ""
-        echo "  AppArmor status summary:"
-        aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are in enforce|processes are unconfined"
-
+            # Summary
+            echo ""
+            echo "  AppArmor status summary:"
+            aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain|processes are in enforce|processes are unconfined"
+        else
+            echo "  [!] AppArmor installation failed — skipping configuration"
+        fi
     elif [[ "$APPARMOR_ENABLE" =~ ^[Yy]$ ]]; then
         echo "  Leaving profiles in complain mode."
         aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain"
@@ -2520,9 +2598,9 @@ fi
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ && "$ISINSTALLED_MARIADB" == "y" ]]; then
     echo "  Copying MariaDB config files"
     # MariaDB uses the same template as MySQL — reuse mysqld.cnf with same placeholders
-    if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
+    if [[ -f $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf ]]; then
         mkdir -p /etc/mysql/mariadb.conf.d/
-        cp $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
+        cp $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
 
         sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mariadb.conf.d/50-server.cnf
         sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mariadb.conf.d/50-server.cnf
@@ -2920,14 +2998,14 @@ check_service() {
     local service="$1"
     local name="$2"
 
-    if systemctl status "$service" &>/dev/null; then
-        if systemctl is-active --quiet "$service"; then
-            echo -e "$name: ${GREEN}[RUNNING]${NC}"
-        else
-            echo -e "$name: ${RED}[STOPPED]${NC}"
-        fi
-    else
+    if ! systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service"; then
         echo -e "$name: ${RED}[NOT INSTALLED]${NC}"
+    elif systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo -e "$name: ${GREEN}[RUNNING]${NC}"
+    elif systemctl is-failed --quiet "$service" 2>/dev/null; then
+        echo -e "$name: ${RED}[FAILED]${NC}"
+    else
+        echo -e "$name: ${YELLOW}[STOPPED]${NC}"
     fi
 }
 

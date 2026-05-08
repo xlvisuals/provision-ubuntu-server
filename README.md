@@ -73,6 +73,9 @@ For automated or repeatable deployments, create `ubuntu_provision.conf` in the s
 # ubuntu_provision.conf
 # Passwords intentionally omitted - will be prompted
 
+# Set to 'y' to skip confirmation question after configuration section
+FORCE_APPLY=n
+
 # Package versions
 PG_VERSION=18
 PYPY_VERSION=pypy3.11-v7.3.21-linux64
@@ -89,8 +92,8 @@ USER_SUDO_USER_USERNAME=example
 
 # System
 CONFIGURE_LVM=y
-LVM_DO_RESIZE=y
-LVM_TARGET_GB=all
+LVM_RESIZE_VOLUME=y
+LVM_RESIZE_TARGET_GB=all
 CONFIGURE_SWAP=y
 SWAP_SIZE_GB=2
 TUNE_SYSTEM=y
@@ -106,7 +109,7 @@ UNINSTALL_PACKAGES=y
 UPDATE_PACKAGES=y
 INSTALL_PACKAGES=y
 
-# Services
+# Services. MySQL and MariaDB are mutually exclusive. MySQL has precedence.
 INSTALL_UFW=y
 INSTALL_SSH=y
 INSTALL_FONTS=y
@@ -211,7 +214,7 @@ FORGEJO_SMTP_USER=forgejo@example.com
 WAZUH_MANAGER=wazuh.example.com
 ```
 
-> **Note:** Keep the conf file out of public repositories — it contains usernames and hostnames. Passwords are always prompted interactively and never stored in the conf file.
+> **Note:** Keep the conf file out of public repositories — it contains usernames and hostnames. Passwords are always prompted interactively and never stored in the saved conf file. But if you add them manually they will be considered.
 
 ---
 
