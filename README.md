@@ -87,15 +87,15 @@ Would you like to configure ufw? (y/n) : y
 Would you like to configure ssh? (y/n) : y
 Would you like to install fonts? (y/n) : y
    Install Microsoft core fonts? (y/n) : y
-Would you like to reinstall weasyprint? (y/n) : y
-Would you like to reinstall imagemagick? (y/n) : y
-Would you like to reinstall Python 3.14? (y/n) : y
+Would you like to install weasyprint? (y/n) : y
+Would you like to install imagemagick? (y/n) : y
+Would you like to install Python 3.14? (y/n) : y
 Would you like to install Pypy 3.11? (y/n) : n
-Would you like to reinstall nginx? (y/n) : y
+Would you like to install nginx? (y/n) : y
   nginx worker processes? : 2
-Would you like to reinstall valkey? (y/n) : y
-Would you like to reinstall MySQL? (y/n) : n
-Would you like to reinstall MariaDB? (y/n) : y
+Would you like to install valkey? (y/n) : y
+Would you like to install MySQL? (y/n) : n
+Would you like to install MariaDB? (y/n) : y
   MariaDB root password : ********
   InnoDB buffer pool chunk size (MB) : 128
   InnoDB buffer pool instances (1-64) : 1
@@ -106,7 +106,7 @@ Would you like to reinstall MariaDB? (y/n) : y
   Sort buffer size (KB) : 512
   Read buffer size (KB) : 128
   Read rnd buffer size (KB) : 1024
-Would you like to reinstall PostgreSQL 18? (y/n) : y
+Would you like to install PostgreSQL 18? (y/n) : y
   PostgreSQL superuser (postgres) password : ********
   Max connections : 100
   Available memory: 3868MB, CPU cores: 2
@@ -118,8 +118,8 @@ Would you like to reinstall PostgreSQL 18? (y/n) : y
   Max parallel workers (= cores) : 2
   Max parallel workers per gather (= cores/2) : 1
   Effective IO concurrency (SSD=100+, HDD=1) : 100
-Would you like to reinstall Mosquitto? (y/n) : y
-Would you like to reinstall Postfix (relay-only SMTP)? (y/n) : y
+Would you like to install Mosquitto? (y/n) : y
+Would you like to install Postfix (relay-only SMTP)? (y/n) : y
   SMTP relay host (mailserver address) : mail.example.com
   SMTP relay port : 587
   SMTP relay username : example@example.com
@@ -127,13 +127,13 @@ Would you like to reinstall Postfix (relay-only SMTP)? (y/n) : y
   Mail domain (used in From address) : example.com
   From address (e.g. root@domain.com) : example@example.com
   Forward local root mail to (root alias) : example@example.com
-Would you like to reinstall Monit? (y/n) : y
+Would you like to install Monit? (y/n) : y
   Send Monit alerts via Postfix? (y/n) : y
   Alert sender address : monit@example.com
   Monit admin username : admin
   Monit admin password : ********
   Alert recipient address : example@example.com
-Would you like to reinstall Webmin? (y/n) : y
+Would you like to install Webmin? (y/n) : y
 Would you like to install Grafana? (y/n) : y
   Send Grafana alerts via Postfix? (y/n) : y
   From address : grafana@example.com
@@ -172,7 +172,9 @@ FORCE_APPLY=n
 
 # Package versions
 PG_VERSION=18
-PYPY_VERSION=pypy3.11-v7.3.21-linux64
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.21-linux64
+FORGEJO_FALLBACK_VERSION=15.0.1
+FORGEJO_FALLBACK_PORT=3030
 
 # INSTALL_DEFAULT sets the default for all INSTALL_ and CONFIGURE_ variables
 # not explicitly set. Useful for targeted re-runs, e.g. just updating Postfix:

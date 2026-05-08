@@ -32,14 +32,14 @@
 ## Set package versions and other defaults (or in .conf file)
 ## --------------------------------------------
 
-PG_VERSION="18"
-PYPY_VERSION="pypy3.11-v7.3.21-linux64"
+PG_VERSION=18
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.21-linux64
+FORGEJO_FALLBACK_VERSION=15.0.1
+FORGEJO_FALLBACK_PORT=3030
 
-FORGEJO_FALLBACK_PORT="3030"
 
 ## Checks and Utilities
 ## --------------------------------------------
-
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then
@@ -64,6 +64,7 @@ if [[ -n "$1" ]]; then
         exit 1
     fi
 fi
+
 # If INSTALL_DEFAULT is set, apply INSTALL_DEFAULT to any INSTALL_ and CONFIGURE_ variable not explicitly set in conf
 if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
     for var in \
@@ -87,6 +88,13 @@ cd "$(dirname "$(readlink -f "$0")")" || exit
 # Config files are expected in the etc subdirectory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$SCRIPT_DIR"
+
+# Set system related variables
+PROCESSOR_COUNT=$(nproc)
+LOCAL_HOSTNAME=$(hostname -f)
+LOCAL_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
+USER_SUDO_USER_USERNAME=""
 
 # Exit when any command fails silently
 set -Eeuo pipefail
@@ -125,7 +133,7 @@ save_config() {
 }
 
 stop_autoupdate() {
-    for UNIT in "${APT_SERVICES[@]}"; do
+    for UNIT in "${APT_SERVICES_AUTOUPDATE[@]}"; do
         if systemctl is-active --quiet "$UNIT"; then
             echo "Stopping $UNIT ..."
             systemctl stop --no-block "$UNIT" > /dev/null 2>&1
@@ -183,13 +191,17 @@ on_ctrl_c() {
     exit 0
 }
 
-check_service() {
+check_service_installed() {
     local service="$1"
     local var="$2"
     local installed_var="${3:-}"
+    local units
 
-    if systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service"; then
-        echo "- $service is already installed"
+    # capturing to a variable with || true then grepping the variable is the safe approach whenever you need to check
+    # output from a command that might legitimately return non-zero while using 'set -e'
+    units=$(systemctl list-unit-files "${service}.service" 2>/dev/null) || true
+    if echo "$units" | grep -q "${service}.service"; then
+        echo "- $service is installed"
         printf -v "$var" "reinstall"
         [[ -n "$installed_var" ]] && printf -v "$installed_var" "y"
     else
@@ -290,7 +302,7 @@ trap 'on_error $LINENO' ERR
 trap on_ctrl_c SIGINT
 
 # LOGGING SETUP
-LOG_FILE="/var/log/ubuntu_provision_$(date +%F_%H%M%S).log"
+LOG_FILE="/var/log/ubuntu_provision_${LOCAL_HOSTNAME}_$(date +%F_%H%M%S).log"
 # Use 'exec' to redirect STDOUT and STDERR through 'tee'
 # This captures EVERYTHING that follows into the log file.
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -304,17 +316,7 @@ echo "Provisioning started: $(date)"
 echo "Logging to: $LOG_FILE"
 
 # Detect network IP, just for logging
-echo "--- 1. Detecting network and system parameters  ---"
-
-# Set system related variables
-
-PROCESSOR_COUNT=$(nproc)
-# Get hostname and ip address
-LOCAL_HOSTNAME=$(hostname -f)
-LOCAL_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
-# Detect the calling user
-REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
-USER_SUDO_USER_USERNAME=""
+echo "--- 1. Detecting network parameters  ---"
 
 # Detect network interface
 # PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
@@ -358,21 +360,21 @@ check_file /usr/bin/weasyprint PROMPT_WEASYPRINT
 check_file /usr/bin/convert PROMPT_IMAGEMAGICK
 
 echo "Determining installed services:"
-check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
-check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
-check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
-check_service mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
-check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
-check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
-check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
-check_service monit PROMPT_MONIT ISINSTALLED_MONIT
-check_service webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
-check_service grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
-check_service forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
-check_service fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
-check_service auditd PROMPT_AUDITD ISINSTALLED_AUDITD
-check_service suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-check_service wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
+check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
+check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service_installed mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
+check_service_installed postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
+check_service_installed mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
+check_service_installed postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
+check_service_installed monit PROMPT_MONIT ISINSTALLED_MONIT
+check_service_installed webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
+check_service_installed grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
+check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
+check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
+check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
+check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
+check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
 
 # Detect AppArmor state
 APPARMOR_INSTALLED=n
@@ -1140,12 +1142,11 @@ stop_autoupdate
 echo "Backup current configuration"
 BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
 if [[ -f "$BACKUP_SCRIPT" ]]; then
-    bash "$BACKUP_SCRIPT" "pre-apply"
+    bash "$BACKUP_SCRIPT" "${LOCAL_HOSTNAME}_pre-apply"
     echo "Pre-apply configuration backup complete."
 else
     echo "Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
 fi
-
 
 
 ## Apply settings
@@ -1641,8 +1642,8 @@ if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
     PYPY_BASE_URL="https://downloads.python.org/pypy"
     PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP 'pypy3\.11-v[\d.]+-linux64\.tar\.bz2' | sort -V | tail -n1) || true
     if [[ -z "$PYPY_FILENAME" ]]; then
-        echo "Could not determine latest PyPy 3.11 version. Falling back to $PYPY_VERSION."
-        PYPY_FILENAME="${PYPY_VERSION}.tar.bz2"
+        echo "Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION."
+        PYPY_FILENAME="${PYPY_FALLBACK_VERSION}.tar.bz2"
     fi
 
     PYPY_DIRNAME="${PYPY_FILENAME%.tar.bz2}"
@@ -2100,7 +2101,14 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
 
     echo "Determining latest forgejo version"
     rm -f forgejo-latest || true
-    FORGEJO_LATEST=$(curl -s https://codeberg.org/api/v1/repos/forgejo/forgejo/releases/latest | jq -r .tag_name | sed 's/v//')
+    FORGEJO_LATEST=$(curl -s --max-time 10 https://codeberg.org/api/v1/repos/forgejo/forgejo/releases/latest 2>/dev/null \
+    | jq -r .tag_name 2>/dev/null \
+    | sed 's/v//' || true)
+
+    if [[ -z "$FORGEJO_LATEST" ]]; then
+        echo "  [!] Warning: could not determine latest Forgejo version — using fallback $FORGEJO_FALLBACK_VERSION"
+        FORGEJO_LATEST="$FORGEJO_FALLBACK_VERSION"
+    fi
     echo "Downloading forgejo $FORGEJO_LATEST ..."
     wget -q -O forgejo-latest "https://codeberg.org/forgejo/forgejo/releases/download/v${FORGEJO_LATEST}/forgejo-${FORGEJO_LATEST}-linux-amd64" || true
 
@@ -2140,7 +2148,7 @@ EOF
             echo "Could not download service script. Skipping systemd setup for Forgejo."
         fi
     else
-        echo "Could not download gpg key. Skipping installation."
+        echo "Could not download Forgejo ${FORGEJO_LATEST}. Skipping installation."
     fi
 else
     echo "Skipping Forgejo installation."
@@ -2552,22 +2560,23 @@ echo "--- 44. Install configuration files ---"
 # Re-detect installed services now that installation is complete.
 # This updates ISINSTALLED_ variables to include services installed during this run,
 # so config files, Monit links, and restarts apply to all currently installed services.
+sleep 2
 echo "Detecting installed services (post-install):"
-check_service nginx PROMPT_NGINX ISINSTALLED_NGINX
-check_service valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
-check_service mysql PROMPT_MYSQL ISINSTALLED_MYSQL
-check_service mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
-check_service postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
-check_service mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
-check_service postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
-check_service monit PROMPT_MONIT ISINSTALLED_MONIT
-check_service webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
-check_service grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
-check_service forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
-check_service fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
-check_service auditd PROMPT_AUDITD ISINSTALLED_AUDITD
-check_service suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-check_service wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
+check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
+check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+check_service_installed mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
+check_service_installed postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
+check_service_installed mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
+check_service_installed postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
+check_service_installed monit PROMPT_MONIT ISINSTALLED_MONIT
+check_service_installed webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
+check_service_installed grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
+check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
+check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
+check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
+check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
+check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
 
 
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
@@ -2946,10 +2955,10 @@ echo "  Restarting services to apply configs"
 [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
 [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
 [[ "$ISINSTALLED_WAZUH" == "y" ]]      && systemctl restart wazuh-agent     || true
-
+sleep 2
+echo "  Services restarted"
 
 echo "Configuration files installed."
-
 
 echo ""
 echo "--- 45. Finalise installation ---"
@@ -2994,11 +3003,12 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # --- Function to check service status ---
-check_service() {
+check_service_status() {
     local service="$1"
     local name="$2"
-
-    if ! systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service"; then
+    local units
+    units=$(systemctl list-unit-files "${service}.service" 2>/dev/null) || true
+    if ! echo "$units" | grep -q "${service}.service"; then
         echo -e "$name: ${RED}[NOT INSTALLED]${NC}"
     elif systemctl is-active --quiet "$service" 2>/dev/null; then
         echo -e "$name: ${GREEN}[RUNNING]${NC}"
@@ -3087,21 +3097,21 @@ echo "Service status"
 echo "==========================================="
 echo -n "UFW Firewall "
 ufw status | grep -q "active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${RED}[INACTIVE]${NC}"
-check_service "nginx" "NGINX Web Server"
-check_service "valkey-server" "Valkey Server"
-check_service "mysql" "MySQL Server"
-check_service "mariadb" "MariaDB Server"
-check_service "postgresql" "PostgreSQL Server"
-check_service "mosquitto" "Mosquitto Broker"
-check_service "monit" "Monit Server"
-check_service "webmin" "Webmin Server"
-check_service "grafana-server" "Grafana Server"
-check_service "forgejo" "Forgejo Git Server"
-check_service "fail2ban" "Fail2Ban IDS"
-check_service "auditd" "Auditd Daemon"
-check_service "suricata" "Suricata IDS"
-check_service "wazuh-agent" "Wazuh Agent"
-check_service "postfix" "Postfix Mail Relay"
+check_service_status "nginx" "NGINX Web Server"
+check_service_status "valkey-server" "Valkey Server"
+check_service_status "mysql" "MySQL Server"
+check_service_status "mariadb" "MariaDB Server"
+check_service_status "postgresql" "PostgreSQL Server"
+check_service_status "mosquitto" "Mosquitto Broker"
+check_service_status "monit" "Monit Server"
+check_service_status "webmin" "Webmin Server"
+check_service_status "grafana-server" "Grafana Server"
+check_service_status "forgejo" "Forgejo Git Server"
+check_service_status "fail2ban" "Fail2Ban IDS"
+check_service_status "auditd" "Auditd Daemon"
+check_service_status "suricata" "Suricata IDS"
+check_service_status "wazuh-agent" "Wazuh Agent"
+check_service_status "postfix" "Postfix Mail Relay"
 
 echo ""
 echo "AppArmor"
@@ -3366,17 +3376,17 @@ echo "Logfile written to: $LOG_FILE"
 echo "Config backup written to current directory by ubuntu_backup_config.sh"
 
 echo ""
-echo "SSH connect command with port forwards:"
+echo "SSH connect command with port forwards (localport:hostname:hostport):"
 SSH_CMD="ssh"
-[[ "$ISINSTALLED_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 1883:localhost:1883"
-[[ "$ISINSTALLED_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 2812:localhost:2812"
-[[ "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3000:localhost:3000"
-[[ "$ISINSTALLED_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L ${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
-[[ "$ISINSTALLED_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
-[[ "$ISINSTALLED_MARIADB" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 3306:localhost:3306"
-[[ "$ISINSTALLED_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 5432:localhost:5432"
-[[ "$ISINSTALLED_VALKEY" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 6379:localhost:6379"
-[[ "$ISINSTALLED_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 10000:localhost:10000"
+[[ "$ISINSTALLED_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 11883:localhost:1883"
+[[ "$ISINSTALLED_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 12812:localhost:2812"
+[[ "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 13000:localhost:3000"
+[[ "$ISINSTALLED_FORGEJO" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 1${FORGEJO_PORT}:localhost:${FORGEJO_PORT}"
+[[ "$ISINSTALLED_MYSQL" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 13306:localhost:3306"
+[[ "$ISINSTALLED_MARIADB" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 13306:localhost:3306"
+[[ "$ISINSTALLED_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 15432:localhost:5432"
+[[ "$ISINSTALLED_VALKEY" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 16379:localhost:6379"
+[[ "$ISINSTALLED_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 20000:localhost:10000"
 SSH_CMD="$SSH_CMD $USER_SUDO_USER_USERNAME@$LOCAL_IP"
 echo "$SSH_CMD"
 
