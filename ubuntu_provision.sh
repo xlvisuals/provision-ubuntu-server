@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Xlvisuals Limited
-# 8 May 2026
+# 19 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -1314,7 +1314,7 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install apt-file apt-show-versions apt-utils arping btop ca-certificates curl debsums dnsutils \
           git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof lynis mc micro mtr nano ncdu ne \
-          needrestart net-tools nethogs nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute \
+          needrestart net-tools nethogs nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute tree \
           unattended-upgrades unzip vim vim-gui-common wget zip
     apt-file update
 
@@ -1466,6 +1466,7 @@ EOF
 
     echo ""
     echo "--- 17. Kernel tuning and hardening ---"
+    echo "Writing sysctl kernel parameters"
     rm -f /etc/sysctl.d/99-xlvisuals.conf
     cat <<'EOF' > /etc/sysctl.d/99-xlvisuals.conf
 # XLVISUALS recommended kernel tuning
@@ -1510,6 +1511,24 @@ EOF
     echo "Applying sysctl changes"
     #sysctl -p  # requires /etc/sysctl.conf
     sysctl --system
+
+    echo "Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag"
+    rm -f /etc/modprobe.d/dirty-frag.conf
+    cat <<'EOF' > /etc/modprobe.d/dirty-frag.conf
+# Disable vulnerable crypto/net modules to mitigate CVE-2026-31431 and Dirty Frag
+install algif_aead /bin/false
+install af_alg /bin/false
+install esp4 /bin/false
+install esp6 /bin/false
+install rxrpc /bin/false
+EOF
+
+    echo "Force kernel to read new rules"
+    sudo update-initramfs -u -k all
+
+    echo "Check kernel module status (should say \"install\")"
+    modprobe -n -v algif_aead esp4 esp6 rxrpc
+
 
     echo ""
     echo "--- 18. Secure Shared Memory ---"
@@ -3027,7 +3046,53 @@ echo "==========================================="
 echo ""
 echo "SSH config"
 echo "==========================================="
-sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# Fetch the active runtime configuration from sshd
+sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd' | \
+while read -r param value; do
+    # Normalize parameter name to lowercase for easy matching
+    param_lower=$(echo "$param" | tr '[:upper:]' '[:lower:]')
+    is_safe=false
+
+    case "$param_lower" in
+        # These parameters should strictly be "no"
+        permitrootlogin|passwordauthentication|challengeresponseauthentication|permitemptypasswords|x11forwarding|ignorerhosts)
+            if [ "$value" = "no" ]; then is_safe=true; fi
+            ;;
+        # These parameters should strictly be "yes"
+        usepam|pubkeyauthentication|tcpkeepalive|printmotd)
+            if [ "$value" = "yes" ]; then is_safe=true; fi
+            ;;
+        # MaxAuthTries should be 4 or fewer
+        maxauthtries)
+            if [ "$value" -le 4 ]; then is_safe=true; fi
+            ;;
+        # LogingGraceTime should be 60 seconds or fewer
+        logingracetime)
+            if [ "$value" -le 60 ]; then is_safe=true; fi
+            ;;
+        # MaxSessions should be restricted (e.g., 10 or fewer)
+        maxsessions)
+            if [ "$value" -le 10 ]; then is_safe=true; fi
+            ;;
+        # ClientAliveCountMax should be low (e.g., 2 or fewer)
+        clientalivecountmax)
+            if [ "$value" -le 2 ]; then is_safe=true; fi
+            ;;
+        # Pass-through rules: parameters that vary wildly by environment (like AllowUsers, MaxStartups, AllowTcpForwarding)
+        # We default them to green if they exist, or you can customize their rules below
+        allowusers|maxstartups|allowtcpforwarding|authenticationmethods)
+            is_safe=true
+            ;;
+    esac
+
+    # Print the result with the evaluated color
+    if [ "$is_safe" = true ]; then
+        echo -e "${param} ${value} -> ${GREEN}[OK]${NC}"
+    else
+        echo -e "${param} ${value} -> ${RED}[WARNING]${NC}"
+    fi
+done
 
 echo ""
 echo "Swap config"
@@ -3076,6 +3141,19 @@ if systemctl is-active --quiet disable-offload.service; then
 else
     echo -e "${NC}[NOT CONFIGURED]${NC}"
 fi
+
+echo ""
+echo "Vulnerable Kernel Modules (Page-Cache Exploits)"
+echo "==========================================="
+# Test if modprobe evaluates these modules to /bin/false
+for module in algif_aead af_alg esp4 esp6 rxrpc; do
+    status=$(modprobe -n -v "$module" 2>&1)
+    if echo "$status" | grep -q "install /bin/false"; then
+        echo -e "${module}: ${GREEN}[BLOCKED]${NC}"
+    else
+        echo -e "${module}: ${RED}[VULNERABLE / ALLOWED]${NC}"
+    fi
+done
 
 echo ""
 echo "Failed systemd units"
@@ -3194,9 +3272,9 @@ echo "==========================================="
 ufw_status() {
     local port="$1"
     if ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
-        echo -e "${GREEN}[ALLOWED]${NC}"
+        echo -e "${RED}[ALLOWED]${NC}"
     else
-        echo -e "${RED}[BLOCKED]${NC}"
+        echo -e "${GREEN}[BLOCKED]${NC}"
     fi
 }
 
