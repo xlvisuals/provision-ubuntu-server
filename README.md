@@ -1,67 +1,30 @@
 # Ubuntu Server Provisioning
 
-An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server to 
-quickly provision a secure webserver with **Auditd**, **Fail2Ban**, **Forgejo**, **Grafana**, **Monit**, **Mosquitto**, **MySQL**, **MariaDB**, **Nginx**, **Postfix**, **PostgreSQL**, **Suricata**, **Valkey**, **Wazuh Agent**, **Webmin**.
-The script is re-entrant, but best run on a fresh **minimized** or **standard** install.
-Every component is optional — you choose what gets installed and configured at runtime via interactive prompts.
+An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server (minimized or standard) to 
+quickly provision a secure server with 
 
+- Auditd
+- Fail2Ban
+- Forgejo
+- Grafana
+- Monit
+- Mosquitto
+- MySQL or MariaDB
+- Nginx
+- Postfix
+- PostgreSQL
+- Suricata
+- Valkey
+- Wazuh Agent
+- Webmin
 
----
-
-## Requirements
-
-| Requirement | Detail |
-|---|---|
-| OS | Ubuntu 24.04 LTS or 26.04 LTS Server (minimized or standard) |
-| Disk space | 8 GB (minimized install) · 12 GB (standard install) |
-| Privileges | Must be run as root (`sudo`) |
-| Network | Active internet connection |
-
----
-
-## Files
-
-| File | Description |
-|------|-------------|
-| `ubuntu_provision.sh` | Main provisioning script |
-| `ubuntu_provision.conf` | Configuration file (passwords omitted — prompted at runtime) |
-| `ubuntu_backup_config.sh` | Backs up all service configurations to a timestamped tarball |
-| `etc/` | Service configuration templates with `%%PLACEHOLDER%%` variables |
-
-All files must sit in the same directory. The script uses its own location as the root for config templates and the backup script.
+Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
 
 ---
 
-## Quick Start
+## What It Does
 
-To start, download the repository. If you have git available:
-```
-git clone https://github.com/xlvisuals/provision-ubuntu-server.git
-cd provision-ubuntu-server
-```
-
-Or without git and unzip, e.g. on a fresh minimized Ubuntu Server installation:
-```
-wget https://github.com/xlvisuals/provision-ubuntu-server/archive/refs/heads/main.zip -O provision-ubuntu-server.zip
-python3 -c "import zipfile; zipfile.ZipFile('provision-ubuntu-server.zip').extractall('.')"
-cd provision-ubuntu-server
-```
-
-Then run ubuntu_provision.sh 
-
-```bash
-sudo bash ubuntu_provision.sh
-```
-
-Or with a configuration file to skip interactive prompts:
-
-```bash
-sudo bash ubuntu_provision.sh ubuntu_provision.conf
-```
-
-A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.log`.
-
-> **After the script completes:** test SSH login in a *new* terminal window before closing the current session, then reboot to apply all changes.
+The script walks you through each step with a `y/n` prompt. If a `ubuntu_provision.conf` file is provided, those values are used automatically and the corresponding prompts are skipped (See Configuration File section below).
 
 ---
 
@@ -156,6 +119,161 @@ Would you like to configure AppArmor? (y/n) : y
   Set profiles to enforce mode? (y/n) : y
 Configuration complete.
 ```
+
+---
+
+## Quick Start
+
+To start, download the repository. If you have git available:
+```
+git clone https://github.com/xlvisuals/provision-ubuntu-server.git
+cd provision-ubuntu-server
+```
+
+Or without git and unzip, e.g. on a fresh minimized Ubuntu Server installation:
+```
+wget https://github.com/xlvisuals/provision-ubuntu-server/archive/refs/heads/main.zip -O provision-ubuntu-server.zip
+python3 -c "import zipfile; zipfile.ZipFile('provision-ubuntu-server.zip').extractall('.')"
+cd provision-ubuntu-server
+```
+
+Then run ubuntu_provision.sh 
+
+```bash
+sudo bash ubuntu_provision.sh
+```
+
+Or with a configuration file to skip interactive prompts:
+
+```bash
+sudo bash ubuntu_provision.sh ubuntu_provision.conf
+```
+
+A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.log`.
+
+> **After the script completes:** test SSH login in a *new* terminal window before closing the current session, then reboot to apply all changes.
+
+
+### System Configuration (optional)
+
+| Step | Description |
+|---|---|
+| Backup | Full config snapshot taken before prompting and again before applying changes, via `ubuntu_backup_config.sh` |
+| Timezone | Set to UTC |
+| LVM | Optionally resize LVM root volume to a target size or 100% of the volume group |
+| Swap | Creates a configurable swap file if none exists |
+| User | Creates a new sudo user or configures an existing one; sets up SSH key access |
+| Uninstall | Removes unneeded packages (`modemmanager`, `snapd`, `bluetooth`, `apport`, etc.) |
+| Updates | Full system upgrade via `apt-get full-upgrade` |
+| UFW Firewall | Default deny inbound, allow outbound; opens ports 22, 80, 443 as appropriate |
+| SSH Hardening | Key-only authentication, no root login, restricted `AllowUsers`, `MaxAuthTries 3` |
+| Sudo | 60-minute `timestamp_timeout`; NOPASSWD for `apt-get`, `systemctl`, `reboot`, and the health check script |
+| Update Timers | Unattended-upgrades scheduled at prompted UTC hours (apt update runs twice daily, 12 hours apart) |
+| File Limits | `nofile` and `nproc` raised via a drop-in in `limits.d` |
+| Kernel Tuning | `sysctl` hardening — swap tuning, ICMP redirect blocking, IP spoofing prevention, kernel pointer/dmesg restrictions |
+| Shared Memory | `/run/shm` mounted `nosuid,nodev,noexec` |
+| TCP TX Offload | Optionally disables TCP transmit offloading on the primary interface via a systemd oneshot service |
+| AppArmor | Optionally enables AppArmor, enforces available profiles, and sets installed services without profiles to complain mode |
+| Ubuntu Pro | If not attached, disables Ubuntu Pro background services to reduce noise |
+
+### Software Installed (optional)
+
+**Web Stack**
+
+| Package        | Default Port | Notes                                                                                                    |
+|----------------|---|----------------------------------------------------------------------------------------------------------|
+| Nginx          | 80, 443 |                                                                                                          |
+| MySQL Server   | 3306 | Tunable InnoDB parameters; auto-calculated from RAM if left blank                                        |
+| MariaDB Server | 3306 | Alternative to MySQL. Tunable InnoDB parameters; auto-calculated from RAM if left blank |
+| PostgreSQL 18  | 5432 | Tunable memory and parallelism parameters; auto-calculated from RAM/CPU if left blank                    |
+| Valkey         | 6379 | Redis-compatible cache                                                                                   |
+| Mosquitto      | 1883 | MQTT broker                                                                                              |
+
+**Mail**
+
+| Package | Notes |
+|---|---|
+| Postfix | Relay-only — accepts local mail and forwards to an external SMTP provider. Monit, Grafana, and Forgejo can each be configured to route through Postfix instead of providing individual SMTP credentials |
+
+**Management & Monitoring**
+
+| Package | Default Port | Notes |
+|---|---|---|
+| Webmin | 10000 | Installed via official `webmin-setup-repo.sh` |
+| Monit | 2812 | |
+| Grafana | 3000 | |
+| Forgejo | 3000 (3030 if Grafana also installed) | Self-hosted Git |
+
+**Runtimes**
+
+| Package | Notes |
+|---|---|
+| Python 3.14 | Via deadsnakes PPA on Ubuntu 24.04; pre-installed on Ubuntu 26.04 |
+| PyPy 3.11 | Installed to `/opt`, symlinked into `/usr/local/bin`; latest release fetched dynamically with hardcoded fallback |
+| Weasyprint | PDF generation |
+| ImageMagick | Image processing |
+| Fonts | Liberation, FreeFonts, Microsoft core fonts (EULA pre-accepted) |
+
+**Security**
+
+| Package | Notes |
+|---|---|
+| Fail2Ban | Bans IPs after repeated failed SSH attempts |
+| auditd | Kernel-level audit logging |
+| Suricata IDS | Network intrusion detection; `community-id` enabled; rules updated via `suricata-update` |
+| Wazuh Agent | SIEM agent; requires an existing Wazuh Manager; integrates Suricata and auditd logs |
+| UFW IP Blocklist | Daily cron job pulls and applies an IP blocklist via `ipsum` |
+
+**Tools**
+
+`vim` · `nano` · `ne` · `micro` · `tmux` · `btop` · `ncdu` · `nmap` · `lynis` · `iftop` · `iotop` · `sysstat` · `mc` · `speedtest-cli` · `jq` · `git` · `git-lfs` · `curl` · `wget` · `rsync` · `dnsutils` · `lsof` · `unzip` · `zip` · `p7zip-full` · `net-tools` · `debsums` · `iputils-ping` · `needrestart` · `smartmontools` (bare metal install only)
+
+
+---
+
+## Requirements
+
+| Requirement | Detail |
+|---|---|
+| OS | Ubuntu 24.04 LTS or 26.04 LTS Server (minimized or standard) |
+| Disk space | 8 GB (minimized install) · 12 GB (standard install) |
+| Privileges | Must be run as root (`sudo`) |
+| Network | Active internet connection |
+
+---
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `ubuntu_provision.sh` | Main provisioning script |
+| `ubuntu_provision.conf` | Configuration file (passwords omitted — prompted at runtime) |
+| `ubuntu_backup_config.sh` | Backs up all service configurations to a timestamped tarball |
+| `etc/` | Service configuration templates with `%%PLACEHOLDER%%` variables |
+
+All files must sit in the same directory. The script uses its own location as the root for config templates and the backup script.
+
+---
+
+## Port Reference
+
+| Service                | Port | UFW |
+|------------------------|---|---|
+| SSH                    | 22 | allowed |
+| Nginx HTTP             | 80 | allowed |
+| Nginx HTTPS            | 443 | allowed |
+| MySQL                  | 3306 | blocked |
+| MariaDB                | 3306 | blocked |
+| PostgreSQL             | 5432 | blocked |
+| Valkey                 | 6379 | blocked |
+| Mosquitto              | 1883 | blocked |
+| Postfix                | 25 | blocked |
+| Monit                  | 2812 | blocked |
+| Grafana                | 3000 | blocked |
+| Forgejo (standalone)   | 3000 | blocked |
+| Forgejo (with Grafana) | 3030 | blocked |
+| Webmin                 | 10000 | blocked |
+
 
 ---
 
@@ -312,106 +430,6 @@ WAZUH_MANAGER=wazuh.example.com
 
 > **Note:** Keep the conf file out of public repositories — it contains usernames and hostnames. Passwords are always prompted interactively and never stored in the saved conf file. But if you add them manually they will be considered.
 
----
-
-## What It Does
-
-The script walks you through each step with a `y/n` prompt. If a `ubuntu_provision.conf` file is provided, those values are used automatically and the corresponding prompts are skipped.
-
-### System Configuration
-
-| Step | Description |
-|---|---|
-| Backup | Full config snapshot taken before prompting and again before applying changes, via `ubuntu_backup_config.sh` |
-| Timezone | Set to UTC |
-| LVM | Optionally resize LVM root volume to a target size or 100% of the volume group |
-| Swap | Creates a configurable swap file if none exists |
-| User | Creates a new sudo user or configures an existing one; sets up SSH key access |
-| Uninstall | Removes unneeded packages (`modemmanager`, `snapd`, `bluetooth`, `apport`, etc.) |
-| Updates | Full system upgrade via `apt-get full-upgrade` |
-| UFW Firewall | Default deny inbound, allow outbound; opens ports 22, 80, 443 as appropriate |
-| SSH Hardening | Key-only authentication, no root login, restricted `AllowUsers`, `MaxAuthTries 3` |
-| Sudo | 60-minute `timestamp_timeout`; NOPASSWD for `apt-get`, `systemctl`, `reboot`, and the health check script |
-| Update Timers | Unattended-upgrades scheduled at prompted UTC hours (apt update runs twice daily, 12 hours apart) |
-| File Limits | `nofile` and `nproc` raised via a drop-in in `limits.d` |
-| Kernel Tuning | `sysctl` hardening — swap tuning, ICMP redirect blocking, IP spoofing prevention, kernel pointer/dmesg restrictions |
-| Shared Memory | `/run/shm` mounted `nosuid,nodev,noexec` |
-| TCP TX Offload | Optionally disables TCP transmit offloading on the primary interface via a systemd oneshot service |
-| AppArmor | Optionally enables AppArmor, enforces available profiles, and sets installed services without profiles to complain mode |
-| Ubuntu Pro | If not attached, disables Ubuntu Pro background services to reduce noise |
-
-### Software Installed (all optional)
-
-**Web Stack**
-
-| Package        | Default Port | Notes                                                                                                    |
-|----------------|---|----------------------------------------------------------------------------------------------------------|
-| Nginx          | 80, 443 |                                                                                                          |
-| MySQL Server   | 3306 | Tunable InnoDB parameters; auto-calculated from RAM if left blank                                        |
-| MariaDB Server | 3306 | Alternative to MySQL. Tunable InnoDB parameters; auto-calculated from RAM if left blank |
-| PostgreSQL 18  | 5432 | Tunable memory and parallelism parameters; auto-calculated from RAM/CPU if left blank                    |
-| Valkey         | 6379 | Redis-compatible cache                                                                                   |
-| Mosquitto      | 1883 | MQTT broker                                                                                              |
-
-**Mail**
-
-| Package | Notes |
-|---|---|
-| Postfix | Relay-only — accepts local mail and forwards to an external SMTP provider. Monit, Grafana, and Forgejo can each be configured to route through Postfix instead of providing individual SMTP credentials |
-
-**Management & Monitoring**
-
-| Package | Default Port | Notes |
-|---|---|---|
-| Webmin | 10000 | Installed via official `webmin-setup-repo.sh` |
-| Monit | 2812 | |
-| Grafana | 3000 | |
-| Forgejo | 3000 (3030 if Grafana also installed) | Self-hosted Git |
-
-**Runtimes**
-
-| Package | Notes |
-|---|---|
-| Python 3.14 | Via deadsnakes PPA on Ubuntu 24.04; pre-installed on Ubuntu 26.04 |
-| PyPy 3.11 | Installed to `/opt`, symlinked into `/usr/local/bin`; latest release fetched dynamically with hardcoded fallback |
-| Weasyprint | PDF generation |
-| ImageMagick | Image processing |
-| Fonts | Liberation, FreeFonts, Microsoft core fonts (EULA pre-accepted) |
-
-**Security**
-
-| Package | Notes |
-|---|---|
-| Fail2Ban | Bans IPs after repeated failed SSH attempts |
-| auditd | Kernel-level audit logging |
-| Suricata IDS | Network intrusion detection; `community-id` enabled; rules updated via `suricata-update` |
-| Wazuh Agent | SIEM agent; requires an existing Wazuh Manager; integrates Suricata and auditd logs |
-| UFW IP Blocklist | Daily cron job pulls and applies an IP blocklist via `ipsum` |
-
-**Tools**
-
-`vim` · `nano` · `ne` · `micro` · `tmux` · `btop` · `ncdu` · `nmap` · `lynis` · `iftop` · `iotop` · `sysstat` · `mc` · `speedtest-cli` · `jq` · `git` · `git-lfs` · `curl` · `wget` · `rsync` · `dnsutils` · `lsof` · `unzip` · `zip` · `p7zip-full` · `net-tools` · `debsums` · `iputils-ping` · `needrestart` · `smartmontools` (bare metal only)
-
----
-
-## Port Reference
-
-| Service                | Port | UFW |
-|------------------------|---|---|
-| SSH                    | 22 | allowed |
-| Nginx HTTP             | 80 | allowed |
-| Nginx HTTPS            | 443 | allowed |
-| MySQL                  | 3306 | blocked |
-| MariaDB                | 3306 | blocked |
-| PostgreSQL             | 5432 | blocked |
-| Valkey                 | 6379 | blocked |
-| Mosquitto              | 1883 | blocked |
-| Postfix                | 25 | blocked |
-| Monit                  | 2812 | blocked |
-| Grafana                | 3000 | blocked |
-| Forgejo (standalone)   | 3000 | blocked |
-| Forgejo (with Grafana) | 3030 | blocked |
-| Webmin                 | 10000 | blocked |
 
 ---
 
