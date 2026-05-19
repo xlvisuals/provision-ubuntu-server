@@ -1,0 +1,2 @@
+check file reboot-required path /var/run/reboot-required
+    if exist for 1 cycles then alert

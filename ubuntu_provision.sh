@@ -2837,6 +2837,17 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
         fi
     done
 
+    # Link remaining utilities
+    for UTILITY in "reboot-required" "disk-alerts"; do
+        SRC="$CONFIG_DIR/etc/monit/conf-available/$UTILITY"
+        DEST="/etc/monit/conf-available/$UTILITY"
+        LINK="/etc/monit/conf-enabled/$UTILITY"
+        [[ ! -f "$SRC" ]] && continue
+        [[ -L "$LINK" ]] && continue
+        cp "$SRC" "$DEST"
+        ln -s "$DEST" /etc/monit/conf-enabled/
+    done
+
     # Remove conf-enabled links for services that are no longer installed
     declare -A SERVICE_VAR_MAP=(
         ["mysql"]="ISINSTALLED_MYSQL"
