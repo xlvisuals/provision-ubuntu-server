@@ -1,6 +1,6 @@
 #!/bin/bash
-# $HEALTH_CHECK_SCRIPT
-# XLVISUALS Server Security & Services Health Check
+# UBUNTU 24.04 and 26.04 SERVER HEALTH CHECK SCRIPT
+# by Xlvisuals Limited
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then

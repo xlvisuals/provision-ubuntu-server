@@ -33,8 +33,9 @@
 ## --------------------------------------------
 
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.21-linux64
-FORGEJO_FALLBACK_VERSION=15.0.1
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22-linux64
+FORGEJO_FALLBACK_VERSION=15.0.2
+MODULEJAIL_FALLBACK_VERSION=1.2.3
 FORGEJO_FALLBACK_PORT=3030
 
 
@@ -77,7 +78,7 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
     done
     for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
                UNINSTALL_PACKAGES UPDATE_PACKAGES INSTALL_PACKAGES \
-               DISABLE_TX_OFFLOAD; do
+               DISABLE_TX_OFFLOAD CONFIGURE_MODULEJAIL; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
 fi
@@ -809,7 +810,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
 fi
 
 [[ "$PROMPT_WEBMIN" == "install" ]] && default_val="y" || default_val="n"
-prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n  $default_val
+prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n $default_val
 
 [[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
@@ -920,7 +921,6 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
     while true; do
         #read -p "  Enter IP or Hostname of Wazuh Manager : " WAZUH_MANAGER
         prompt_if_unset WAZUH_MANAGER "  Enter IP or Hostname of Wazuh Manager" n
-        echo
         if [[ ${#WAZUH_MANAGER} -ge 4 ]]; then
             break
         fi
@@ -935,6 +935,10 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     prompt_if_unset APPARMOR_ENABLE "  Enable AppArmor? (y/n)" n "y"
     prompt_if_unset APPARMOR_ENFORCE "  Set profiles to enforce mode? (y/n)" n "$( [[ "$APPARMOR_CURRENT_MODE" == "enforce" ]] && echo y || echo n )"
 fi
+
+# Configure modulejails at the end
+prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
+    
 echo "Configuration complete."
 
 ## Print Configuration
@@ -961,8 +965,8 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ && "$ACTIVE_SWAP" == "No" ]]; then
 fi
 echo "Tune system?               : $TUNE_SYSTEM"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
-  echo "  apt update hour (UTC)   : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
-  echo "  apt upgrade hour (UTC)  : $AUTO_UPGRADE_DAILY_HOUR"
+  echo "  apt update hour (UTC)    : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
+  echo "  apt upgrade hour (UTC)   : $AUTO_UPGRADE_DAILY_HOUR"
 fi
 echo "Uninstall extra packages?  : $UNINSTALL_PACKAGES"
 echo "Update installed packages? : $UPDATE_PACKAGES"
@@ -1104,6 +1108,7 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
   echo "  Enable AppArmor          : $APPARMOR_ENABLE"
   echo "  Enforce mode             : $APPARMOR_ENFORCE"
 fi
+echo "Configure modulejail?      : $CONFIGURE_MODULEJAIL"
 
 echo ""
 save_config
@@ -1528,7 +1533,6 @@ EOF
 
     echo "Check kernel module status (should say \"install\")"
     modprobe -n -v algif_aead esp4 esp6 rxrpc
-
 
     echo ""
     echo "--- 18. Secure Shared Memory ---"
@@ -2036,6 +2040,7 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
         apt-get purge -y webmin || true
     fi
 
+    # Alternative manual download of latest version: https://webmin.com/download/deb/webmin-current.deb
     # Use official Webmin setup script to configure repo and GPG key
     curl -fsSL https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh -o /tmp/webmin-setup-repo.sh || true
 
@@ -2050,6 +2055,7 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
         fi
     else
         echo "Could not download Webmin setup script. Skipping installation."
+        echo "Alternative manual download of latest version: https://webmin.com/download/deb/webmin-current.deb"
     fi
 else
     echo "Skipping Webmin installation."
@@ -2487,7 +2493,7 @@ fi
 
 
 echo ""
-echo "--- 43 Configure AppArmor ---"
+echo "--- 43. Configure AppArmor ---"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
     # Always ensure utilities and profiles are installed
@@ -2572,9 +2578,41 @@ else
     echo "Skipping AppArmor configuration."
 fi
 
+# Configure modulejail only after all services are running. Otherwise detecting unused modules will be wrong.
+echo ""
+echo "--- 44. Configure Modulejail kernel blocklist ---"
+if [[ "${CONFIGURE_MODULEJAIL:-}" =~ ^[Yy]$ ]]; then
+
+    # Dynamically fetch the latest tag name via the GitHub API
+    MODULEJAIL_LATEST=$(curl -sSL https://api.github.com/repos/jnuyens/modulejail/releases/latest 2>/dev/null \
+    | jq -r .tag_name 2>/dev/null \
+    | sed 's/v//' || true)
+
+    if [[ -z "$MODULEJAIL_LATEST" ]]; then
+        echo "  [!] Warning: could not determine latest modulejail version — using fallback $MODULEJAIL_FALLBACK_VERSION"
+        MODULEJAIL_LATEST="$MODULEJAIL_FALLBACK_VERSION"
+    fi
+
+    echo "Downloading modulejail script v${MODULEJAIL_LATEST} ..."
+    curl -fsSL https://raw.githubusercontent.com/jnuyens/modulejail/v${MODULEJAIL_LATEST}/modulejail -o /tmp/modulejail || true
+    if [[ -f "/tmp/modulejail" ]]; then
+        echo "Running modulejail script to jail unused modules..."
+        sudo sh /tmp/modulejail || true
+
+        if [[ -f "/etc/modprobe.d/modulejail-blacklist.conf" ]]; then
+            echo "  [V] Success. To revert: sudo rm /etc/modprobe.d/modulejail-blacklist.conf "
+        else
+            echo "  [!] No modules jailed"
+        fi
+    else
+        echo "  [!] modulejail download failed"
+    fi
+else
+    echo "Skipping modulejail."
+fi
 
 echo ""
-echo "--- 44. Install configuration files ---"
+echo "--- 45. Install configuration files ---"
 
 # Re-detect installed services now that installation is complete.
 # This updates ISINSTALLED_ variables to include services installed during this run,
@@ -2829,7 +2867,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
         DEST="/etc/monit/conf-available/$SERVICE"
         LINK="/etc/monit/conf-enabled/$SERVICE"
         if [[ -f "$SRC" ]]; then
-            cp "$SRC" "$DEST"
+            cp -f "$SRC" "$DEST"
             rm -f "$LINK"
             ln -s "$DEST" /etc/monit/conf-enabled/
         else
@@ -2844,7 +2882,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
         LINK="/etc/monit/conf-enabled/$UTILITY"
         [[ ! -f "$SRC" ]] && continue
         [[ -L "$LINK" ]] && continue
-        cp "$SRC" "$DEST"
+        cp -f "$SRC" "$DEST"
         ln -s "$DEST" /etc/monit/conf-enabled/
     done
 
@@ -2991,7 +3029,7 @@ echo "  Services restarted"
 echo "Configuration files installed."
 
 echo ""
-echo "--- 45. Finalise installation ---"
+echo "--- 46. Finalise installation ---"
 
 sysctl --system
 
@@ -3012,14 +3050,14 @@ restart_autoupdate
 
 
 echo ""
-echo "--- 46. Generating Health Check Script ---"
+echo "--- 47. Generating Health Check Script ---"
 HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
 # We start the file with the header and basic checks.
 # use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
 cat <<'EOF' > $HEALTH_CHECK_SCRIPT
 #!/bin/bash
-# $HEALTH_CHECK_SCRIPT
-# XLVISUALS Server Security & Services Health Check
+# UBUNTU 24.04 and 26.04 SERVER HEALTH CHECK SCRIPT
+# by Xlvisuals Limited
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then
