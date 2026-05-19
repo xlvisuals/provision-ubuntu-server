@@ -96,7 +96,7 @@ Would you like to install Monit? (y/n) : y
   Monit admin username : admin
   Monit admin password : ********
   Alert recipient address : example@example.com
-Would you like to install Webmin? (y/n) : y
+Would you like to install Webmin? (y/n) : n
 Would you like to install Grafana? (y/n) : y
   Send Grafana alerts via Postfix? (y/n) : y
   From address : grafana@example.com
@@ -117,6 +117,7 @@ Would you like to configure AppArmor? (y/n) : y
   AppArmor status: installed=y, enabled=y, mode=enforce
   Enable AppArmor? (y/n) : y
   Set profiles to enforce mode? (y/n) : y
+Blacklist unused kernel modules using modulejail? (y/n): y
 Configuration complete.
 ```
 
@@ -216,13 +217,14 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 
 **Security**
 
-| Package | Notes |
-|---|---|
-| Fail2Ban | Bans IPs after repeated failed SSH attempts |
-| auditd | Kernel-level audit logging |
-| Suricata IDS | Network intrusion detection; `community-id` enabled; rules updated via `suricata-update` |
-| Wazuh Agent | SIEM agent; requires an existing Wazuh Manager; integrates Suricata and auditd logs |
-| UFW IP Blocklist | Daily cron job pulls and applies an IP blocklist via `ipsum` |
+| Package | Notes                                                                                                              |
+|---|--------------------------------------------------------------------------------------------------------------------|
+| Fail2Ban | Bans IPs after repeated failed SSH attempts                                                                        |
+| auditd | Kernel-level audit logging                                                                                         |
+| Suricata IDS | Network intrusion detection; `community-id` enabled; rules updated via `suricata-update`                           |
+| Wazuh Agent | SIEM agent; requires an existing Wazuh Manager; integrates Suricata and auditd logs                                |
+| UFW IP Blocklist | Daily cron job pulls and applies an IP blocklist via `ipsum`                                                       |
+| modulejail | Shrink kernel-module attack surface by writing a modprobe.d blacklist for every kernel module not currently in use |
 
 **Tools**
 
@@ -257,22 +259,22 @@ All files must sit in the same directory. The script uses its own location as th
 
 ## Port Reference
 
-| Service                | Port | UFW |
-|------------------------|---|---|
-| SSH                    | 22 | allowed |
-| Nginx HTTP             | 80 | allowed |
-| Nginx HTTPS            | 443 | allowed |
-| MySQL                  | 3306 | blocked |
-| MariaDB                | 3306 | blocked |
-| PostgreSQL             | 5432 | blocked |
-| Valkey                 | 6379 | blocked |
-| Mosquitto              | 1883 | blocked |
-| Postfix                | 25 | blocked |
-| Monit                  | 2812 | blocked |
-| Grafana                | 3000 | blocked |
-| Forgejo (standalone)   | 3000 | blocked |
-| Forgejo (with Grafana) | 3030 | blocked |
-| Webmin                 | 10000 | blocked |
+| Service                | Port | Firewall status |
+|------------------------|---|-----------------|
+| SSH                    | 22 | **allowed**     |
+| Nginx HTTP             | 80 | **allowed**         |
+| Nginx HTTPS            | 443 | **allowed**         |
+| MySQL                  | 3306 | blocked         |
+| MariaDB                | 3306 | blocked         |
+| PostgreSQL             | 5432 | blocked         |
+| Valkey                 | 6379 | blocked         |
+| Mosquitto              | 1883 | blocked         |
+| Postfix                | 25 | blocked         |
+| Monit                  | 2812 | blocked         |
+| Grafana                | 3000 | blocked         |
+| Forgejo (standalone)   | 3000 | blocked         |
+| Forgejo (with Grafana) | 3030 | blocked         |
+| Webmin                 | 10000 | blocked         |
 
 
 ---
@@ -290,8 +292,8 @@ FORCE_APPLY=n
 
 # Package versions
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.21-linux64
-FORGEJO_FALLBACK_VERSION=15.0.1
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22-linux64
+FORGEJO_FALLBACK_VERSION=15.0.2
 FORGEJO_FALLBACK_PORT=3030
 
 # INSTALL_DEFAULT sets the default for all INSTALL_ and CONFIGURE_ variables
@@ -311,12 +313,13 @@ LVM_RESIZE_TARGET_GB=all
 CONFIGURE_SWAP=y
 SWAP_SIZE_GB=2
 TUNE_SYSTEM=y
-AUTO_UPDATE_DAILY_HOUR=10
-AUTO_UPGRADE_DAILY_HOUR=11
+AUTO_UPDATE_DAILY_HOUR=22
+AUTO_UPGRADE_DAILY_HOUR=23
 DISABLE_TX_OFFLOAD=n
 CONFIGURE_APPARMOR=y
 APPARMOR_ENABLE=y
 APPARMOR_ENFORCE=y
+CONFIGURE_MODULEJAIL=y
 
 # Packages
 UNINSTALL_PACKAGES=y
