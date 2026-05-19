@@ -755,13 +755,23 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     prompt_if_unset POSTFIX_FROM_ADDRESS    "  From address (e.g. root@domain.com)"      n $TEMP_POSTFIX_FROM_ADDRESS
     prompt_if_unset POSTFIX_ROOT_ALIAS      "  Forward local root mail to (root alias)"  n $POSTFIX_FROM_ADDRESS
 else
-    POSTFIX_RELAY_HOST=''
-    POSTFIX_RELAY_PORT=''
-    POSTFIX_RELAY_USERNAME=''
-    POSTFIX_RELAY_PASSWORD=''
-    POSTFIX_DOMAIN=''
-    POSTFIX_FROM_ADDRESS=''
-    POSTFIX_ROOT_ALIAS=''
+    if [[ "$ISINSTALLED_POSTFIX" == "y" && -f /etc/postfix/main.cf ]]; then
+        # Read existing Postfix config so downstream prompts (Monit, Grafana, Forgejo)
+        # can use POSTFIX_DOMAIN and POSTFIX_FROM_ADDRESS for their default From addresses
+        POSTFIX_DOMAIN="${POSTFIX_DOMAIN:-$(cat /etc/mailname 2>/dev/null || true)}"
+        POSTFIX_FROM_ADDRESS="${POSTFIX_FROM_ADDRESS:-$(awk '{print $2}' /etc/postfix/sender_canonical_maps 2>/dev/null | head -1 || true)}"
+        POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-$(grep -oP '^root:\s*\K.*' /etc/aliases 2>/dev/null | head -1 | xargs || true)}"
+        POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
+        POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
+    else
+        POSTFIX_RELAY_HOST=''
+        POSTFIX_RELAY_PORT=''
+        POSTFIX_RELAY_USERNAME=''
+        POSTFIX_RELAY_PASSWORD=''
+        POSTFIX_DOMAIN=''
+        POSTFIX_FROM_ADDRESS=''
+        POSTFIX_ROOT_ALIAS=''
+    fi
 fi
 
 [[ "$PROMPT_MONIT" == "install" ]] && default_val="y" || default_val="n"
@@ -770,7 +780,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # allow conf file to override, fall back to hostname, never prompt
 	  MONIT_HOST_NAME="${MONIT_HOST_NAME:-$LOCAL_HOSTNAME}"
 
-    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         prompt_if_unset MONIT_USE_POSTFIX "  Send Monit alerts via Postfix? (y/n)" n "y"
     else
         MONIT_USE_POSTFIX="n"
@@ -815,7 +825,7 @@ prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" 
 [[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
-    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         prompt_if_unset GRAFANA_USE_POSTFIX "  Send Grafana alerts via Postfix? (y/n)" n "y"
     else
         GRAFANA_USE_POSTFIX="n"
@@ -856,7 +866,7 @@ fi
 [[ "$PROMPT_FORGEJO" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_FORGEJO "Would you like to $PROMPT_FORGEJO Forgejo? (y/n)" n  $default_val
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
-    if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
+    if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ || "$ISINSTALLED_GRAFANA" == "y" ]]; then
         # If already set to 3000 (Grafana's port), clear it so the prompt fires
         FORGEJO_PORT="${FORGEJO_PORT:-}"
         if [[ "$FORGEJO_PORT" == "3000" ]]; then
@@ -869,7 +879,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     fi
     prompt_if_unset FORGEJO_DOMAIN "  Enter Forgejo domain or ip" n "$LOCAL_IP"
 
-    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         prompt_if_unset FORGEJO_USE_POSTFIX "  Send Forgejo mail via Postfix? (y/n)" n "y"
     else
         FORGEJO_USE_POSTFIX="n"
@@ -877,8 +887,9 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
 
     if [[ "$FORGEJO_USE_POSTFIX" =~ ^[Yy]$ ]]; then
         FORGEJO_MAILER_ENABLED="true"
-        FORGEJO_SMTP_ADDR=""
-        FORGEJO_SMTP_PORT=""
+        FORGEJO_SMTP_PROTOCOL="smtp"
+        FORGEJO_SMTP_ADDR="localhost"
+        FORGEJO_SMTP_PORT="25"
         FORGEJO_SMTP_USER=""
         FORGEJO_SMTP_PASSWORD=""
         prompt_if_unset FORGEJO_SMTP_FROM "  From address"  n "forgejo@${POSTFIX_DOMAIN}"
@@ -887,6 +898,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         if [[ "$FORGEJO_MAILER_ENABLED" == "true" ]]; then
             prompt_if_unset FORGEJO_SMTP_ADDR   "  SMTP host"                   n
             prompt_if_unset FORGEJO_SMTP_PORT   "  SMTP port"                   n "587"
+            prompt_if_unset FORGEJO_SMTP_PROTOCOL   "  SMTP protocol"           n "smtps"
             prompt_if_unset FORGEJO_SMTP_FROM   "  From address"                n
             prompt_if_unset FORGEJO_SMTP_USER   "  SMTP username"               n
             while true; do
@@ -938,7 +950,7 @@ fi
 
 # Configure modulejails at the end
 prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
-    
+
 echo "Configuration complete."
 
 ## Print Configuration
@@ -1085,6 +1097,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$FORGEJO_MAILER_ENABLED" == "true" ]]; then
       echo "  SMTP host                : $FORGEJO_SMTP_ADDR"
       echo "  SMTP port                : $FORGEJO_SMTP_PORT"
+      echo "  SMTP protocol            : $FORGEJO_SMTP_PROTOCOL"
       echo "  From address             : $FORGEJO_SMTP_FROM"
       echo "  SMTP user                : $FORGEJO_SMTP_USER"
       echo "  SMTP password            : ********"
@@ -2766,14 +2779,24 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ && "$ISINSTALLED_FORGEJO" == "y" ]]; then
     if [[ -f $CONFIG_DIR/etc/forgejo/app.ini ]]; then
         cp $CONFIG_DIR/etc/forgejo/app.ini /etc/forgejo/app.ini
 
-        sed -i "s|%%FORGEJO_DOMAIN%%|$FORGEJO_DOMAIN|g" /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_PORT%%|$FORGEJO_PORT|g" /etc/forgejo/app.ini
+        # Generate a random secret key for this installation
+        FORGEJO_SECRET_KEY=$(openssl rand -hex 32)
+
+        sed -i "s|%%FORGEJO_DOMAIN%%|$FORGEJO_DOMAIN|g"             /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_PORT%%|$FORGEJO_PORT|g"                 /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SECRET_KEY%%|$FORGEJO_SECRET_KEY|g"     /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_DB_TYPE%%|$FORGEJO_DB_TYPE|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_DB_HOST%%|$FORGEJO_DB_HOST|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_DB_NAME%%|$FORGEJO_DB_NAME|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_DB_USER%%|$FORGEJO_DB_USER|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_DB_PASSWORD%%|$FORGEJO_DB_PASSWORD|g"   /etc/forgejo/app.ini
         sed -i "s|%%FORGEJO_MAILER_ENABLED%%|$FORGEJO_MAILER_ENABLED|g" /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_ADDR%%|$FORGEJO_SMTP_ADDR|g"          /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_PORT%%|$FORGEJO_SMTP_PORT|g"          /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_FROM%%|$FORGEJO_SMTP_FROM|g"          /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_USER%%|$FORGEJO_SMTP_USER|g"          /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_PASSWORD%%|$FORGEJO_SMTP_PASSWORD|g"  /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_ADDR%%|$FORGEJO_SMTP_ADDR|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_PORT%%|$FORGEJO_SMTP_PORT|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_PROTOCOL%%|$FORGEJO_SMTP_PROTOCOL|g"   /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_FROM%%|$FORGEJO_SMTP_FROM|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_USER%%|$FORGEJO_SMTP_USER|g"           /etc/forgejo/app.ini
+        sed -i "s|%%FORGEJO_SMTP_PASSWORD%%|$FORGEJO_SMTP_PASSWORD|g"   /etc/forgejo/app.ini
 
         chown root:git /etc/forgejo/app.ini
         chmod 640 /etc/forgejo/app.ini
@@ -2868,6 +2891,10 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
         LINK="/etc/monit/conf-enabled/$SERVICE"
         if [[ -f "$SRC" ]]; then
             cp -f "$SRC" "$DEST"
+            # Substitute version-specific paths
+            if [[ "$SERVICE" == "postgresql" ]]; then
+                sed -i "s|%%PG_VERSION%%|$PG_VERSION|g" "$DEST"
+            fi
             rm -f "$LINK"
             ln -s "$DEST" /etc/monit/conf-enabled/
         else

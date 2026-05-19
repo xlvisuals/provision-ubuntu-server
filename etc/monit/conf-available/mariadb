@@ -1,17 +1,13 @@
- check process mysqld with pidfile /var/run/mysqld/mysqld.pid
-   group mysql
-   start program = "/usr/bin/systemctl start mysql" with timeout 60 seconds
-   stop program = "/usr/bin/systemctl stop mysql" with timeout 60 seconds
-   if failed host localhost port 3306 protocol mysql with timeout 15 seconds for 3 times within 4 cycles then restart
-   if failed host localhost port 3306 protocol mysql with timeout 15 seconds for 3 times within 4 cycles then alert
+ check process mariadbd with pidfile /var/run/mysqld/mysqld.pid
+   group mariadb
+   start program = "/usr/bin/systemctl start mariadb" with timeout 60 seconds
+   stop  program = "/usr/bin/systemctl stop mariadb" with timeout 60 seconds
+   if failed host 127.0.0.1 port 3306 protocol mysql with timeout 15 seconds for 3 times within 4 cycles then restart
+   if failed host 127.0.0.1 port 3306 protocol mysql with timeout 15 seconds for 3 times within 4 cycles then alert
    if failed unixsocket /var/run/mysqld/mysqld.sock protocol mysql for 3 times within 4 cycles then restart
    if failed unixsocket /var/run/mysqld/mysqld.sock protocol mysql for 3 times within 4 cycles then alert
-   if 5 restarts with 5 cycles then timeout
-#   if cpu > 60% for 2 cycles then alert
-#   if memory usage > 50% for 4 cycles then alert
-#   if memory usage > 2048 Mb for 4 cycles then alert
-   depend mysql_bin
-
- check file mysql_bin with path /usr/sbin/mysqld
-   group mysql
+   if 5 restarts within 5 cycles then timeout
+   depend mariadb_bin
+ check file mariadb_bin with path /usr/sbin/mariadbd
+   group mariadb
    include /etc/monit/templates/rootbin
