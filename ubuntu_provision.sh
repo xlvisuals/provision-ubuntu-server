@@ -763,6 +763,7 @@ else
         POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-$(grep -oP '^root:\s*\K.*' /etc/aliases 2>/dev/null | head -1 | xargs || true)}"
         POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
         POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
+        echo "  Existing postfix configuration loaded"
     else
         POSTFIX_RELAY_HOST=''
         POSTFIX_RELAY_PORT=''
@@ -911,6 +912,51 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
             done
         fi
     fi
+
+    # Database configuration
+    prompt_if_unset FORGEJO_DB_TYPE "  Forgejo database type (sqlite3/mysql/postgres)" n "sqlite3"
+    if [[ "$FORGEJO_DB_TYPE" != "sqlite3" ]]; then
+        prompt_if_unset FORGEJO_DB_NAME "  Forgejo databas name" n "forgejo"
+        prompt_if_unset FORGEJO_DB_USER "  Forgejo databas user" n "forgejo"
+        while true; do
+            prompt_if_unset FORGEJO_DB_PASSWORD "  Forgejo databas password" secret
+            if [ "${#FORGEJO_DB_PASSWORD}" -ge 4 ]; then
+                break
+            fi
+            FORGEJO_DB_PASSWORD=''
+            echo "  Password is too short. Must be at least 4 characters."
+        done
+        if [[ "$FORGEJO_DB_TYPE" == "mysql" ]]; then
+            FORGEJO_DB_HOST="127.0.0.1:3306"
+        elif [[ "$FORGEJO_DB_TYPE" == "postgres" ]]; then
+            FORGEJO_DB_HOST="127.0.0.1:5432"
+        fi
+    else
+        FORGEJO_DB_NAME=""
+        FORGEJO_DB_USER=""
+        FORGEJO_DB_PASSWORD=""
+        FORGEJO_DB_HOST=""
+    fi
+
+    # Admin user configuration
+    while true; do
+        prompt_if_unset FORGEJO_ADMIN_USERNAME "  Forgejo admin username" n "$(hostname -s)"
+        if [[ "$FORGEJO_ADMIN_USERNAME" == "admin" ]]; then
+            echo "  'admin' is reserved by Forgejo. Please choose a different username."
+            FORGEJO_ADMIN_USERNAME=""
+        else
+            break
+        fi
+    done
+    while true; do
+        prompt_if_unset FORGEJO_ADMIN_PASSWORD "  Forgejo admin password" secret
+        if [ "${#FORGEJO_ADMIN_PASSWORD}" -ge 4 ]; then
+            break
+        fi
+        FORGEJO_ADMIN_PASSWORD=''
+        echo "  Password is too short. Must be at least 4 characters."
+    done
+    prompt_if_unset FORGEJO_ADMIN_EMAIL "  Forgejo admin email" n $FORGEJO_SMTP_FROM
 fi
 prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "y"
 
@@ -1089,6 +1135,16 @@ echo "Install Forgejo?           : $INSTALL_FORGEJO"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
   echo "  Forgejo domain/ip        : $FORGEJO_DOMAIN"
   echo "  Forgejo port             : $FORGEJO_PORT"
+  echo "  Database type            : $FORGEJO_DB_TYPE"
+  if [[ "$FORGEJO_DB_TYPE" != "sqlite3" ]]; then
+    echo "  Database name            : $FORGEJO_DB_NAME"
+    echo "  Database user            : $FORGEJO_DB_USER"
+    echo "  Database host            : $FORGEJO_DB_HOST"
+    echo "  Database password        : ********"
+  fi
+  echo "  Admin username           : $FORGEJO_ADMIN_USERNAME"
+  echo "  Admin password           : ********"
+  echo "  Admin email              : $FORGEJO_ADMIN_EMAIL"
   if [[ "$FORGEJO_USE_POSTFIX" =~ ^[Yy]$ ]]; then
     echo "  Mail via                 : Postfix (localhost:25)"
     echo "  From address             : $FORGEJO_SMTP_FROM"
@@ -2053,22 +2109,45 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
         apt-get purge -y webmin || true
     fi
 
-    # Alternative manual download of latest version: https://webmin.com/download/deb/webmin-current.deb
-    # Use official Webmin setup script to configure repo and GPG key
-    curl -fsSL https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh -o /tmp/webmin-setup-repo.sh || true
+    WEBMIN_INSTALLED=n
+
+    # Try repo install via official setup script
+    curl -fsSL --max-time 30 https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh \
+        -o /tmp/webmin-setup-repo.sh 2>/dev/null || true
 
     if [[ -f /tmp/webmin-setup-repo.sh && -s /tmp/webmin-setup-repo.sh ]]; then
-        sh /tmp/webmin-setup-repo.sh --force
+        sh /tmp/webmin-setup-repo.sh --force || true
         rm -f /tmp/webmin-setup-repo.sh
         wait_for_apt
         if apt_install webmin --install-recommends; then
-            systemctl enable --now webmin.service || echo "Warning: service failed to start"
+            WEBMIN_INSTALLED=y
         else
-            echo "  [!] webmin installation failed — skipping configuration"
+            echo "  apt install failed — trying direct download..."
         fi
     else
-        echo "Could not download Webmin setup script. Skipping installation."
-        echo "Alternative manual download of latest version: https://webmin.com/download/deb/webmin-current.deb"
+        echo "  Could not download Webmin setup script — trying direct download..."
+    fi
+
+    # Fall back to direct download if repo install failed or setup script unavailable
+    if [[ "$WEBMIN_INSTALLED" == "n" ]]; then
+        echo "Installing via https://webmin.com/download/deb/webmin-current.deb (SourceForge)"
+        if curl -fsSL --max-time 60 "https://webmin.com/download/deb/webmin-current.deb" \
+                -o /tmp/webmin-current.deb 2>/dev/null; then
+            dpkg -i /tmp/webmin-current.deb || true
+            apt-get install -f -y || true
+            rm -f /tmp/webmin-current.deb
+            WEBMIN_INSTALLED=y
+            echo "  [V] Webmin installed via direct download"
+        else
+            echo "  [!] Webmin direct download also failed"
+            APT_PACKAGES_NOT_INSTALLED+=("webmin")
+        fi
+    fi
+
+    if [[ "$WEBMIN_INSTALLED" == "y" ]]; then
+        systemctl enable --now webmin.service \
+            && echo "  [V] Webmin service started" \
+            || echo "  [!] Warning: Webmin service failed to start"
     fi
 else
     echo "Skipping Webmin installation."
@@ -2175,11 +2254,22 @@ ROOT_URL = http://$FORGEJO_DOMAIN:$FORGEJO_PORT/
 EOF
         fi
 
+        # make app.ini writeable for Forgejo so that it can update the configuration
+        chown git:git /etc/forgejo/app.ini || true
+        chmod 640 /etc/forgejo/app.ini || true
+
         # install systemd service script
         echo "Installing Forgejo service script"
         rm -f /etc/systemd/system/forgejo.service || true
         wget -q -O /etc/systemd/system/forgejo.service https://codeberg.org/forgejo/forgejo/raw/branch/forgejo/contrib/systemd/forgejo.service || true
         if [[ -f "/etc/systemd/system/forgejo.service" && -s "/etc/systemd/system/forgejo.service" ]]; then
+            # Increase startup timeout — Forgejo takes longer on first start
+            # as it initialises the database and generates keys
+            mkdir -p /etc/systemd/system/forgejo.service.d
+            cat > /etc/systemd/system/forgejo.service.d/timeout.conf <<EOF
+[Service]
+TimeoutStartSec=120
+EOF
             systemctl daemon-reload
             systemctl enable --now forgejo.service || echo "Warning: service failed to start"
         else
@@ -2273,10 +2363,33 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
         # increase the backlog limit
         echo "-b 8192" > /etc/audit/rules.d/00-backlog.conf
 
-        augenrules --load
+        # Load rules and capture any errors
+        echo "  Loading audit rules..."
+        AUGENRULES_OUTPUT=$(augenrules --load 2>&1) || true
 
-        echo "Verify auditd rules are loaded (this should show a long list without errors)"
-        auditctl -l | head -n 20 || true
+        # Check for rule loading errors and report which lines/rules failed
+		# Rules that fail to load are simply not active in the kernel — they're ignored. 
+		# The kernel audit subsystem loads rules sequentially and skips any it can't process
+        RULE_ERRORS=$(echo "$AUGENRULES_OUTPUT" | grep -i "error\|No such file" || true)
+        if [[ -n "$RULE_ERRORS" ]]; then
+            echo "  [!] Some audit rules failed to load:"
+            echo "$RULE_ERRORS" | while IFS= read -r line; do
+                # Extract line number if present and show the offending rule
+                LINENO_=$(echo "$line" | grep -oP '(?<=line )\d+' || true)
+                if [[ -n "$LINENO_" ]]; then
+                    RULE=$(sed -n "${LINENO_}p" /etc/audit/audit.rules 2>/dev/null || true)
+                    echo "    line $LINENO_: $RULE"
+                else
+                    echo "    $line"
+                fi
+            done
+            echo "  These rules will be skipped. Review /etc/audit/rules.d/audit.rules to fix."
+        fi
+
+        # Report final loaded rule count
+        RULE_COUNT=$(auditctl -l 2>/dev/null | grep -c "^-" || true)
+        echo "  [V] Audit rules loaded: $RULE_COUNT rules active"
+        echo "  Run 'sudo auditctl -l' to see all loaded rules"
     else
         echo "  [!] auditd installation failed — skipping configuration"
     fi
@@ -2771,8 +2884,37 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ && "$ISINSTALLED_FORGEJO" == "y" ]]; then
         sed -i "s|%%FORGEJO_SMTP_USER%%|$FORGEJO_SMTP_USER|g"           /etc/forgejo/app.ini
         sed -i "s|%%FORGEJO_SMTP_PASSWORD%%|$FORGEJO_SMTP_PASSWORD|g"   /etc/forgejo/app.ini
 
-        chown root:git /etc/forgejo/app.ini
-        chmod 640 /etc/forgejo/app.ini
+        # make app.ini writeable for Forgejo so that it can update the configuration
+        chown git:git /etc/forgejo/app.ini || true
+        chmod 640 /etc/forgejo/app.ini || true
+
+        # Restart Forgejo to pick up new config, wait for it to be ready
+        echo "  Starting Forgejo..."
+        systemctl restart forgejo || true
+        FORGEJO_READY=0
+        for i in {1..30}; do
+            if curl -s -o /dev/null -4 --max-time 2 "http://127.0.0.1:${FORGEJO_PORT}" 2>/dev/null; then
+                FORGEJO_READY=1
+                break
+            fi
+            sleep 2
+        done
+
+        if [[ "$FORGEJO_READY" -eq 1 ]]; then
+            echo "  [V] Forgejo is responding — creating admin user..."
+            sudo -u git forgejo admin user create \
+                --username "$FORGEJO_ADMIN_USERNAME" \
+                --password "$FORGEJO_ADMIN_PASSWORD" \
+                --email "$FORGEJO_ADMIN_EMAIL" \
+                --admin \
+                --must-change-password=false \
+                --config /etc/forgejo/app.ini 2>/dev/null \
+                && echo "  [V] Admin user created: $FORGEJO_ADMIN_USERNAME" \
+                || echo "  [!] Could not create admin user — may already exist"
+        else
+            echo "  [!] Forgejo did not respond within 60s — skipping admin user creation"
+            echo "      Run manually: sudo -u git forgejo admin user create --username admin --password <pwd> --email <email> --admin"
+        fi
     fi
 fi
 
