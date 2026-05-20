@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Xlvisuals Limited
-# 19 May 2026
+# 21 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -2461,35 +2461,8 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
 
             wait_for_apt
             if apt_install wazuh-agent; then
-
                 # Configure Manager Address
                 sed -i "s/<address>MANAGER_IP<\/address>/<address>$WAZUH_MANAGER<\/address>/" /var/ossec/etc/ossec.conf
-
-                # Define the log paths correctly
-                # Note: We use a temporary file to hold the XML block
-                cat <<'EOF' > /tmp/wazuh_logs.xml
-  <localfile>
-    <log_format>json</log_format>
-    <location>/var/log/suricata/eve.json</location>
-  </localfile>
-  <localfile>
-    <log_format>audit</log_format>
-    <location>/var/log/audit/audit.log</location>
-  </localfile>
-EOF
-
-                # Clean up any previous failed attempts to avoid duplicates/errors
-                #sed -i '/\/var\/log\/suricata\/eve.json/d' /var/ossec/etc/ossec.conf
-                #sed -i '/\/var\/log\/audit\/audit.log/d' /var/ossec/etc/ossec.conf
-
-                # Insert the block BEFORE the very first closing </ossec_config> tag
-                # This ensures it stays within the global config but outside sub-blocks
-                if ! grep -q "/var/log/suricata/eve.json" /var/ossec/etc/ossec.conf; then
-                    sed -i "/<\/ossec_config>/e cat /tmp/wazuh_logs.xml" /var/ossec/etc/ossec.conf
-                fi
-
-                rm -f /tmp/wazuh_logs.xml || true
-
                 systemctl enable --now wazuh-agent.service || echo "Warning: service failed to start"
             else
                 echo "  [!] Wazuh Agent installation failed — skipping configuration"

@@ -1,30 +1,36 @@
 # Ubuntu Server Provisioning
 
 An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server (minimized or standard) to 
-quickly provision a secure server with 
+quickly provision a hardened server and install any of the following services if desired: 
 
-- Auditd
-- Fail2Ban
+- Auditd<sup>*</sup>
+- Fail2Ban<sup>*</sup>
 - Forgejo
+- Firewall<sup>*</sup>
 - Grafana
-- Monit
+- IP Blocklists<sup>*</sup>
+- Kernel module blocklists<sup>*</sup>
+- Monit<sup>*</sup>
 - Mosquitto
 - MySQL or MariaDB
 - Nginx
+- OpenSSH<sup>*</sup>
 - Postfix
 - PostgreSQL
-- Suricata
+- Suricata IDS<sup>*</sup>
 - Valkey
-- Wazuh Agent
+- Wazuh Agent<sup>*</sup>
 - Webmin
 
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
-
+The components marked * are recommended.
 ---
 
 ## What It Does
 
 The script walks you through each step with a `y/n` prompt. If a `ubuntu_provision.conf` file is provided, those values are used automatically and the corresponding prompts are skipped (See Configuration File section below).
+
+Provision configuration files allow the fast and automated setup of different server configurations, for example for development, testing, production.
 
 ---
 
