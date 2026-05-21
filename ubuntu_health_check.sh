@@ -1,6 +1,6 @@
 #!/bin/bash
 # UBUNTU 24.04 and 26.04 SERVER HEALTH CHECK SCRIPT
-# by Xlvisuals Limited
+# by Axel Busch
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then
@@ -14,18 +14,19 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # --- Function to check service status ---
-check_service() {
+check_service_status() {
     local service="$1"
     local name="$2"
-
-    if systemctl status "$service" &>/dev/null; then
-        if systemctl is-active --quiet "$service"; then
-            echo -e "$name: ${GREEN}[RUNNING]${NC}"
-        else
-            echo -e "$name: ${RED}[STOPPED]${NC}"
-        fi
-    else
+    local units
+    units=$(systemctl list-unit-files "${service}.service" 2>/dev/null) || true
+    if ! echo "$units" | grep -q "${service}.service"; then
         echo -e "$name: ${RED}[NOT INSTALLED]${NC}"
+    elif systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo -e "$name: ${GREEN}[RUNNING]${NC}"
+    elif systemctl is-failed --quiet "$service" 2>/dev/null; then
+        echo -e "$name: ${RED}[FAILED]${NC}"
+    else
+        echo -e "$name: ${YELLOW}[STOPPED]${NC}"
     fi
 }
 
@@ -37,7 +38,53 @@ echo "==========================================="
 echo ""
 echo "SSH config"
 echo "==========================================="
-sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# Fetch the active runtime configuration from sshd
+sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd' | \
+while read -r param value; do
+    # Normalize parameter name to lowercase for easy matching
+    param_lower=$(echo "$param" | tr '[:upper:]' '[:lower:]')
+    is_safe=false
+
+    case "$param_lower" in
+        # These parameters should strictly be "no"
+        permitrootlogin|passwordauthentication|challengeresponseauthentication|permitemptypasswords|x11forwarding|ignorerhosts)
+            if [ "$value" = "no" ]; then is_safe=true; fi
+            ;;
+        # These parameters should strictly be "yes"
+        usepam|pubkeyauthentication|tcpkeepalive|printmotd)
+            if [ "$value" = "yes" ]; then is_safe=true; fi
+            ;;
+        # MaxAuthTries should be 4 or fewer
+        maxauthtries)
+            if [ "$value" -le 4 ]; then is_safe=true; fi
+            ;;
+        # LogingGraceTime should be 60 seconds or fewer
+        logingracetime)
+            if [ "$value" -le 60 ]; then is_safe=true; fi
+            ;;
+        # MaxSessions should be restricted (e.g., 10 or fewer)
+        maxsessions)
+            if [ "$value" -le 10 ]; then is_safe=true; fi
+            ;;
+        # ClientAliveCountMax should be low (e.g., 2 or fewer)
+        clientalivecountmax)
+            if [ "$value" -le 2 ]; then is_safe=true; fi
+            ;;
+        # Pass-through rules: parameters that vary wildly by environment (like AllowUsers, MaxStartups, AllowTcpForwarding)
+        # We default them to green if they exist, or you can customize their rules below
+        allowusers|maxstartups|allowtcpforwarding|authenticationmethods)
+            is_safe=true
+            ;;
+    esac
+
+    # Print the result with the evaluated color
+    if [ "$is_safe" = true ]; then
+        echo -e "${param} ${value} -> ${GREEN}[OK]${NC}"
+    else
+        echo -e "${param} ${value} -> ${RED}[WARNING]${NC}"
+    fi
+done
 
 echo ""
 echo "Swap config"
@@ -88,6 +135,19 @@ else
 fi
 
 echo ""
+echo "Vulnerable Kernel Modules (Page-Cache Exploits)"
+echo "==========================================="
+# Test if modprobe evaluates these modules to /bin/false
+for module in algif_aead af_alg esp4 esp6 rxrpc; do
+    status=$(modprobe -n -v "$module" 2>&1)
+    if echo "$status" | grep -q "install /bin/false"; then
+        echo -e "${module}: ${GREEN}[BLOCKED]${NC}"
+    else
+        echo -e "${module}: ${RED}[VULNERABLE / ALLOWED]${NC}"
+    fi
+done
+
+echo ""
 echo "Failed systemd units"
 echo "==========================================="
 systemctl --failed --no-legend | grep -v "^$" || echo -e "${GREEN}None${NC}"
@@ -107,21 +167,21 @@ echo "Service status"
 echo "==========================================="
 echo -n "UFW Firewall "
 ufw status | grep -q "active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${RED}[INACTIVE]${NC}"
-check_service "nginx" "NGINX Web Server"
-check_service "valkey-server" "Valkey Server"
-check_service "mysql" "MySQL Server"
-check_service "mariadb" "MariaDB Server"
-check_service "postgresql" "PostgreSQL Server"
-check_service "mosquitto" "Mosquitto Broker"
-check_service "monit" "Monit Server"
-check_service "webmin" "Webmin Server"
-check_service "grafana-server" "Grafana Server"
-check_service "forgejo" "Forgejo Git Server"
-check_service "fail2ban" "Fail2Ban IDS"
-check_service "auditd" "Auditd Daemon"
-check_service "suricata" "Suricata IDS"
-check_service "wazuh-agent" "Wazuh Agent"
-check_service "postfix" "Postfix Mail Relay"
+check_service_status "nginx" "NGINX Web Server"
+check_service_status "valkey-server" "Valkey Server"
+check_service_status "mysql" "MySQL Server"
+check_service_status "mariadb" "MariaDB Server"
+check_service_status "postgresql" "PostgreSQL Server"
+check_service_status "mosquitto" "Mosquitto Broker"
+check_service_status "monit" "Monit Server"
+check_service_status "webmin" "Webmin Server"
+check_service_status "grafana-server" "Grafana Server"
+check_service_status "forgejo" "Forgejo Git Server"
+check_service_status "fail2ban" "Fail2Ban IDS"
+check_service_status "auditd" "Auditd Daemon"
+check_service_status "suricata" "Suricata IDS"
+check_service_status "wazuh-agent" "Wazuh Agent"
+check_service_status "postfix" "Postfix Mail Relay"
 
 echo ""
 echo "AppArmor"
@@ -186,6 +246,19 @@ else
 fi
 
 echo ""
+echo "IP Blocklist"
+echo "==========================================="
+if [[ -n "$(sudo ipset list -n 2>/dev/null | grep ufw-blocklist-ipsum)" ]]; then
+    UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/T/ /' | cut -d. -f1)
+    # Get last update time from syslog
+    UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}')
+    echo -e "  Blocked IPs  : ${COUNT:-unknown}"
+    echo -e "  Last updated : ${UPDATED:-unknown}"
+else
+    echo -e "  ${RED}[NOT ACTIVE]${NC}"
+fi
+
+echo ""
 echo "Recent AppArmor denials"
 echo "==========================================="
 DENIALS=$(grep "apparmor=\"DENIED\"" /var/log/syslog 2>/dev/null \
@@ -195,7 +268,7 @@ if [[ -n "$DENIALS" ]]; then
     echo "$DENIALS" | grep -oP 'profile="\K[^"]*|operation="\K[^"]*|name="\K[^"]*' \
         | paste - - - | sort | uniq -c | sort -rn
 else
-    echo "None"
+    echo "  None"
 fi
 
 echo ""
@@ -204,9 +277,9 @@ echo "==========================================="
 ufw_status() {
     local port="$1"
     if ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
-        echo -e "${GREEN}[ALLOWED]${NC}"
+        echo -e "${RED}[ALLOWED]${NC}"
     else
-        echo -e "${RED}[BLOCKED]${NC}"
+        echo -e "${GREEN}[BLOCKED]${NC}"
     fi
 }
 

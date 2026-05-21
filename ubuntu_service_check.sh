@@ -1,6 +1,5 @@
 #!/bin/bash
 # UBUNTU 24.04 and 26.04 SERVER STATUS CHECK SCRIPT
-# by Xlvisuals Limited
 
 # Define terminal colors for the status column
 GREEN='\033[0;32m'

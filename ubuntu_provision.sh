@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
-# by Xlvisuals Limited
-# 21 May 2026
+# by Axel Busch
+# 22 May 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -33,7 +33,7 @@
 ## --------------------------------------------
 
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22-linux64
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22
 FORGEJO_FALLBACK_VERSION=15.0.2
 MODULEJAIL_FALLBACK_VERSION=1.2.3
 FORGEJO_FALLBACK_PORT=3030
@@ -44,24 +44,24 @@ FORGEJO_FALLBACK_PORT=3030
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root (sudo)"
+  echo "  [!] Please run as root (sudo)"
   exit 1
 fi
 
 # Verify Ubuntu 24.04 or 26.04
 source /etc/os-release
 if [[ "$ID" != "ubuntu" || !("$VERSION_ID" == "24.04" || "$VERSION_ID" == "26.04" ) ]]; then
-    echo "Error: This script is intended for Ubuntu 24.04 and 26.04"
+    echo "  [!] Error: This script is intended for Ubuntu 24.04 and 26.04"
     exit 1
 fi
 
 # Read config file if provided
 if [[ -n "$1" ]]; then
     if [[ -f "$1" ]]; then
-        echo "Loading configuration from $1"
+        echo "  Loading configuration from $1"
         source "$1"
     else
-        echo "Error: config file '$1' not found."
+        echo "  [!] Error: config file '$1' not found."
         exit 1
     fi
 fi
@@ -73,7 +73,7 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
         INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
         INSTALL_MARIADB INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
         INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
-        INSTALL_SURICATA INSTALL_WAZUH; do
+        INSTALL_SURICATA INSTALL_WAZUH CREATE_HEALTHSCRIPT; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
     for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
@@ -92,6 +92,8 @@ CONFIG_DIR="$SCRIPT_DIR"
 
 # Set system related variables
 PROCESSOR_COUNT=$(nproc)
+# Detect CPU architecture for architecture-specific downloads
+MACHINE_ARCH=$(uname -m)   # e.g. x86_64, aarch64
 LOCAL_HOSTNAME=$(hostname -f)
 LOCAL_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
@@ -130,13 +132,13 @@ save_config() {
     set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
         | grep -v "PASSWORD\|PASS\|SECRET|" \
         > $config_output_file
-    echo "Configuration parameters written to '$config_output_file'. "
+    echo "  Configuration parameters written to '$config_output_file'. "
 }
 
 stop_autoupdate() {
     for UNIT in "${APT_SERVICES_AUTOUPDATE[@]}"; do
         if systemctl is-active --quiet "$UNIT"; then
-            echo "Stopping $UNIT ..."
+            echo "  Stopping $UNIT ..."
             systemctl stop --no-block "$UNIT" > /dev/null 2>&1
             # Add to tracking list
             APT_SERVICES_AUTOUPDATE_STOPPED+=("$UNIT")
@@ -147,7 +149,7 @@ stop_autoupdate() {
 restart_autoupdate() {
     # Only loop through the ones we actually stopped
     for UNIT in "${APT_SERVICES_AUTOUPDATE_STOPPED[@]}"; do
-        echo "Restarting $UNIT ..."
+        echo "  Restarting $UNIT ..."
         systemctl start --no-block "$UNIT" > /dev/null 2>&1
     done
 
@@ -167,9 +169,9 @@ on_error() {
     if [[ $exit_code -ne 0 ]]; then
         config_debug_file="provision_debug.conf"
         echo ""
-        echo "Error: Script failed at line $line (exit code $exit_code)."
+        echo "  [!] Error: Script failed at line $line (exit code $exit_code)."
         save_config "$config_debug_file"
-        echo "Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
+        echo "  Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
         echo ""
     fi
     exit $exit_code
@@ -184,9 +186,9 @@ on_ctrl_c() {
     if [[ "${USER_SUDO_USER_USERNAME:-}" ]]; then
         config_debug_file="provision_aborted.conf"
         echo ""
-        echo "Aborting."
+        echo "  [!] Aborting."
         save_config "$config_debug_file"
-        echo "Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
+        echo "  Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
         echo ""
     fi
     exit 0
@@ -324,14 +326,14 @@ echo "--- 1. Detecting network parameters  ---"
 # PRIMARY_INTERFACE=$(ip route | awk '/default/ {print $5; exit}')
 PRIMARY_INTERFACE=$(ip -o -4 route show to default | awk '{print $5}')
 if [ -z "$PRIMARY_INTERFACE" ]; then
-    echo "Error: Could not detect network interface"
+    echo "  [!] Error: Could not detect network interface"
     exit 1
 fi
-echo "Detected network interface: $PRIMARY_INTERFACE"
+echo "  Detected network interface: $PRIMARY_INTERFACE"
 
 
 PRIMARY_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
-echo "Detected network address: $PRIMARY_IP"
+echo "  Detected network address: $PRIMARY_IP"
 
 # Verify we have internet. Fails on Ubuntu minimized as no iputils-ping package, fall back to python
 NETWORK_OK=''
@@ -342,25 +344,25 @@ else
         2>/dev/null && NETWORK_OK=y || NETWORK_OK=n
 fi
 if [[ "$NETWORK_OK" == "n" ]]; then
-    echo "Error: No internet connection"
+    echo "  [!] Error: No internet connection"
     exit 1
 fi
 
 echo ""
 echo "--- 2. Configure new installation ---"
 
-echo "Determining installed python:"
+echo "  Determining installed python:"
 check_file /usr/bin/python3.12 PROMPT_CPYTHON312
 check_file /usr/bin/python3.13 PROMPT_CPYTHON313
 check_file /usr/bin/python3.14 PROMPT_CPYTHON314
 check_file /usr/local/bin/pypy3.9 PROMPT_PYPY39
 check_file /usr/local/bin/pypy3.10 PROMPT_PYPY310
 check_file /usr/local/bin/pypy3.11 PROMPT_PYPY311
-echo "Determining installed programs:"
+echo "  Determining installed programs:"
 check_file /usr/bin/weasyprint PROMPT_WEASYPRINT
 check_file /usr/bin/convert PROMPT_IMAGEMAGICK
 
-echo "Determining installed services:"
+echo "  Determining installed services:"
 check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
 check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
 check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
@@ -443,8 +445,8 @@ else
     fi
 fi
 if [[ -z "$USER_SUDO_USER_USERNAME" ]]; then
-	# Final Check
-    echo "Error: We need a sudo user to complete the setup."
+    # Final Check
+    echo "  [!] Error: We need a sudo user to complete the setup."
     exit 1
 fi
 
@@ -481,14 +483,14 @@ prompt_if_unset CONFIGURE_SWAP "Would you like to configure swap space? (y/n)" n
 if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     CURRENT_SWAP_ACTIVE=$(tail -n +2 /proc/swaps)
     if [ -z "$CURRENT_SWAP_ACTIVE" ]; then
-    	ACTIVE_SWAP='No'
+        ACTIVE_SWAP='No'
         echo "  No active swap detected."
-        prompt_if_unset CONFIGURE_SWAP "  Would you like to create a swap file? (y/n)" n "all"
+        prompt_if_unset CONFIGURE_SWAP "  Would you like to create a swap file? (y/n)" n "y"
         if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
             prompt_if_unset SWAP_SIZE_GB "  Enter swap size in GB" n "2"
         fi
     else
-    	ACTIVE_SWAP='Yes'
+        ACTIVE_SWAP='Yes'
         echo "  Active swap detected. No changes."
     fi
 fi
@@ -558,7 +560,6 @@ if [[ ! "$INSTALL_CPYTHON314" =~ ^[Yy]$ && $PROMPT_CPYTHON314 == "reinstall" ]];
 fi
 
 
-#[[ "$PROMPT_PYPY311" == "install" ]] && default_val="y" || default_val="n"
 default_val="n"
 prompt_if_unset INSTALL_PYPY311 "Would you like to $PROMPT_PYPY311 Pypy 3.11? (y/n)" n $default_val
 
@@ -777,7 +778,7 @@ fi
 prompt_if_unset INSTALL_MONIT "Would you like to $PROMPT_MONIT Monit? (y/n)" n  $default_val
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # allow conf file to override, fall back to hostname, never prompt
-	  MONIT_HOST_NAME="${MONIT_HOST_NAME:-$LOCAL_HOSTNAME}"
+    MONIT_HOST_NAME="${MONIT_HOST_NAME:-$LOCAL_HOSTNAME}"
 
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         prompt_if_unset MONIT_USE_POSTFIX "  Send Monit alerts via Postfix? (y/n)" n "y"
@@ -805,17 +806,17 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
         MONIT_MAILSERVER_PASSWORD=""
         prompt_if_unset MONIT_ALERT_SENDER        "  Alert sender address"   n    "monit@${POSTFIX_DOMAIN}"
     fi
-	prompt_if_unset MONIT_ADMIN_USERNAME      "  Monit admin username"   n    "admin"
-	while true; do
-	    prompt_if_unset MONIT_ADMIN_PASSWORD "  Monit admin password"   secret
-	    if [ "${#MONIT_ADMIN_PASSWORD}" -ge 4 ]; then
-	        break
-	    fi
-	    MONIT_ADMIN_PASSWORD=''
-	    echo "  Password is too short. Must be at least 4 characters."
-	done
-	POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-}"
-	prompt_if_unset MONIT_ALERT_RECIPIENT     "  Alert recipient address" n $POSTFIX_ROOT_ALIAS
+    prompt_if_unset MONIT_ADMIN_USERNAME      "  Monit admin username"   n    "admin"
+    while true; do
+        prompt_if_unset MONIT_ADMIN_PASSWORD "  Monit admin password"   secret
+        if [ "${#MONIT_ADMIN_PASSWORD}" -ge 4 ]; then
+            break
+        fi
+        MONIT_ADMIN_PASSWORD=''
+        echo "  Password is too short. Must be at least 4 characters."
+    done
+    POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-}"
+    prompt_if_unset MONIT_ALERT_RECIPIENT     "  Alert recipient address" n $POSTFIX_ROOT_ALIAS
 fi
 
 [[ "$PROMPT_WEBMIN" == "install" ]] && default_val="y" || default_val="n"
@@ -992,6 +993,8 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     prompt_if_unset APPARMOR_ENABLE "  Enable AppArmor? (y/n)" n "y"
     prompt_if_unset APPARMOR_ENFORCE "  Set profiles to enforce mode? (y/n)" n "$( [[ "$APPARMOR_CURRENT_MODE" == "enforce" ]] && echo y || echo n )"
 fi
+
+prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
 
 # Configure modulejails at the end
 prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
@@ -1232,9 +1235,9 @@ if [[ "$ANY_INSTALL_OR_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
     BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
     if [[ -f "$BACKUP_SCRIPT" ]]; then
         bash "$BACKUP_SCRIPT" "${LOCAL_HOSTNAME}_pre-apply"
-        echo "Pre-apply configuration backup complete."
+        echo "  Pre-apply configuration backup complete."
     else
-        echo "Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
+        echo "  Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
     fi
 fi
 
@@ -1245,31 +1248,31 @@ echo ""
 echo "--- 4. Create/update user ---"
 if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
     if ! id "$USER_SUDO_USER_USERNAME" &>/dev/null; then
-        echo "Creating user $USER_SUDO_USER_USERNAME."
+        echo "  Creating user $USER_SUDO_USER_USERNAME."
         adduser --gecos "" --disabled-password "$USER_SUDO_USER_USERNAME"
-        echo "Created user $USER_SUDO_USER_USERNAME"
+        echo "  Created user $USER_SUDO_USER_USERNAME"
         echo ""
-        echo "Setting system password for user: $USER_SUDO_USER_USERNAME"
+        echo "  Setting system password for user: $USER_SUDO_USER_USERNAME"
         passwd $USER_SUDO_USER_USERNAME
         usermod -aG sudo $USER_SUDO_USER_USERNAME
         usermod -a -G adm $USER_SUDO_USER_USERNAME
         chmod 750 /home/$USER_SUDO_USER_USERNAME
     else
-        echo "User $USER_SUDO_USER_USERNAME exists."
+        echo "  User $USER_SUDO_USER_USERNAME exists."
     fi
 else
-    echo "Skipping new sudo user."
+    echo "  Skipping new sudo user."
 fi
 if [[ -n "$USER_SUDO_USER_USERNAME" ]]; then
     if ! id -nG "$USER_SUDO_USER_USERNAME" | grep -qw "sudo"; then
-        echo "Adding user $USER_SUDO_USER_USERNAME to group sudo"
+        echo "  Adding user $USER_SUDO_USER_USERNAME to group sudo"
         usermod -a -G sudo "$USER_SUDO_USER_USERNAME"
     fi
     if ! id -nG "$USER_SUDO_USER_USERNAME" | grep -qw "adm"; then
-        echo "Adding user $USER_SUDO_USER_USERNAME to group adm"
+        echo "  Adding user $USER_SUDO_USER_USERNAME to group adm"
         usermod -a -G adm "$USER_SUDO_USER_USERNAME"
     fi
-    echo "Updating home folder permissions for user $USER_SUDO_USER_USERNAME to 750"
+    echo "  Setting home folder permissions for user $USER_SUDO_USER_USERNAME to 750"
     chmod 750 /home/$USER_SUDO_USER_USERNAME
 fi
 
@@ -1287,13 +1290,9 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
         LVM_FREE_GB=$(vgs "$VG_NAME" --noheadings --units g -o vg_free | xargs | tr -d 'g')
 
         if [ "$LVM_FREE_SPACE" -gt 0 ]; then
-            #echo "LVM detected with $LVM_FREE_SPACE free extents."
-            echo "LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
-
-            #read -p "Resize root LVM? (y/n)" LVM_RESIZE_VOLUME
+            echo "  LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
             prompt_if_unset LVM_RESIZE_VOLUME "Resize root LVM? (y/n)" n "y"
             if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
-                #read -p "Enter target size in GB (or type 'all'): " LVM_RESIZE_TARGET_GB
                 prompt_if_unset LVM_RESIZE_TARGET_GB "Enter target size in GB (or type 'all')" n "all"
 
                 if [ "$LVM_RESIZE_TARGET_GB" == "all" ]; then
@@ -1305,13 +1304,13 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
             fi
 
         else
-            echo "LVM detected, but no free space remains in Volume Group. Skipping."
+            echo "  LVM detected, but no free space remains in Volume Group. Skipping."
         fi
     else
-        echo "Logical Volume $LV_PATH not found (System may not use LVM). Skipping."
+        echo "  Logical Volume $LV_PATH not found (System may not use LVM). Skipping."
     fi
 else
-    echo "Skipping LVM configuration."
+    echo "  Skipping LVM configuration."
 fi
 
 
@@ -1323,22 +1322,18 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     CURRENT_SWAP_ACTIVE=$(tail -n +2 /proc/swaps)
 
     if [ -z "$CURRENT_SWAP_ACTIVE" ]; then
-        echo "No active swap detected."
-        #read -p "Would you like to create a swap file? (y/n)" CONFIGURE_SWAP
+        echo "  No active swap detected."
         prompt_if_unset CONFIGURE_SWAP "Would you like to create a swap file? (y/n)" n "all"
 
         if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
             # Ask for size with a sensible default
-            #read -p "Enter swap size in GB [Default: 2]: " SWAP_SIZE_GB
-            #SWAP_SIZE_GB=${SWAP_SIZE_GB:-2} # Fallback to 2 if empty
             prompt_if_unset SWAP_SIZE_GB "Enter swap size in GB" n "2"
-
 
             # Define the path (using /swapfile as per your original script)
             SWAP_PATH="/swapfile"
 
             if [ ! -f "$SWAP_PATH" ]; then
-                echo "Creating ${SWAP_SIZE_GB}GB swap file at $SWAP_PATH..."
+                echo "  Creating ${SWAP_SIZE_GB}GB swap file at $SWAP_PATH..."
                 # fallocate is faster, dd is the fallback
                 fallocate -l "${SWAP_SIZE_GB}G" "$SWAP_PATH" || dd if=/dev/zero of="$SWAP_PATH" bs=1M count=$((SWAP_SIZE_GB * 1024))
 
@@ -1350,17 +1345,17 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
                 if ! grep -q "$SWAP_PATH" /etc/fstab; then
                     echo "$SWAP_PATH none swap sw 0 0" >> /etc/fstab
                 fi
-                echo "Swap file created and activated."
+                echo "  Swap file created and activated."
             else
-                echo "A file exists at $SWAP_PATH but is not active. Please check manually."
+                echo "  A file exists at $SWAP_PATH but is not active. Please check manually."
             fi
         fi
     else
-        echo "Active swap detected. Skipping creation."
+        echo "  Active swap detected. Skipping swap creation."
         swapon --show
     fi
 else
-    echo "Skipping swap configuration."
+    echo "  Skipping swap configuration."
 fi
 
 
@@ -1373,14 +1368,14 @@ if [[ "$UNINSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     # sudo apt-get autoremove -y ; sudo apt-get -y purge $(dpkg --list | grep ^rc | awk '{ print $2; }')
     mapfile -t RC_PACKAGES < <(dpkg --list | awk '/^rc/ {print $2}')
     if [ ${#RC_PACKAGES[@]} -gt 0 ]; then
-        echo "Purging leftover configuration packages: ${RC_PACKAGES[*]}"
+        echo "  Purging leftover configuration packages: ${RC_PACKAGES[*]}"
         apt-get purge -y "${RC_PACKAGES[@]}" || true
     else
-        echo "No leftover config packages found."
+        echo "  No leftover config packages found."
     fi
     apt-get autoremove -y || true
 else
-    echo "Skipping uninstall."
+    echo "  Skipping uninstall."
 fi
 
 
@@ -1388,18 +1383,18 @@ echo ""
 echo "--- 8. Upgrade system packages ---"
 if [[ "$UPDATE_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    echo "Updating packages."
+    echo "  Updating packages."
     apt-get update
-    echo "Upgrading packages."
+    echo "  Upgrading packages."
     apt-get -y full-upgrade
 elif [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     # update, but not ugprade
     wait_for_apt
-    echo "Updating packages."
+    echo "  Updating packages."
     apt-get update
-    echo "Skipping upgrade."
+    echo "  Skipping upgrade."
 else
-    echo "Skipping update and upgrade."
+    echo "  Skipping update and upgrade."
 fi
 
 
@@ -1414,13 +1409,13 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     apt-file update
 
     if [[ "$(systemd-detect-virt)" == "none" ]]; then
-        echo "Bare metal detected. Installing smartmontools"
+        echo "  Bare metal detected. Installing smartmontools"
         apt_install smartmontools || true
     else
-        echo "Running in $(systemd-detect-virt). Skipping smartmontools installation."
+        echo "  Running in $(systemd-detect-virt). Skipping smartmontools installation."
     fi
 else
-    echo "Skipping tools installation."
+    echo "  Skipping tools installation."
 fi
 
 
@@ -1443,7 +1438,7 @@ if [[ "$INSTALL_UFW" =~ ^[Yy]$ ]]; then
         echo "  [!] Firewall installation failed — skipping configuration"
     fi
 else
-    echo "Skipping ufw installation."
+    echo "  Skipping ufw installation."
 fi
 
 echo ""
@@ -1458,9 +1453,9 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
         chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
         AUTH_KEYS="/home/$USER_SUDO_USER_USERNAME/.ssh/authorized_keys"
         if [ ! -f "$AUTH_KEYS" ] || [ ! -s "$AUTH_KEYS" ]; then
-            echo "SSH KEY SETUP"
-            echo "No existing keys found for $USER_SUDO_USER_USERNAME."
-            echo "Please paste your SSH PUBLIC KEY (starts with ssh-rsa, ssh-ed25519, etc.):"
+            echo "  SSH KEY SETUP"
+            echo "  No existing keys found for $USER_SUDO_USER_USERNAME."
+            echo "  Please paste your SSH PUBLIC KEY (starts with ssh-rsa, ssh-ed25519, etc.):"
             read -r SSH_PUBLIC_KEY
             if [ -n "$SSH_PUBLIC_KEY" ]; then
                 mkdir -p /home/$USER_SUDO_USER_USERNAME/.ssh
@@ -1468,17 +1463,16 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
                 chmod 700 /home/$USER_SUDO_USER_USERNAME/.ssh
                 chmod 600 "$AUTH_KEYS"
                 chown -R $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME /home/$USER_SUDO_USER_USERNAME/.ssh
-                echo "SSH key installed for $USER_SUDO_USER_USERNAME."
+                echo "  SSH key installed for $USER_SUDO_USER_USERNAME."
             else
-                #echo "WARNING: No SSH key provided! You will be locked out after SSH hardening."
-                echo "ERROR: No SSH key installed. Aborting to prevent lockout."
+                echo "  [!] ERROR: No SSH key installed. Aborting to prevent lockout."
                 exit 1
             fi
         else
-            echo "SSH keys already present in $AUTH_KEYS. Skipping prompt."
+            echo "  SSH keys already present in $AUTH_KEYS. Skipping prompt."
         fi
 
-        echo "Hardening ssh..."
+        echo "  Hardening ssh..."
         # Override file ensures custom settings take precedence in Ubuntu 26.04.
         # Using <<EOF, not <<'EOF', so that $USER_SUDO_USER_USERNAME is replaced.
         cat <<EOF > /etc/ssh/sshd_config.d/01-$USER_SUDO_USER_USERNAME-hardened.conf
@@ -1507,7 +1501,7 @@ EOF
         echo "  [!] OpenSSH installation failed — skipping configuration"
     fi
 else
-    echo "Skipping OpenSSH installation."
+    echo "  Skipping OpenSSH installation."
 fi
 
 
@@ -1516,21 +1510,22 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
 
     echo ""
     echo "--- 13. Localization  ---"
-    echo "Set timezone to UTC"
+    echo "  Set timezone to UTC"
     timedatectl set-timezone UTC
 
 
     echo ""
     echo "--- 14. Override sudo settings ---"
     echo "Defaults timestamp_timeout=60" > /etc/sudoers.d/$USER_SUDO_USER_USERNAME-timeout
-    echo "$USER_SUDO_USER_USERNAME ALL=(ALL) NOPASSWD:/usr/bin/apt-get update, /usr/bin/apt-get upgrade, /usr/bin/systemctl, /usr/sbin/reboot, /home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh" > /etc/sudoers.d/$USER_SUDO_USER_USERNAME-commands
+    echo "  Adding /usr/bin/apt-get update, /usr/bin/apt-get upgrade, /usr/bin/systemctl, /home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh to new sudoers file: /etc/sudoers.d/$USER_SUDO_USER_USERNAME-commands"
+    echo "$USER_SUDO_USER_USERNAME ALL=(ALL) NOPASSWD:/usr/bin/apt-get update, /usr/bin/apt-get upgrade, /usr/bin/systemctl, /home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh" > /etc/sudoers.d/$USER_SUDO_USER_USERNAME-commands
     # Protect sudoers files
     chmod 440 /etc/sudoers.d/*
     # verify sudoers syntax is valid
     if visudo -c; then
-        echo "Sudoers file is valid."
+        echo "  Sudoers file is valid."
     else
-        echo "Error: Sudoers file has errors."
+        echo "  [!] Error: Sudoers file has errors."
         exit 1
     fi
 
@@ -1561,7 +1556,7 @@ EOF
 
     echo ""
     echo "--- 17. Kernel tuning and hardening ---"
-    echo "Writing sysctl kernel parameters"
+    echo "  Writing sysctl kernel parameters"
     rm -f /etc/sysctl.d/99-xlvisuals.conf
     cat <<'EOF' > /etc/sysctl.d/99-xlvisuals.conf
 # XLVISUALS recommended kernel tuning
@@ -1603,11 +1598,11 @@ net.ipv4.conf.all.accept_source_route = 0
 # net.ipv6.conf.all.disable_ipv6 = 1
 EOF
 
-    echo "Applying sysctl changes"
+    echo "  Applying sysctl changes"
     #sysctl -p  # requires /etc/sysctl.conf
     sysctl --system
 
-    echo "Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag"
+    echo "  Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag"
     rm -f /etc/modprobe.d/dirty-frag.conf
     cat <<'EOF' > /etc/modprobe.d/dirty-frag.conf
 # Disable vulnerable crypto/net modules to mitigate CVE-2026-31431 and Dirty Frag
@@ -1618,10 +1613,10 @@ install esp6 /bin/false
 install rxrpc /bin/false
 EOF
 
-    echo "Force kernel to read new rules"
+    echo "  Force kernel to read new rules"
     sudo update-initramfs -u -k all
 
-    echo "Check kernel module status (should say \"install\")"
+    echo "  Check kernel module status (should say \"install\")"
     modprobe -n -v algif_aead esp4 esp6 rxrpc
 
     echo ""
@@ -1629,11 +1624,11 @@ EOF
     # allow MySQL to write to the memory space, but prevents an attacker from running executables or gain root
     if ! grep -q "none /run/shm tmpfs" /etc/fstab; then
         echo "none /run/shm tmpfs defaults,nosuid,nodev,noexec 0 0" >> /etc/fstab
-        echo "Modified /etc/fstab"
+        echo "  Modified /etc/fstab"
     fi
     # Re-mount immediately to apply changes without reboot
     mount -o remount,nosuid,nodev,noexec /run/shm 2>/dev/null || true
-    echo "Remounted /run/shm"
+    echo "  Remounted /run/shm"
 
 
     echo ""
@@ -1642,7 +1637,7 @@ EOF
     if [[ -f /etc/needrestart/needrestart.conf ]]; then
         sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf \
             && echo "  needrestart set to automatic mode" \
-            || echo "  Warning: could not update needrestart.conf"
+            || echo "  [!] Warning: could not update needrestart.conf"
     fi
 
     echo ""
@@ -1657,18 +1652,18 @@ EOF
     if pro status --format json 2>/dev/null | grep -q '"attached": false'; then
         # Removing Ubuntu Pro can sometimes cause issues with apt on Ubuntu since it's fairly integrated.
         # Safer to just disabling the services
-        echo "Ubuntu Pro not attached — disabling Pro services"
+        echo "  Ubuntu Pro not attached — disabling Pro services"
         pro config set apt_news=false 2>/dev/null || true
         systemctl stop ubuntu-advantage ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
         systemctl mask ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
     else
-        echo "Ubuntu Pro is attached — no changes"
+        echo "  Ubuntu Pro is attached — no changes"
     fi
 
 else
     echo ""
     echo "--- 13.-21. System Tuning ---"
-    echo "Skipping system tuning steps."
+    echo "  Skipping system tuning steps."
 fi
 
 
@@ -1678,17 +1673,17 @@ if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
     if apt_install fonts-liberation fonts-freefont-ttf; then
-        echo "Installed Liberation and Freefont fonts."
+        echo "  Installed Liberation and Freefont fonts."
     fi;
     if [[ "$INSTALL_MS_FONTS" =~ ^[Yy]$ ]]; then
         echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
         if apt_install ttf-mscorefonts-installer; then
-            echo "Installed Microsoft fonts."
+            echo "  Installed Microsoft fonts."
         fi
     fi
     fc-cache -f -v
 else
-    echo "Skipping fonts installation."
+    echo "  Skipping fonts installation."
 fi
 
 
@@ -1696,7 +1691,7 @@ echo ""
 echo "--- 23. Install Python 3.14 ---"
 if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_CPYTHON314" == 'reinstall' ]]; then
-        echo "Uninstall Python 3.14"
+        echo "  Uninstall Python 3.14"
         wait_for_apt
         apt-get purge -y python3.14-full python3.14-venv pipx || true
     fi
@@ -1734,16 +1729,15 @@ if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
         ln -sf "$VIRTUALENV_BIN" /usr/local/bin/virtualenv
     fi
 
-    # Note: setuptools and wheel are NOT installed here at the system level.
-    # Install them inside individual venvs as needed:
-    #   python3.14 -m venv /path/to/venv
-    #   source /path/to/venv/bin/activate
-    #   pip install setuptools wheel
+    echo "  Note: Python setuptools and wheel were NOT installed at the system level."
+    echo "  Install them inside individual venvs as needed:"
+    echo "     python3.14 -m venv /path/to/venv"
+    echo "     source /path/to/venv/bin/activate"
+    echo "     pip install setuptools wheel"
 
-    echo "Python 3.14 and packaging tools (pipx/virtualenv) installed."
+    echo "  Python 3.14 and packaging tools (pipx/virtualenv) installed."
 else
-    echo "Skipping Python 3.14 installation."
-
+    echo "  Skipping Python 3.14 installation."
 fi
 
 
@@ -1752,15 +1746,16 @@ echo "--- 24. Install PyPy 3.11 ---"
 if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
 
     # Fetch latest PyPy 3.11 version dynamically, fall back to known version if unavailable
+    PYPY_ARCH=$(uname -m | sed 's/x86_64/linux64/;s/aarch64/aarch64/')  # linux64 or aarch64
     PYPY_BASE_URL="https://downloads.python.org/pypy"
-    PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP 'pypy3\.11-v[\d.]+-linux64\.tar\.bz2' | sort -V | tail -n1) || true
+    PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP "pypy3\\.11-v[\\d.]+-${PYPY_ARCH}\\.tar\\.bz2" | sort -V | tail -n1) || true
     if [[ -z "$PYPY_FILENAME" ]]; then
-        echo "Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION."
-        PYPY_FILENAME="${PYPY_FALLBACK_VERSION}.tar.bz2"
+        echo "  Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION."
+        PYPY_FILENAME="${PYPY_FALLBACK_VERSION}-${PYPY_ARCH}.tar.bz2"
     fi
 
     PYPY_DIRNAME="${PYPY_FILENAME%.tar.bz2}"
-    echo "Installing PyPy 3.11 ($PYPY_DIRNAME) to /opt"
+    echo "  Installing PyPy 3.11 ($PYPY_DIRNAME) to /opt"
     pushd /opt > /dev/null
 
     if [ ! -d /opt/$PYPY_DIRNAME ]; then
@@ -1776,16 +1771,16 @@ if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
     /usr/local/bin/pypy3.11 -m ensurepip
     /usr/local/bin/pypy3.11 -m pip install --upgrade --root-user-action=ignore pip virtualenv
 
-    # Note: setuptools and wheel are NOT installed here at the system level.
-    # Install them inside individual venvs as needed:
-    #   pypy3.11 -m venv /path/to/venv
-    #   source /path/to/venv/bin/activate
-    #   pip install setuptools wheel
+    echo "  Note: PyPy setuptools and wheel were NOT installed at the system level."
+    echo "  Install them inside individual venvs as needed:"
+    echo "     pypy3.11 -m venv /path/to/venv"
+    echo "     source /path/to/venv/bin/activate"
+    echo "     pip install setuptools wheel"
 
     popd > /dev/null
-    echo "PyPy 3.11 installation complete."
+    echo "  PyPy 3.11 installation complete."
 else
-    echo "Skipping PyPy installation."
+    echo "  Skipping PyPy installation."
 fi
 
 
@@ -1795,7 +1790,7 @@ if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install weasyprint || true
 else
-    echo "Skipping weasyprint installation."
+    echo "  Skipping weasyprint installation."
 fi
 
 
@@ -1805,7 +1800,7 @@ if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install imagemagick || true
 else
-    echo "Skipping imagemagick installation."
+    echo "  Skipping imagemagick installation."
 fi
 
 
@@ -1813,7 +1808,7 @@ echo ""
 echo "--- 27. Install nginx ---"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_NGINX" == 'reinstall' ]]; then
-        echo "Uninstall nginx"
+        echo "  Uninstall nginx"
         wait_for_apt
         apt-get purge -y nginx || true
     fi
@@ -1828,7 +1823,7 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
         ufw allow 443/tcp
     fi
 else
-    echo "Skipping nginx installation."
+    echo "  Skipping nginx installation."
 fi
 
 
@@ -1836,7 +1831,7 @@ echo ""
 echo "--- 28. Install Valkey ---"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_VALKEY" == 'reinstall' ]]; then
-        echo "Uninstall valkey-server valkey-tools"
+        echo "  Uninstall valkey-server valkey-tools"
         wait_for_apt
         apt-get purge -y valkey-server valkey-tools || true
     fi
@@ -1845,7 +1840,7 @@ if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
         systemctl enable --now valkey-server || true
     fi
 else
-    echo "Skipping Valkey installation."
+    echo "  Skipping Valkey installation."
 fi
 
 
@@ -1853,16 +1848,16 @@ echo ""
 echo "--- 29a. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
-        echo "Uninstall mysql-server mysql-shell mysqltuner"
+        echo "  Uninstall mysql-server mysql-shell mysqltuner"
         apt-get purge -y mysql-server mysql-shell mysqltuner || true
     fi
 
     wait_for_apt
     if apt_install mysql-server mysql-shell mysqltuner; then
-        systemctl enable --now mysql.service || echo "Warning: service failed to start"
+        systemctl enable --now mysql.service || echo "  [!] Warning: service failed to start"
 
         # Wait for MySQL to create the socket file before proceeding
-        echo "Waiting for MySQL to start..."
+        echo "  Waiting for MySQL to start..."
         MYSQL_READY=0
         for i in {1..6}; do
             if [ -S /var/run/mysqld/mysqld.sock ]; then
@@ -1873,7 +1868,7 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
         done
 
         if [ "$MYSQL_READY" -ne 1 ]; then
-            echo "Error: MySQL failed to start"
+            echo "  [!] Error: MySQL failed to start"
             exit 1
         fi
 
@@ -1895,19 +1890,19 @@ GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
-        echo "MySQL root password set and security initialized."
+        echo "  MySQL root password set and security initialized."
     else
         echo "  [!] MySQL installation failed — skipping configuration"
     fi
 else
-    echo "Skipping MySQL installation."
+    echo "  Skipping MySQL installation."
 fi
 
 echo ""
 echo "--- 29b. Install MariaDB ---"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MARIADB" == 'reinstall' ]]; then
-        echo "Uninstall mariadb-server"
+        echo "  Uninstall mariadb-server"
         apt-get purge -y mariadb-server mariadb-client mysqltuner || true
     fi
 
@@ -1915,7 +1910,7 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if apt_install mariadb-server mariadb-client mysqltuner; then
         systemctl enable --now mariadb.service || echo "Warning: service failed to start"
 
-        echo "Waiting for MariaDB to start..."
+        echo "  Waiting for MariaDB to start..."
         MYSQL_READY=0
         for i in {1..6}; do
             if [ -S /var/run/mysqld/mysqld.sock ]; then
@@ -1926,7 +1921,7 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
         done
 
         if [ "$MYSQL_READY" -ne 1 ]; then
-            echo "Error: MariaDB failed to start"
+            echo "  [!] Error: MariaDB failed to start"
             exit 1
         fi
 
@@ -1948,7 +1943,7 @@ GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
-        echo "MariaDB root password set and security initialized."
+        echo "  MariaDB root password set and security initialized."
 
         # Create MySQL compatibility symlinks for operator convenience.
         # mariadb-client-compat (which provides these) is only available from Ubuntu 25.04+,
@@ -1976,7 +1971,7 @@ EOS
         echo "  [!] MariaDB installation failed — skipping configuration"
     fi
 else
-    echo "Skipping MariaDB installation."
+    echo "  Skipping MariaDB installation."
 fi
 
 echo ""
@@ -1984,7 +1979,7 @@ echo "--- 30. Install PostgreSQL $PG_VERSION ---"
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTGRESQL" == 'reinstall' ]]; then
-        echo "Uninstall postgresql-$PG_VERSION postgresql-client-$PG_VERSION"
+        echo "  Uninstall postgresql-$PG_VERSION postgresql-client-$PG_VERSION"
         apt-get purge -y postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3 || true
         apt-get purge -y postgresql-client-$PG_VERSION || true
         apt-get purge -y postgresql-$PG_VERSION || true
@@ -2026,28 +2021,28 @@ if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
             # Optional: Install Useful PostgreSQL Tools
             apt_install postgresql-$PG_VERSION-pgaudit postgresql-$PG_VERSION-postgis-3 || true
 
-            echo "PostgreSQL version installed:"
+            echo "  PostgreSQL version installed:"
             psql --version
 
             # Detect cluster path
             PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
             PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 
-            echo "Backing up configuration..."
+            echo "  Backing up configuration..."
             cp "$PG_CONF" "${PG_CONF}.bak"
             cp "$PG_HBA" "${PG_HBA}.bak"
 
-            echo "Enabling PostgreSQL..."
+            echo "  Enabling PostgreSQL..."
             systemctl enable --now postgresql || echo "Warning: service failed to start"
         else
             echo "  [!] PostgreSQL ${PG_VERSION} installation failed — skipping configuration"
         fi
 
     else
-        echo "Could not download gpg key. Skipping installation."
+        echo "  Could not download gpg key. Skipping installation."
     fi
 else
-    echo "Skipping PostgreSQL installation."
+    echo "  Skipping PostgreSQL installation."
 fi
 
 
@@ -2056,7 +2051,7 @@ echo "--- 31. Install Mosquitto MQTT broker ---"
 if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_MOSQUITTO" == 'reinstall' ]]; then
-        echo "Uninstall mosquitto mosquitto-clients"
+        echo "  Uninstall mosquitto mosquitto-clients"
         wait_for_apt
         apt-get purge -y mosquitto mosquitto-clients  || true
     fi
@@ -2071,7 +2066,7 @@ if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
         echo "  [!] mosquitto installation failed — skipping configuration"
     fi
 else
-    echo "Skipping Mosquitto MQTT broker installation."
+    echo "  Skipping Mosquitto MQTT broker installation."
 fi
 
 
@@ -2080,7 +2075,7 @@ echo "--- 32. Install Postfix (relay-only) ---"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTFIX" == 'reinstall' ]]; then
-        echo "Uninstall postfix"
+        echo "  Uninstall postfix"
         wait_for_apt
         apt-get purge -y postfix mailutils libsasl2-modules || true
         rm -rf /etc/postfix || true
@@ -2097,7 +2092,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         echo "  [!] postfix installation failed — skipping configuration"
     fi
 else
-    echo "Skipping Postfix installation."
+    echo "  Skipping Postfix installation."
 fi
 
 
@@ -2105,7 +2100,7 @@ echo ""
 echo "--- 33. Install Monit ---"
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MONIT" == 'reinstall' ]]; then
-        echo "Uninstall monit"
+        echo "  Uninstall monit"
         rm -rf /etc/monit/conf-enabled
         wait_for_apt
         apt-get purge -y monit  || true
@@ -2117,7 +2112,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
         echo "  [!] monit installation failed — skipping configuration"
     fi
 else
-    echo "Skipping Monit installation."
+    echo "  Skipping Monit installation."
 fi
 
 
@@ -2125,7 +2120,7 @@ echo ""
 echo "--- 34. Install Webmin ---"
 if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_WEBMIN" == 'reinstall' ]]; then
-        echo "Uninstall webmin"
+        echo "  Uninstall webmin"
         wait_for_apt
         apt-get purge -y webmin || true
     fi
@@ -2151,7 +2146,7 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
 
     # Fall back to direct download if repo install failed or setup script unavailable
     if [[ "$WEBMIN_INSTALLED" == "n" ]]; then
-        echo "Installing via https://webmin.com/download/deb/webmin-current.deb (SourceForge)"
+        echo "  Installing via https://webmin.com/download/deb/webmin-current.deb (SourceForge)"
         if curl -fsSL --max-time 60 "https://webmin.com/download/deb/webmin-current.deb" \
                 -o /tmp/webmin-current.deb 2>/dev/null; then
             dpkg -i /tmp/webmin-current.deb || true
@@ -2171,7 +2166,7 @@ if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
             || echo "  [!] Warning: Webmin service failed to start"
     fi
 else
-    echo "Skipping Webmin installation."
+    echo "  Skipping Webmin installation."
 fi
 
 
@@ -2179,7 +2174,7 @@ echo ""
 echo "--- 35. Install Grafana ---"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_GRAFANA" == 'reinstall' ]]; then
-        echo "Uninstall grafana"
+        echo "  Uninstall grafana"
         wait_for_apt
         apt-get purge -y grafana  || true
         rm -rf /etc/grafana || true
@@ -2211,10 +2206,10 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
           echo "  [!] Grafana installation failed — skipping configuration"
         fi
     else
-        echo "Could not download gpg key. Skipping installation."
+        echo "  Could not download gpg key. Skipping installation."
     fi
 else
-    echo "Skipping Grafana installation."
+    echo "  Skipping Grafana installation."
 fi
 
 
@@ -2222,22 +2217,22 @@ echo ""
 echo "--- 36. Install Forgejo ---"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FORGEJO" == 'reinstall' ]]; then
-        echo "Uninstall forgejo (deleting folders)"
+        echo "  Uninstall forgejo (deleting folders)"
         rm -f /usr/local/bin/forgejo || true
         rm -rf /var/lib/forgejo || true
         rm -rf /etc/forgejo || true
     fi
 
     if ! id "git" &>/dev/null; then
-        echo "Adding user git"
+        echo "  Adding user git"
         adduser --system --shell /bin/bash --group --disabled-password --home /home/git git || true
     fi
     if ! getent group git >/dev/null; then
-        echo "Adding group git"
+        echo "  Adding group git"
         groupadd git
     fi
 
-    echo "Determining latest forgejo version"
+    echo "  Determining latest forgejo version"
     rm -f forgejo-latest || true
     FORGEJO_LATEST=$(curl -s --max-time 10 https://codeberg.org/api/v1/repos/forgejo/forgejo/releases/latest 2>/dev/null \
     | jq -r .tag_name 2>/dev/null \
@@ -2247,13 +2242,14 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         echo "  [!] Warning: could not determine latest Forgejo version — using fallback $FORGEJO_FALLBACK_VERSION"
         FORGEJO_LATEST="$FORGEJO_FALLBACK_VERSION"
     fi
-    echo "Downloading forgejo $FORGEJO_LATEST ..."
-    wget -q -O forgejo-latest "https://codeberg.org/forgejo/forgejo/releases/download/v${FORGEJO_LATEST}/forgejo-${FORGEJO_LATEST}-linux-amd64" || true
+    echo "  Downloading forgejo $FORGEJO_LATEST ..."
+    FORGEJO_ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 or arm64
+    wget -q -O forgejo-latest "https://codeberg.org/forgejo/forgejo/releases/download/v${FORGEJO_LATEST}/forgejo-${FORGEJO_LATEST}-linux-${FORGEJO_ARCH}" || true
 
     if [[ -f "forgejo-latest" &&  -s "forgejo-latest" ]]; then
         install -m 755 forgejo-latest /usr/local/bin/forgejo
         mkdir -p /var/lib/forgejo /etc/forgejo
-        echo "Forgejo $FORGEJO_LATEST installed"
+        echo "  Forgejo $FORGEJO_LATEST installed"
 
         chown git:git /var/lib/forgejo && chmod 750 /var/lib/forgejo
         chown root:git /etc/forgejo && chmod 770 /etc/forgejo
@@ -2265,7 +2261,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         # configure
         if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ || "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]; then
             # Grafana and Forgejo both use port 3000 by default. -> Change Forgejo port
-            echo "Installing Forgejo on port $FORGEJO_PORT"
+            echo "  Installing Forgejo on port $FORGEJO_PORT"
             cat <<EOF > /etc/forgejo/app.ini
 [server]
 SSH_DOMAIN = $FORGEJO_DOMAIN
@@ -2280,7 +2276,7 @@ EOF
         chmod 640 /etc/forgejo/app.ini || true
 
         # install systemd service script
-        echo "Installing Forgejo service script"
+        echo "  Installing Forgejo service script"
         rm -f /etc/systemd/system/forgejo.service || true
         wget -q -O /etc/systemd/system/forgejo.service https://codeberg.org/forgejo/forgejo/raw/branch/forgejo/contrib/systemd/forgejo.service || true
         if [[ -f "/etc/systemd/system/forgejo.service" && -s "/etc/systemd/system/forgejo.service" ]]; then
@@ -2292,15 +2288,15 @@ EOF
 TimeoutStartSec=120
 EOF
             systemctl daemon-reload
-            systemctl enable --now forgejo.service || echo "Warning: service failed to start"
+            systemctl enable --now forgejo.service || echo "  [!] Warning: service failed to start"
         else
-            echo "Could not download service script. Skipping systemd setup for Forgejo."
+            echo "  Could not download service script. Skipping systemd setup for Forgejo."
         fi
     else
-        echo "Could not download Forgejo ${FORGEJO_LATEST}. Skipping installation."
+        echo "  Could not download Forgejo ${FORGEJO_LATEST}. Skipping installation."
     fi
 else
-    echo "Skipping Forgejo installation."
+    echo "  Skipping Forgejo installation."
 fi
 if [[ "$ISINSTALLED_FORGEJO" == "y" && -z "${FORGEJO_PORT:-}" ]]; then
     # Resolve FORGEJO_PORT from app.ini if not already set in conf or prompted
@@ -2318,20 +2314,20 @@ if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
         sed -i "s|%%PRIMARY_INTERFACE%%|$PRIMARY_INTERFACE|g" /etc/systemd/system/disable-offload.service
         systemctl daemon-reload
         systemctl enable --now disable-offload.service \
-            && echo "TCP transmit offloading disabled on $PRIMARY_INTERFACE." \
-            || echo "Warning: could not enable disable-offload service."
+            && echo "  TCP transmit offloading disabled on $PRIMARY_INTERFACE." \
+            || echo "  [!] Warning: could not enable disable-offload service."
     else
-        echo "File $CONFIG_DIR/etc/systemd/system/disable-offload.service not found"
+        echo "  File $CONFIG_DIR/etc/systemd/system/disable-offload.service not found"
     fi
 else
-    echo "Skipping TCP transmit offload configuration."
+    echo "  Skipping TCP transmit offload configuration."
 fi
 
 echo ""
 echo "--- 38. Install Fail2Ban ---"
 if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FAIL2BAN" == 'reinstall' ]]; then
-        echo "Uninstall fail2ban"
+        echo "  Uninstall fail2ban"
         wait_for_apt
         apt-get purge -y fail2ban  || true
     fi
@@ -2354,7 +2350,7 @@ EOF
         echo "  [!] Fail2Ban installation failed — skipping configuration"
     fi
 else
-    echo "Skipping Fail2Ban installation."
+    echo "  Skipping Fail2Ban installation."
 fi
 
 
@@ -2362,14 +2358,14 @@ echo ""
 echo "--- 39. Install auditd ---"
 if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_AUDITD" == 'reinstall' ]]; then
-        echo "Uninstall auditd"
+        echo "  Uninstall auditd"
         wait_for_apt
         apt-get purge -y auditd  || true
     fi
 
     wait_for_apt
     if apt_install auditd; then
-        systemctl enable --now auditd.service || echo "Warning: service failed to start"
+        systemctl enable --now auditd.service || echo "  [!] Warning: service failed to start"
 
         # Configuring Auditd Rules for Wazuh
         # Install a basic set of rules (e.g., tracking execve, file deletions, etc.)
@@ -2389,8 +2385,8 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
         AUGENRULES_OUTPUT=$(augenrules --load 2>&1) || true
 
         # Check for rule loading errors and report which lines/rules failed
-		# Rules that fail to load are simply not active in the kernel — they're ignored. 
-		# The kernel audit subsystem loads rules sequentially and skips any it can't process
+        # Rules that fail to load are simply not active in the kernel — they're ignored.
+        # The kernel audit subsystem loads rules sequentially and skips any it can't process
         RULE_ERRORS=$(echo "$AUGENRULES_OUTPUT" | grep -i "error\|No such file" || true)
         if [[ -n "$RULE_ERRORS" ]]; then
             echo "  [!] Some audit rules failed to load:"
@@ -2416,7 +2412,7 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     fi
 
 else
-    echo "Skipping auditd installation."
+    echo "  Skipping auditd installation."
 fi
 
 
@@ -2509,7 +2505,7 @@ CRONEOF
         echo "  [!] IP blocklist installation failed — skipping configuration"
     fi
 else
-    echo "Skipping IP blocklist installation."
+    echo "  Skipping IP blocklist installation."
 fi
 
 
@@ -2519,7 +2515,7 @@ if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # The idea is that wazuh agent monitors /var/log/suricata/eve.json for attacks and responses are configured and triggered via wazuh manager
 
     if [[ "$PROMPT_SURICATA" == 'reinstall' ]]; then
-        echo "Uninstall suricata"
+        echo "  Uninstall suricata"
         # Backup original config
 
         if [[ -f /etc/suricata/suricata.yaml ]]; then
@@ -2561,7 +2557,7 @@ if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
         # Update rules. Installs /var/lib/suricata/rules/suricata.rules
         suricata-update --no-test || true
 
-        echo "Verify suricata config file /etc/suricata/suricata.yaml"
+        echo "  Verify suricata config file /etc/suricata/suricata.yaml"
         suricata -T -c /etc/suricata/suricata.yaml || echo "Warning: Suricata config test returned warnings"
 
         # Enable and start service
@@ -2569,15 +2565,13 @@ if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
 
         # Verify Suricata is running in IDS mode
         systemctl status suricata --no-pager -l | head -n 20
-        echo "Suricata installed on interface: $PRIMARY_INTERFACE. Logs at /var/log/suricata/eve.json"
-
-        # Note To watch live what's going on, run:
-        # tail -f /var/log/suricata/eve.json | jq
+        echo "  Suricata installed on interface: $PRIMARY_INTERFACE. Logs at /var/log/suricata/eve.json"
+        echo "  To watch live what's going on, run:  tail -f /var/log/suricata/eve.json | jq"
     else
         echo "  [!] Suricata IDS installation failed — skipping configuration"
     fi
 else
-    echo "Skipping Suricata IDS installation."
+    echo "  Skipping Suricata IDS installation."
 fi
 
 
@@ -2586,7 +2580,7 @@ echo "--- 42. Install and configure Wazuh Agent ---"
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_WAZUH" == 'reinstall' ]]; then
-        echo "Uninstall wazuh-agent"
+        echo "  Uninstall wazuh-agent"
         wait_for_apt
         apt-get purge -y wazuh-agent || true
     fi
@@ -2615,13 +2609,13 @@ if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
                 echo "  [!] Wazuh Agent installation failed — skipping configuration"
             fi
         else
-            echo "Could not download gpg key. Skipping installation."
+            echo "  [!] Could not download gpg key. Skipping installation."
         fi
     else
-        echo "No Manager IP provided. Skipping installation."
+        echo "  No Wazuh Manager IP provided. Skipping installation."
     fi
 else
-    echo "Skipping Wazuh Agent installation."
+    echo "  Skipping Wazuh Agent installation."
 fi
 
 
@@ -2708,7 +2702,7 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
         aa-status 2>/dev/null | grep -E "profiles are in enforce|profiles are in complain"
     fi
 else
-    echo "Skipping AppArmor configuration."
+    echo "  Skipping AppArmor configuration."
 fi
 
 # Configure modulejail only after all services are running. Otherwise detecting unused modules will be wrong.
@@ -2726,10 +2720,10 @@ if [[ "${CONFIGURE_MODULEJAIL:-}" =~ ^[Yy]$ ]]; then
         MODULEJAIL_LATEST="$MODULEJAIL_FALLBACK_VERSION"
     fi
 
-    echo "Downloading modulejail script v${MODULEJAIL_LATEST} ..."
+    echo "  Downloading modulejail script v${MODULEJAIL_LATEST} ..."
     curl -fsSL https://raw.githubusercontent.com/jnuyens/modulejail/v${MODULEJAIL_LATEST}/modulejail -o /tmp/modulejail || true
     if [[ -f "/tmp/modulejail" ]]; then
-        echo "Running modulejail script to jail unused modules..."
+        echo "  Running modulejail script to jail unused modules..."
         sudo sh /tmp/modulejail || true
 
         if [[ -f "/etc/modprobe.d/modulejail-blacklist.conf" ]]; then
@@ -2741,7 +2735,7 @@ if [[ "${CONFIGURE_MODULEJAIL:-}" =~ ^[Yy]$ ]]; then
         echo "  [!] modulejail download failed"
     fi
 else
-    echo "Skipping modulejail."
+    echo "  Skipping modulejail."
 fi
 
 echo ""
@@ -2752,7 +2746,7 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     # This updates ISINSTALLED_ variables to include services installed during this run,
     # so config files, Monit links, and restarts apply to all currently installed services.
     sleep 2
-    echo "Detecting installed services (post-install):"
+    echo "  Detecting installed services (post-install):"
     check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
     check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
     check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
@@ -3203,10 +3197,10 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     sleep 2
     echo "  Services restarted"
 
-    echo "Configuration files installed."
+    echo "  Configuration files installed."
 
 else
-    echo "Skipping configuration files"
+    echo "  Skipping configuration files"
 fi
 
 echo ""
@@ -3220,26 +3214,28 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     # apt-get autoremove -y ; apt-get -y purge $(dpkg --list | grep ^rc | awk '{ print $2; }')
     mapfile -t RC_PACKAGES < <(dpkg --list | awk '/^rc/ {print $2}')
     if [ ${#RC_PACKAGES[@]} -gt 0 ]; then
-        echo "Purging leftover configuration packages: ${RC_PACKAGES[*]}"
+        echo "  Purging leftover configuration packages: ${RC_PACKAGES[*]}"
         apt-get purge -y "${RC_PACKAGES[@]}" || true
     else
-        echo "No leftover config packages found."
+        echo "  No leftover config packages found."
     fi
     apt-get -y autoremove || true
 
-    echo "Restarting unattended upgrades"
+    echo "  Restarting unattended upgrades"
     restart_autoupdate
 else
-    echo "Skipping finalising"
+    echo "  Skipping finalising"
 fi
 
 
 echo ""
 echo "--- 47. Generating Health Check Script ---"
-HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
-# We start the file with the header and basic checks.
-# use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
-cat <<'EOF' > $HEALTH_CHECK_SCRIPT
+
+if [[ "$CREATE_HEALTHSCRIPT" =~ ^[Yy]$ ]]; then
+    HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
+    # We start the file with the header and basic checks.
+    # use 'EOF' to tell bash not to expand variables (e.g. 1, 2, GREEN)
+    cat <<'EOF' > $HEALTH_CHECK_SCRIPT
 #!/bin/bash
 # UBUNTU 24.04 and 26.04 SERVER HEALTH CHECK SCRIPT
 # by Xlvisuals Limited
@@ -3646,15 +3642,18 @@ else smoke_skip "Mosquitto"; fi
 
 echo ""
 EOF
-echo "  Script $HEALTH_CHECK_SCRIPT created"
+    echo "  Script $HEALTH_CHECK_SCRIPT created"
 
-chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME $HEALTH_CHECK_SCRIPT
-chmod +x $HEALTH_CHECK_SCRIPT
+    chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME $HEALTH_CHECK_SCRIPT
+    chmod +x $HEALTH_CHECK_SCRIPT
 
-echo "  Running $HEALTH_CHECK_SCRIPT ..."
-echo ""
-# Run health check
-$HEALTH_CHECK_SCRIPT
+    echo "  Running $HEALTH_CHECK_SCRIPT ..."
+    echo ""
+    # Run health check
+    $HEALTH_CHECK_SCRIPT
+else
+    echo "  Skipping Health Check script"
+fi
 
 
 echo ""
@@ -3719,9 +3718,9 @@ echo "$SSH_CMD"
 
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     echo ""
-    echo "AppArmor: nginx, postgresql, postfix, grafana set to complain mode."
-    echo "After normal use, run: sudo aa-logprof"
-    echo "Then to enforce: sudo aa-enforce /etc/apparmor.d/<profile>"
+    echo "  AppArmor: nginx, postgresql, postfix, grafana set to complain mode."
+    echo "  After normal use, run: sudo aa-logprof"
+    echo "  Then to enforce: sudo aa-enforce /etc/apparmor.d/<profile>"
 fi
 
 echo ""
