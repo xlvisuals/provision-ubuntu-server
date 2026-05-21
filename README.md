@@ -24,6 +24,7 @@ quickly provision a hardened server and install any of the following services if
 
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
 The components marked * are recommended.
+
 ---
 
 ## What It Does
