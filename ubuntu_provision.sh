@@ -579,7 +579,7 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
 
     # Interactive Password Prompt
     while true; do
-        prompt_if_unset MYSQL_PASSWORD         "  MySQL root password" secret $
+        prompt_if_unset MYSQL_PASSWORD         "  MySQL root password" secret
         if [ "${#MYSQL_PASSWORD}" -ge 4 ]; then
             break
         fi
@@ -616,7 +616,6 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
         if (( BUFFER_POOL_MB < MYSQL_BUFFER_POOL_CHUNK_MB )); then
             BUFFER_POOL_MB=$MYSQL_BUFFER_POOL_CHUNK_MB
         fi
-        TOTAL_MEM_MB=$(free -m | awk '/^Mem:/ {print $2}')
         echo "  Available memory: ${TOTAL_MEM_MB}MB — suggested buffer pool: ${BUFFER_POOL_MB}MB"
         prompt_if_unset MYSQL_BUFFER_POOL_MB "  InnoDB buffer pool size (MB)" n "$BUFFER_POOL_MB"
     fi
@@ -743,7 +742,6 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         POSTFIX_RELAY_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
     done
-    TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
     TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
     if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
         TEMP_POSTFIX_FROM_ADDRESS="$POSTFIX_RELAY_USERNAME"
@@ -916,10 +914,10 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     # Database configuration
     prompt_if_unset FORGEJO_DB_TYPE "  Forgejo database type (sqlite3/mysql/postgres)" n "sqlite3"
     if [[ "$FORGEJO_DB_TYPE" != "sqlite3" ]]; then
-        prompt_if_unset FORGEJO_DB_NAME "  Forgejo databas name" n "forgejo"
-        prompt_if_unset FORGEJO_DB_USER "  Forgejo databas user" n "forgejo"
+        prompt_if_unset FORGEJO_DB_NAME "  Forgejo database name" n "forgejo"
+        prompt_if_unset FORGEJO_DB_USER "  Forgejo database user" n "forgejo"
         while true; do
-            prompt_if_unset FORGEJO_DB_PASSWORD "  Forgejo databas password" secret
+            prompt_if_unset FORGEJO_DB_PASSWORD "  Forgejo database password" secret
             if [ "${#FORGEJO_DB_PASSWORD}" -ge 4 ]; then
                 break
             fi
@@ -956,6 +954,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         FORGEJO_ADMIN_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
     done
+    FORGEJO_SMTP_FROM="${FORGEJO_SMTP_FROM:-forgejo@${POSTFIX_DOMAIN:-}}"
     prompt_if_unset FORGEJO_ADMIN_EMAIL "  Forgejo admin email" n $FORGEJO_SMTP_FROM
 fi
 prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "y"
@@ -1219,20 +1218,8 @@ if set | grep -qE "^CONFIGURE_[A-Z_]+=y$"; then
 fi
 ANY_INSTALL_OR_CONFIGURE_SET=
 if set | grep -qE "^(INSTALL_|CONFIGURE_)[A-Z_]+=y$"; then
-    echo "At least one INSTALL_ or CONFIGURE_ is set to y"
     ANY_INSTALL_OR_CONFIGURE_SET=y
 fi
-
-if [[ "$ANY_INSTALL_OR_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
-    echo "At least one INSTALL_ or CONFIGURE_ is set to y"
-elif [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
-    echo "At least one INSTALL_ is set to y"
-elif [[ "$ANY_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
-    echo "At least one CONFIGURE_ is set to y"
-else
-    echo "No INSTALL_ or CONFIGURE_ is set to y"
-fi
-
 
 if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     echo ""
