@@ -129,8 +129,8 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
-        | grep -v "PASSWORD\|PASS\|SECRET|" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
+        | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
 }
@@ -994,193 +994,193 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     prompt_if_unset APPARMOR_ENFORCE "  Set profiles to enforce mode? (y/n)" n "$( [[ "$APPARMOR_CURRENT_MODE" == "enforce" ]] && echo y || echo n )"
 fi
 
-prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
-
-# Configure modulejails at the end
 prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
 
+prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
+
 echo "Configuration complete."
+
 
 ## Print Configuration
 ## --------------------------------------------
 echo ""
 echo ""
 echo "-- Configuration settings --"
-echo "Add sudo user?             : $USER_CREATE_SUDO_USER"
+echo "Add sudo user?               : $USER_CREATE_SUDO_USER"
 if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
-  echo "  new username             : $USER_SUDO_USER_USERNAME"
+  echo "  new username               : $USER_SUDO_USER_USERNAME"
 else
-  echo "  existing username        : $USER_SUDO_USER_USERNAME"
+  echo "  existing username          : $USER_SUDO_USER_USERNAME"
 fi
-echo "Configure LVM disks?       : $CONFIGURE_LVM"
+echo "Configure LVM disks?         : $CONFIGURE_LVM"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
-  echo "  Resize LVM?              : ${LVM_RESIZE_VOLUME:-n}"
+  echo "  Resize LVM?                : ${LVM_RESIZE_VOLUME:-n}"
   if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
-    echo "  LVM target GB            : ${LVM_RESIZE_TARGET_GB:-all}"
+    echo "  LVM target GB              : ${LVM_RESIZE_TARGET_GB:-all}"
   fi
 fi
-echo "Configure swap space?      : $CONFIGURE_SWAP"
+echo "Configure swap space?        : $CONFIGURE_SWAP"
 if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ && "$ACTIVE_SWAP" == "No" ]]; then
-  echo "  Swap size (GB)           : ${SWAP_SIZE_GB:-2}"
+  echo "  Swap size (GB)             : ${SWAP_SIZE_GB:-2}"
 fi
-echo "Tune system?               : $TUNE_SYSTEM"
+echo "Tune system?                 : $TUNE_SYSTEM"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
-  echo "  apt update hour (UTC)    : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
-  echo "  apt upgrade hour (UTC)   : $AUTO_UPGRADE_DAILY_HOUR"
+  echo "  apt update hour (UTC)      : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
+  echo "  apt upgrade hour (UTC)     : $AUTO_UPGRADE_DAILY_HOUR"
 fi
-echo "Uninstall extra packages?  : $UNINSTALL_PACKAGES"
-echo "Update installed packages? : $UPDATE_PACKAGES"
-echo "Install admin packages?    : $INSTALL_PACKAGES"
-echo "Install ufw?               : $INSTALL_UFW"
-echo "Install ssh?               : $INSTALL_SSH"
-echo "Install fonts?             : $INSTALL_FONTS"
+echo "Uninstall extra packages?    : $UNINSTALL_PACKAGES"
+echo "Update installed packages?   : $UPDATE_PACKAGES"
+echo "Install admin packages?      : $INSTALL_PACKAGES"
+echo "Install ufw?                 : $INSTALL_UFW"
+echo "Install ssh?                 : $INSTALL_SSH"
+echo "Install fonts?               : $INSTALL_FONTS"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
-  echo "  Install MS core fonts?   : $INSTALL_MS_FONTS"
+  echo "  Install MS core fonts?     : $INSTALL_MS_FONTS"
 fi
-echo "Install weasyprint?        : $INSTALL_WEASYPRINT"
-echo "Install imagemagick?       : $INSTALL_IMAGEMAGICK"
-echo "Install Python 3.14?       : $INSTALL_CPYTHON314"
-echo "Install Pypy 3.11?         : $INSTALL_PYPY311"
-echo "Install nginx?             : $INSTALL_NGINX"
+echo "Install weasyprint?          : $INSTALL_WEASYPRINT"
+echo "Install imagemagick?         : $INSTALL_IMAGEMAGICK"
+echo "Install Python 3.14?         : $INSTALL_CPYTHON314"
+echo "Install Pypy 3.11?           : $INSTALL_PYPY311"
+echo "Install nginx?               : $INSTALL_NGINX"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
-  echo "    nginx worker processes : $NGINX_WORKER_PROCESSES"
+  echo "    nginx worker processes   : $NGINX_WORKER_PROCESSES"
 fi
-echo "Install valkey?            : $INSTALL_VALKEY"
-echo "Install MySQL?             : $INSTALL_MYSQL"
+echo "Install valkey?              : $INSTALL_VALKEY"
+echo "Install MySQL?               : $INSTALL_MYSQL"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
-  echo "  Buffer pool chunk MB     : $MYSQL_BUFFER_POOL_CHUNK_MB"
-  echo "  Buffer pool MB           : $MYSQL_BUFFER_POOL_MB"
-  echo "  Buffer pool instances    : $MYSQL_BUFFER_POOL_INSTANCES"
-  echo "  Max connections          : $MYSQL_MAX_CONNECTIONS"
-  echo "  Log buffer MB            : $MYSQL_LOG_BUFFER_MB"
-  echo "  Binlog cache MB          : $MYSQL_BINLOG_CACHE_MB"
-  echo "  Join buffer KB           : $MYSQL_JOIN_BUFFER_KB"
-  echo "  Sort buffer KB           : $MYSQL_SORT_BUFFER_KB"
-  echo "  Read buffer KB           : $MYSQL_READ_BUFFER_KB"
-  echo "  Read rnd buffer KB       : $MYSQL_READ_RND_BUFFER_KB"
+  echo "  Buffer pool chunk MB       : $MYSQL_BUFFER_POOL_CHUNK_MB"
+  echo "  Buffer pool MB             : $MYSQL_BUFFER_POOL_MB"
+  echo "  Buffer pool instances      : $MYSQL_BUFFER_POOL_INSTANCES"
+  echo "  Max connections            : $MYSQL_MAX_CONNECTIONS"
+  echo "  Log buffer MB              : $MYSQL_LOG_BUFFER_MB"
+  echo "  Binlog cache MB            : $MYSQL_BINLOG_CACHE_MB"
+  echo "  Join buffer KB             : $MYSQL_JOIN_BUFFER_KB"
+  echo "  Sort buffer KB             : $MYSQL_SORT_BUFFER_KB"
+  echo "  Read buffer KB             : $MYSQL_READ_BUFFER_KB"
+  echo "  Read rnd buffer KB         : $MYSQL_READ_RND_BUFFER_KB"
 fi
-echo "Install MariaDB?           : $INSTALL_MARIADB"
+echo "Install MariaDB?             : $INSTALL_MARIADB"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
-  echo "  Buffer pool chunk MB     : $MYSQL_BUFFER_POOL_CHUNK_MB"
-  echo "  Buffer pool MB           : $MYSQL_BUFFER_POOL_MB"
-  echo "  Buffer pool instances    : $MYSQL_BUFFER_POOL_INSTANCES"
-  echo "  Max connections          : $MYSQL_MAX_CONNECTIONS"
-  echo "  Log buffer MB            : $MYSQL_LOG_BUFFER_MB"
-  echo "  Binlog cache MB          : $MYSQL_BINLOG_CACHE_MB"
-  echo "  Join buffer KB           : $MYSQL_JOIN_BUFFER_KB"
-  echo "  Sort buffer KB           : $MYSQL_SORT_BUFFER_KB"
-  echo "  Read buffer KB           : $MYSQL_READ_BUFFER_KB"
-  echo "  Read rnd buffer KB       : $MYSQL_READ_RND_BUFFER_KB"
+  echo "  Buffer pool chunk MB       : $MYSQL_BUFFER_POOL_CHUNK_MB"
+  echo "  Buffer pool MB             : $MYSQL_BUFFER_POOL_MB"
+  echo "  Buffer pool instances      : $MYSQL_BUFFER_POOL_INSTANCES"
+  echo "  Max connections            : $MYSQL_MAX_CONNECTIONS"
+  echo "  Log buffer MB              : $MYSQL_LOG_BUFFER_MB"
+  echo "  Binlog cache MB            : $MYSQL_BINLOG_CACHE_MB"
+  echo "  Join buffer KB             : $MYSQL_JOIN_BUFFER_KB"
+  echo "  Sort buffer KB             : $MYSQL_SORT_BUFFER_KB"
+  echo "  Read buffer KB             : $MYSQL_READ_BUFFER_KB"
+  echo "  Read rnd buffer KB         : $MYSQL_READ_RND_BUFFER_KB"
 fi
-echo "Install PostgreSQL?        : $INSTALL_POSTGRESQL"
+echo "Install PostgreSQL?          : $INSTALL_POSTGRESQL"
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
-  echo "  Max connections          : $PG_MAX_CONNECTIONS"
-  echo "  Shared buffers MB        : $PG_SHARED_BUFFERS_MB"
-  echo "  Work mem MB              : $PG_WORK_MEM_MB"
-  echo "  Effective cache MB       : $PG_EFFECTIVE_CACHE_MB"
-  echo "  Max worker processes     : $PG_MAX_WORKER_PROCESSES"
-  echo "  Max parallel workers     : $PG_MAX_PARALLEL_WORKERS"
-  echo "  Max parallel w/gather    : $PG_MAX_PARALLEL_WORKERS_PG"
-  echo "  Effective IO concurr.    : $PG_EFFECTIVE_IO_CONCURRENCY"
-  echo "  Superuser password       : ********"
+  echo "  Max connections            : $PG_MAX_CONNECTIONS"
+  echo "  Shared buffers MB          : $PG_SHARED_BUFFERS_MB"
+  echo "  Work mem MB                : $PG_WORK_MEM_MB"
+  echo "  Effective cache MB         : $PG_EFFECTIVE_CACHE_MB"
+  echo "  Max worker processes       : $PG_MAX_WORKER_PROCESSES"
+  echo "  Max parallel workers       : $PG_MAX_PARALLEL_WORKERS"
+  echo "  Max parallel w/gather      : $PG_MAX_PARALLEL_WORKERS_PG"
+  echo "  Effective IO concurr.      : $PG_EFFECTIVE_IO_CONCURRENCY"
+  echo "  Superuser password         : ********"
 fi
-echo "Install Mosquitto?         : $INSTALL_MOSQUITTO"
-echo "Install Postfix?           : $INSTALL_POSTFIX"
+echo "Install Mosquitto?           : $INSTALL_MOSQUITTO"
+echo "Install Postfix?             : $INSTALL_POSTFIX"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
-  echo "  Relay host               : $POSTFIX_RELAY_HOST:$POSTFIX_RELAY_PORT"
-  echo "  Relay username           : $POSTFIX_RELAY_USERNAME"
-  echo "  Relay password           : ********"
-  echo "  Mail domain              : $POSTFIX_DOMAIN"
-  echo "  From address             : $POSTFIX_FROM_ADDRESS"
-  echo "  Root alias               : $POSTFIX_ROOT_ALIAS"
+  echo "  Relay host                 : $POSTFIX_RELAY_HOST:$POSTFIX_RELAY_PORT"
+  echo "  Relay username             : $POSTFIX_RELAY_USERNAME"
+  echo "  Relay password             : ********"
+  echo "  Mail domain                : $POSTFIX_DOMAIN"
+  echo "  From address               : $POSTFIX_FROM_ADDRESS"
+  echo "  Root alias                 : $POSTFIX_ROOT_ALIAS"
 fi
-echo "Install Monit?             : $INSTALL_MONIT"
+echo "Install Monit?               : $INSTALL_MONIT"
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
-  echo "  Monit host name          : $MONIT_HOST_NAME"
+  echo "  Monit host name            : $MONIT_HOST_NAME"
   if [[ "$MONIT_USE_POSTFIX" =~ ^[Yy]$ ]]; then
     echo "  Mail via               : Postfix (localhost:25)"
   else
-    echo "  Mail server host       : $MONIT_MAILSERVER_HOST"
-    echo "  Mail server port       : $MONIT_MAILSERVER_PORT"
-    echo "  Mail server username   : $MONIT_MAILSERVER_USERNAME"
-    echo "  Mail server password   : ********"
+    echo "  Mail server host         : $MONIT_MAILSERVER_HOST"
+    echo "  Mail server port         : $MONIT_MAILSERVER_PORT"
+    echo "  Mail server username     : $MONIT_MAILSERVER_USERNAME"
+    echo "  Mail server password     : ********"
   fi
-  echo "  Monit admin username     : $MONIT_ADMIN_USERNAME"
-  echo "  Monit admin password     : ********"
-  echo "  Alert sender             : $MONIT_ALERT_SENDER"
-  echo "  Alert recipient          : $MONIT_ALERT_RECIPIENT"
+  echo "  Monit admin username       : $MONIT_ADMIN_USERNAME"
+  echo "  Monit admin password       : ********"
+  echo "  Alert sender               : $MONIT_ALERT_SENDER"
+  echo "  Alert recipient            : $MONIT_ALERT_RECIPIENT"
 fi
-echo "Install Webmin?            : $INSTALL_WEBMIN"
-echo "Install Grafana?           : $INSTALL_GRAFANA"
+echo "Install Webmin?              : $INSTALL_WEBMIN"
+echo "Install Grafana?             : $INSTALL_GRAFANA"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
-  echo "  Random secret            : ********"
+  echo "  Random secret              : ********"
 
   if [[ "$GRAFANA_USE_POSTFIX" =~ ^[Yy]$ ]]; then
     echo "  Mail via                 : Postfix (localhost:25)"
-    echo "  From address             : $GRAFANA_SMTP_FROM_ADDRESS"
-    echo "  From name                : $GRAFANA_SMTP_FROM_NAME"
+    echo "  From address               : $GRAFANA_SMTP_FROM_ADDRESS"
+    echo "  From name                  : $GRAFANA_SMTP_FROM_NAME"
   else
-    echo "  SMTP enabled           : $GRAFANA_SMTP_ENABLED"
+    echo "  SMTP enabled             : $GRAFANA_SMTP_ENABLED"
     if [[ "$GRAFANA_SMTP_ENABLED" == "true" ]]; then
-      echo "  SMTP host              : $GRAFANA_SMTP_HOST"
-      echo "  SMTP port              : $GRAFANA_SMTP_PORT"
-      echo "  SMTP user              : $GRAFANA_SMTP_USER"
-      echo "  SMTP password          : ********"
-      echo "  From address           : $GRAFANA_SMTP_FROM_ADDRESS"
-      echo "  From name              : $GRAFANA_SMTP_FROM_NAME"
-      echo "  EHLO identity          : $GRAFANA_SMTP_EHLO_IDENTITY"
-      echo "  StartTLS policy        : $GRAFANA_SMTP_STARTTLS_POLICY"
+      echo "  SMTP host                : $GRAFANA_SMTP_HOST"
+      echo "  SMTP port                : $GRAFANA_SMTP_PORT"
+      echo "  SMTP user                : $GRAFANA_SMTP_USER"
+      echo "  SMTP password            : ********"
+      echo "  From address             : $GRAFANA_SMTP_FROM_ADDRESS"
+      echo "  From name                : $GRAFANA_SMTP_FROM_NAME"
+      echo "  EHLO identity            : $GRAFANA_SMTP_EHLO_IDENTITY"
+      echo "  StartTLS policy          : $GRAFANA_SMTP_STARTTLS_POLICY"
     fi
   fi
 fi
-echo "Install Forgejo?           : $INSTALL_FORGEJO"
+echo "Install Forgejo?             : $INSTALL_FORGEJO"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
-  echo "  Forgejo domain/ip        : $FORGEJO_DOMAIN"
-  echo "  Forgejo port             : $FORGEJO_PORT"
-  echo "  Database type            : $FORGEJO_DB_TYPE"
+  echo "  Forgejo domain/ip          : $FORGEJO_DOMAIN"
+  echo "  Forgejo port               : $FORGEJO_PORT"
+  echo "  Database type              : $FORGEJO_DB_TYPE"
   if [[ "$FORGEJO_DB_TYPE" != "sqlite3" ]]; then
-    echo "  Database name            : $FORGEJO_DB_NAME"
-    echo "  Database user            : $FORGEJO_DB_USER"
-    echo "  Database host            : $FORGEJO_DB_HOST"
-    echo "  Database password        : ********"
+    echo "  Database name              : $FORGEJO_DB_NAME"
+    echo "  Database user              : $FORGEJO_DB_USER"
+    echo "  Database host              : $FORGEJO_DB_HOST"
+    echo "  Database password          : ********"
   fi
-  echo "  Admin username           : $FORGEJO_ADMIN_USERNAME"
-  echo "  Admin password           : ********"
-  echo "  Admin email              : $FORGEJO_ADMIN_EMAIL"
+  echo "  Admin username             : $FORGEJO_ADMIN_USERNAME"
+  echo "  Admin password             : ********"
+  echo "  Admin email                : $FORGEJO_ADMIN_EMAIL"
   if [[ "$FORGEJO_USE_POSTFIX" =~ ^[Yy]$ ]]; then
     echo "  Mail via                 : Postfix (localhost:25)"
-    echo "  From address             : $FORGEJO_SMTP_FROM"
+    echo "  From address               : $FORGEJO_SMTP_FROM"
   else
-    echo "  Mailer enabled           : $FORGEJO_MAILER_ENABLED"
+    echo "  Mailer enabled             : $FORGEJO_MAILER_ENABLED"
     if [[ "$FORGEJO_MAILER_ENABLED" == "true" ]]; then
-      echo "  SMTP host                : $FORGEJO_SMTP_ADDR"
-      echo "  SMTP port                : $FORGEJO_SMTP_PORT"
-      echo "  SMTP protocol            : $FORGEJO_SMTP_PROTOCOL"
-      echo "  From address             : $FORGEJO_SMTP_FROM"
-      echo "  SMTP user                : $FORGEJO_SMTP_USER"
-      echo "  SMTP password            : ********"
+      echo "  SMTP host                  : $FORGEJO_SMTP_ADDR"
+      echo "  SMTP port                  : $FORGEJO_SMTP_PORT"
+      echo "  SMTP protocol              : $FORGEJO_SMTP_PROTOCOL"
+      echo "  From address               : $FORGEJO_SMTP_FROM"
+      echo "  SMTP user                  : $FORGEJO_SMTP_USER"
+      echo "  SMTP password              : ********"
     fi
   fi
 fi
-echo "Disable TX offloading?     : $DISABLE_TX_OFFLOAD"
+echo "Disable TX offloading?       : $DISABLE_TX_OFFLOAD"
 if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
-  echo "  Interface                : $PRIMARY_INTERFACE"
+  echo "  Interface                  : $PRIMARY_INTERFACE"
 fi
-echo "Install Fail2Ban?          : $INSTALL_FAIL2BAN"
-echo "Install auditd?            : $INSTALL_AUDITD"
-echo "Install IP blocklist?      : $INSTALL_IPBLOCK"
-echo "Install Suricata IDS?      : $INSTALL_SURICATA"
-echo "Install Wazuh Agent?       : $INSTALL_WAZUH"
+echo "Install Fail2Ban?            : $INSTALL_FAIL2BAN"
+echo "Install auditd?              : $INSTALL_AUDITD"
+echo "Install IP blocklist?        : $INSTALL_IPBLOCK"
+echo "Install Suricata IDS?        : $INSTALL_SURICATA"
+echo "Install Wazuh Agent?         : $INSTALL_WAZUH"
 if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
-  echo "  Wazuh Manager            : $WAZUH_MANAGER"
+  echo "  Wazuh Manager              : $WAZUH_MANAGER"
 fi
-echo "Configure AppArmor?        : $CONFIGURE_APPARMOR"
+echo "Configure AppArmor?          : $CONFIGURE_APPARMOR"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
-  echo "  Enable AppArmor          : $APPARMOR_ENABLE"
-  echo "  Enforce mode             : $APPARMOR_ENFORCE"
+  echo "  Enable AppArmor            : $APPARMOR_ENABLE"
+  echo "  Enforce mode               : $APPARMOR_ENFORCE"
 fi
-echo "Configure modulejail?      : $CONFIGURE_MODULEJAIL"
-
+echo "Configure modulejail?        : $CONFIGURE_MODULEJAIL"
+echo "Create and run Health Check? : $CREATE_HEALTHSCRIPT"
 echo ""
 save_config
 
@@ -1750,7 +1750,7 @@ if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
     PYPY_BASE_URL="https://downloads.python.org/pypy"
     PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP "pypy3\\.11-v[\\d.]+-${PYPY_ARCH}\\.tar\\.bz2" | sort -V | tail -n1) || true
     if [[ -z "$PYPY_FILENAME" ]]; then
-        echo "  Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION."
+        echo "  Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION on ${PYPY_ARCH}."
         PYPY_FILENAME="${PYPY_FALLBACK_VERSION}-${PYPY_ARCH}.tar.bz2"
     fi
 

@@ -125,6 +125,7 @@ Would you like to configure AppArmor? (y/n) : y
   Enable AppArmor? (y/n) : y
   Set profiles to enforce mode? (y/n) : y
 Blacklist unused kernel modules using modulejail? (y/n): y
+Would you like to create and run the Health Check script? (y/n) : y
 Configuration complete.
 ```
 
@@ -299,7 +300,7 @@ FORCE_APPLY=n
 
 # Package versions
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22-linux64
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22
 FORGEJO_FALLBACK_VERSION=15.0.2
 FORGEJO_FALLBACK_PORT=3030
 
@@ -327,6 +328,7 @@ CONFIGURE_APPARMOR=y
 APPARMOR_ENABLE=y
 APPARMOR_ENFORCE=y
 CONFIGURE_MODULEJAIL=y
+CREATE_HEALTHSCRIPT=y
 
 # Packages
 UNINSTALL_PACKAGES=y
@@ -530,16 +532,21 @@ A `pg_hba.conf` template is also required at `etc/postgresql/pg_hba.conf`.
 
 ### Forgejo (`etc/forgejo/app.ini`)
 
-| Placeholder | Value |
-|---|---|
-| `%%FORGEJO_DOMAIN%%` | Domain name or IP (defaults to server's primary IP) |
-| `%%FORGEJO_PORT%%` | HTTP port (3000, or 3030 if Grafana also installed) |
-| `%%FORGEJO_MAILER_ENABLED%%` | `true` or `false` |
-| `%%FORGEJO_SMTP_ADDR%%` | SMTP host (empty if via Postfix) |
-| `%%FORGEJO_SMTP_PORT%%` | SMTP port (empty if via Postfix) |
-| `%%FORGEJO_SMTP_FROM%%` | From address |
-| `%%FORGEJO_SMTP_USER%%` | SMTP username (empty if via Postfix) |
-| `%%FORGEJO_SMTP_PASSWORD%%` | SMTP password (empty if via Postfix) |
+| Placeholder                  | Value                                               |
+|------------------------------|-----------------------------------------------------|
+| `%%FORGEJO_DOMAIN%%`         | Domain name or IP (defaults to server's primary IP) |
+| `%%FORGEJO_PORT%%`           | HTTP port (3000, or 3030 if Grafana also installed) |
+| `%%FORGEJO_MAILER_ENABLED%%` | `true` or `false`                                   |
+| `%%FORGEJO_SMTP_ADDR%%`      | SMTP host (empty if via Postfix)                    |
+| `%%FORGEJO_SMTP_PORT%%`      | SMTP port (empty if via Postfix)                    |
+| `%%FORGEJO_SMTP_FROM%%`      | From address                                        |
+| `%%FORGEJO_SMTP_USER%%`      | SMTP username (empty if via Postfix)                |
+| `%%FORGEJO_SMTP_PASSWORD%%`  | SMTP password (empty if via Postfix)                |
+| `%%FORGEJO_DB_TYPE%%`        | sqlite3/mysql/postgres. Default is sqlite3          |
+| `%%FORGEJO_DB_NAME%%`        | Database name (empty for sqlite3)                   |
+| `%%FORGEJO_DB_USER%%`        | Database username (empty for sqlite3)               |
+| `%%FORGEJO_DB_PASSWORD%%`    | Database password (empty for sqlite3)               |
+| `%%FORGEJO_DB_HOST%%`        | Database host (empty for sqlite3)                   |
 
 ---
 
