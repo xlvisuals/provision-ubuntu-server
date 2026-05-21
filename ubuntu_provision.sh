@@ -1209,19 +1209,47 @@ fi
 echo ""
 echo "--- 3. Preparation ---"
 
-echo ""
-echo "Stopping unattended upgrades"
-stop_autoupdate
-
-echo "Backup current configuration"
-BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
-if [[ -f "$BACKUP_SCRIPT" ]]; then
-    bash "$BACKUP_SCRIPT" "${LOCAL_HOSTNAME}_pre-apply"
-    echo "Pre-apply configuration backup complete."
-else
-    echo "Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
+ANY_INSTALL_SET=
+if set | grep -qE "^INSTALL_[A-Z_]+=y$"; then
+    ANY_INSTALL_SET=y
+fi
+ANY_CONFIGURE_SET=
+if set | grep -qE "^CONFIGURE_[A-Z_]+=y$"; then
+    ANY_CONFIGURE_SET=y
+fi
+ANY_INSTALL_OR_CONFIGURE_SET=
+if set | grep -qE "^(INSTALL_|CONFIGURE_)[A-Z_]+=y$"; then
+    echo "At least one INSTALL_ or CONFIGURE_ is set to y"
+    ANY_INSTALL_OR_CONFIGURE_SET=y
 fi
 
+if [[ "$ANY_INSTALL_OR_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
+    echo "At least one INSTALL_ or CONFIGURE_ is set to y"
+elif [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
+    echo "At least one INSTALL_ is set to y"
+elif [[ "$ANY_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
+    echo "At least one CONFIGURE_ is set to y"
+else
+    echo "No INSTALL_ or CONFIGURE_ is set to y"
+fi
+
+
+if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "--- Stopping unattended upgrades ---"
+    stop_autoupdate
+fi
+
+if [[ "$ANY_INSTALL_OR_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
+    echo "--- Backup current configuration ---"
+    BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
+    if [[ -f "$BACKUP_SCRIPT" ]]; then
+        bash "$BACKUP_SCRIPT" "${LOCAL_HOSTNAME}_pre-apply"
+        echo "Pre-apply configuration backup complete."
+    else
+        echo "Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
+    fi
+fi
 
 ## Apply settings
 ## --------------------------------------------
@@ -1242,20 +1270,21 @@ if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
     else
         echo "User $USER_SUDO_USER_USERNAME exists."
     fi
-    echo "Adding user $USER_SUDO_USER_USERNAME to groups sudo and adm"
-    usermod -a -G sudo $USER_SUDO_USER_USERNAME
-    usermod -a -G adm $USER_SUDO_USER_USERNAME
-    echo "Updating home folder permissions."
-    chmod 750 /home/$USER_SUDO_USER_USERNAME
 else
     echo "Skipping new sudo user."
-    echo "Adding user $USER_SUDO_USER_USERNAME to groups sudo and adm"
-    usermod -a -G sudo $USER_SUDO_USER_USERNAME
-    usermod -a -G adm $USER_SUDO_USER_USERNAME
-    echo "Updating home folder permissions."
+fi
+if [[ -n "$USER_SUDO_USER_USERNAME" ]]; then
+    if ! id -nG "$USER_SUDO_USER_USERNAME" | grep -qw "sudo"; then
+        echo "Adding user $USER_SUDO_USER_USERNAME to group sudo"
+        usermod -a -G sudo "$USER_SUDO_USER_USERNAME"
+    fi
+    if ! id -nG "$USER_SUDO_USER_USERNAME" | grep -qw "adm"; then
+        echo "Adding user $USER_SUDO_USER_USERNAME to group adm"
+        usermod -a -G adm "$USER_SUDO_USER_USERNAME"
+    fi
+    echo "Updating home folder permissions for user $USER_SUDO_USER_USERNAME to 750"
     chmod 750 /home/$USER_SUDO_USER_USERNAME
 fi
-
 
 echo ""
 echo "--- 5. Configure LVM disks ---"
@@ -1372,13 +1401,18 @@ echo ""
 echo "--- 8. Upgrade system packages ---"
 if [[ "$UPDATE_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
+    echo "Updating packages."
     apt-get update
+    echo "Upgrading packages."
     apt-get -y full-upgrade
-else
-    # always update, but not ugprade
+elif [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
+    # update, but not ugprade
     wait_for_apt
+    echo "Updating packages."
     apt-get update
     echo "Skipping upgrade."
+else
+    echo "Skipping update and upgrade."
 fi
 
 
@@ -2403,7 +2437,7 @@ echo ""
 echo "--- 40. Install ip blocklist (ipset + ipsum) ---"
 if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_IPBLOCK" == 'reinstall' ]]; then
-        echo "Uninstall ip blocklist"
+        echo "  Uninstall ip blocklist"
 
         if [[ -f /etc/ufw/after.init.orig  && -s /etc/ufw/after.init.orig ]]; then
             # restore backup
@@ -2431,7 +2465,7 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
         ipset flush ufw-blocklist-ipsum 2>/dev/null || true
         ipset destroy ufw-blocklist-ipsum 2>/dev/null || true
 
-        echo "Remaining setlist:"
+        echo "  Remaining setlist:"
         ipset list -n || true
     fi
 
@@ -2440,6 +2474,7 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
 
         # Backup the original ufw after.init if not already backed up
         if [ ! -f /etc/ufw/after.init.orig ]; then
+            echo "  Backing up the original ufw after.init to /etc/ufw/after.init.orig"
             cp /etc/ufw/after.init /etc/ufw/after.init.orig
         fi
 
@@ -2449,17 +2484,29 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
 
         # Install the ufw-blocklist files
         if [ -f "$TEMP_DIR/after.init" ]; then
+            echo "  Installing the ufw-blocklist files"
             cp "$TEMP_DIR/after.init" /etc/ufw/after.init
             chown root:root /etc/ufw/after.init
             chmod 750 /etc/ufw/after.init
         fi
         if [ -f "$TEMP_DIR/ufw-blocklist-ipsum" ]; then
+            echo "  Installing the ufw-blocklist cron job"
             cp "$TEMP_DIR/ufw-blocklist-ipsum" /etc/cron.daily/ufw-blocklist-ipsum
             chown root:root /etc/cron.daily/ufw-blocklist-ipsum
             chmod 750 /etc/cron.daily/ufw-blocklist-ipsum
+
+            # Append save-to-file step so /etc/ipsum.4.txt stays in sync after
+            # each cron run and is restored correctly after a reboot
+            cat >> /etc/cron.daily/ufw-blocklist-ipsum << 'CRONEOF'
+
+# Save current ipset to file for restoration after reboot
+$ipset_exe save "$ipsetname" | grep "^add " | awk '{print $3}' > /etc/ipsum.4.txt
+$logger "saved $cnt entries to /etc/ipsum.4.txt for boot restoration"
+CRONEOF
         fi
 
         # Download an initial IP blocklist from IPsum (Level 4: IPs found in 4+ blacklists)
+        echo "  Downloading initial setlist"
         curl -sS -f --compressed -o /etc/ipsum.4.txt 'https://raw.githubusercontent.com/stamparm/ipsum/master/levels/4.txt'
         chmod 640 /etc/ipsum.4.txt
 
@@ -2713,482 +2760,491 @@ fi
 echo ""
 echo "--- 45. Install configuration files ---"
 
-# Re-detect installed services now that installation is complete.
-# This updates ISINSTALLED_ variables to include services installed during this run,
-# so config files, Monit links, and restarts apply to all currently installed services.
-sleep 2
-echo "Detecting installed services (post-install):"
-check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
-check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
-check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
-check_service_installed mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
-check_service_installed postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
-check_service_installed mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
-check_service_installed postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
-check_service_installed monit PROMPT_MONIT ISINSTALLED_MONIT
-check_service_installed webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
-check_service_installed grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
-check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
-check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
-check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
-check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
+    # Re-detect installed services now that installation is complete.
+    # This updates ISINSTALLED_ variables to include services installed during this run,
+    # so config files, Monit links, and restarts apply to all currently installed services.
+    sleep 2
+    echo "Detecting installed services (post-install):"
+    check_service_installed nginx PROMPT_NGINX ISINSTALLED_NGINX
+    check_service_installed valkey-server PROMPT_VALKEY ISINSTALLED_VALKEY
+    check_service_installed mysql PROMPT_MYSQL ISINSTALLED_MYSQL
+    check_service_installed mariadb PROMPT_MARIADB ISINSTALLED_MARIADB
+    check_service_installed postgresql PROMPT_POSTGRESQL ISINSTALLED_POSTGRESQL
+    check_service_installed mosquitto PROMPT_MOSQUITTO ISINSTALLED_MOSQUITTO
+    check_service_installed postfix PROMPT_POSTFIX ISINSTALLED_POSTFIX
+    check_service_installed monit PROMPT_MONIT ISINSTALLED_MONIT
+    check_service_installed webmin PROMPT_WEBMIN ISINSTALLED_WEBMIN
+    check_service_installed grafana-server PROMPT_GRAFANA ISINSTALLED_GRAFANA
+    check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
+    check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
+    check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
+    check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
+    check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
 
 
-if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
-    echo "  Copying MySQL config files"
+    if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
+        echo "  Copying MySQL config files"
 
-    if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
-        cp $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf
+        if [[ -f $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf ]]; then
+            cp $CONFIG_DIR/etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf
 
-        sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%INNODB_BUFFER_POOL_CHUNK_SIZE%%|${MYSQL_BUFFER_POOL_CHUNK_MB}M|g" /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%MAX_CONNECTIONS%%|${MYSQL_MAX_CONNECTIONS}|g"                    /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%INNODB_LOG_BUFFER_SIZE%%|${MYSQL_LOG_BUFFER_MB}M|g"              /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%BINLOG_CACHE_SIZE%%|${MYSQL_BINLOG_CACHE_MB}M|g"                 /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%JOIN_BUFFER_SIZE%%|${MYSQL_JOIN_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%SORT_BUFFER_SIZE%%|${MYSQL_SORT_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%READ_BUFFER_SIZE%%|${MYSQL_READ_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
-        sed -i "s|%%READ_RND_BUFFER_SIZE%%|${MYSQL_READ_RND_BUFFER_KB}K|g"           /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%INNODB_BUFFER_POOL_CHUNK_SIZE%%|${MYSQL_BUFFER_POOL_CHUNK_MB}M|g" /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%MAX_CONNECTIONS%%|${MYSQL_MAX_CONNECTIONS}|g"                    /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%INNODB_LOG_BUFFER_SIZE%%|${MYSQL_LOG_BUFFER_MB}M|g"              /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%BINLOG_CACHE_SIZE%%|${MYSQL_BINLOG_CACHE_MB}M|g"                 /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%JOIN_BUFFER_SIZE%%|${MYSQL_JOIN_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%SORT_BUFFER_SIZE%%|${MYSQL_SORT_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%READ_BUFFER_SIZE%%|${MYSQL_READ_BUFFER_KB}K|g"                   /etc/mysql/mysql.conf.d/mysqld.cnf
+            sed -i "s|%%READ_RND_BUFFER_SIZE%%|${MYSQL_READ_RND_BUFFER_KB}K|g"           /etc/mysql/mysql.conf.d/mysqld.cnf
+        fi
+
+        if [[ -f $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf ]]; then
+            # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+            mkdir -p /etc/systemd/system/mysql.service.d
+            cp $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf /etc/systemd/system/mysql.service.d/override.conf
+        fi
     fi
 
-    if [[ -f $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf ]]; then
-        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
-        mkdir -p /etc/systemd/system/mysql.service.d
-        cp $CONFIG_DIR/etc/systemd/system/mysql.service.d/override.conf /etc/systemd/system/mysql.service.d/override.conf
-    fi
-fi
+    if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ && "$ISINSTALLED_MARIADB" == "y" ]]; then
+        echo "  Copying MariaDB config files"
+        # MariaDB uses the same template as MySQL — reuse mysqld.cnf with same placeholders
+        if [[ -f $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf ]]; then
+            mkdir -p /etc/mysql/mariadb.conf.d/
+            cp $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
 
-if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ && "$ISINSTALLED_MARIADB" == "y" ]]; then
-    echo "  Copying MariaDB config files"
-    # MariaDB uses the same template as MySQL — reuse mysqld.cnf with same placeholders
-    if [[ -f $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf ]]; then
-        mkdir -p /etc/mysql/mariadb.conf.d/
-        cp $CONFIG_DIR/etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
-
-        sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%INNODB_BUFFER_POOL_CHUNK_SIZE%%|${MYSQL_BUFFER_POOL_CHUNK_MB}M|g" /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%MAX_CONNECTIONS%%|${MYSQL_MAX_CONNECTIONS}|g"                    /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%INNODB_LOG_BUFFER_SIZE%%|${MYSQL_LOG_BUFFER_MB}M|g"              /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%BINLOG_CACHE_SIZE%%|${MYSQL_BINLOG_CACHE_MB}M|g"                 /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%JOIN_BUFFER_SIZE%%|${MYSQL_JOIN_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%SORT_BUFFER_SIZE%%|${MYSQL_SORT_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%READ_BUFFER_SIZE%%|${MYSQL_READ_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
-        sed -i "s|%%READ_RND_BUFFER_SIZE%%|${MYSQL_READ_RND_BUFFER_KB}K|g"           /etc/mysql/mariadb.conf.d/50-server.cnf
-    fi
-fi
-
-if [[ "$INSTALL_NGINX" =~ ^[Yy]$ && "$ISINSTALLED_NGINX" == "y" ]]; then
-    echo "  Copying Nginx config files"
-    if [[ -f $CONFIG_DIR/etc/nginx/nginx/nginx.conf ]]; then
-        cp $CONFIG_DIR/etc/nginx/nginx.conf /etc/nginx/nginx.conf
-        NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-$PROCESSOR_COUNT}
-        sed -i "s|%%NGINX_WORKER_PROCESSES%%|$NGINX_WORKER_PROCESSES|g" /etc/nginx/nginx.conf
+            sed -i "s|%%INNODB_BUFFER_POOL_SIZE%%|${MYSQL_BUFFER_POOL_MB}M|g"            /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%INNODB_BUFFER_POOL_INSTANCES%%|${MYSQL_BUFFER_POOL_INSTANCES}|g"  /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%INNODB_BUFFER_POOL_CHUNK_SIZE%%|${MYSQL_BUFFER_POOL_CHUNK_MB}M|g" /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%MAX_CONNECTIONS%%|${MYSQL_MAX_CONNECTIONS}|g"                    /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%INNODB_LOG_BUFFER_SIZE%%|${MYSQL_LOG_BUFFER_MB}M|g"              /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%BINLOG_CACHE_SIZE%%|${MYSQL_BINLOG_CACHE_MB}M|g"                 /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%JOIN_BUFFER_SIZE%%|${MYSQL_JOIN_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%SORT_BUFFER_SIZE%%|${MYSQL_SORT_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%READ_BUFFER_SIZE%%|${MYSQL_READ_BUFFER_KB}K|g"                   /etc/mysql/mariadb.conf.d/50-server.cnf
+            sed -i "s|%%READ_RND_BUFFER_SIZE%%|${MYSQL_READ_RND_BUFFER_KB}K|g"           /etc/mysql/mariadb.conf.d/50-server.cnf
+        fi
     fi
 
-    if [[ -f $CONFIG_DIR/etc/nginx/sites-available/default ]]; then
-        cp $CONFIG_DIR/etc/nginx/sites-available/default /etc/nginx/sites-available/default
+    if [[ "$INSTALL_NGINX" =~ ^[Yy]$ && "$ISINSTALLED_NGINX" == "y" ]]; then
+        echo "  Copying Nginx config files"
+        if [[ -f $CONFIG_DIR/etc/nginx/nginx/nginx.conf ]]; then
+            cp $CONFIG_DIR/etc/nginx/nginx.conf /etc/nginx/nginx.conf
+            NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-$PROCESSOR_COUNT}
+            sed -i "s|%%NGINX_WORKER_PROCESSES%%|$NGINX_WORKER_PROCESSES|g" /etc/nginx/nginx.conf
+        fi
+
+        if [[ -f $CONFIG_DIR/etc/nginx/sites-available/default ]]; then
+            cp $CONFIG_DIR/etc/nginx/sites-available/default /etc/nginx/sites-available/default
+        fi
+
+        if [[ -f $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf ]]; then
+            # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+            mkdir -p /etc/systemd/system/nginx.service.d
+            cp $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf /etc/systemd/system/nginx.service.d/override.conf
+        fi
     fi
 
-    if [[ -f $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf ]]; then
-        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
-        mkdir -p /etc/systemd/system/nginx.service.d
-        cp $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf /etc/systemd/system/nginx.service.d/override.conf
-    fi
-fi
-
-if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ && "$ISINSTALLED_VALKEY" == "y" ]]; then
-    echo "  Copying Valkey config files"
-    if [[ -f $CONFIG_DIR/etc/valkey/valkey.conf ]]; then
-        cp $CONFIG_DIR/etc/valkey/valkey.conf /etc/valkey/valkey.conf
-    fi
-fi
-
-if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ && "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-    echo "  Copying PostgreSQL config files"
-    PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
-    PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
-
-    if [[ -f $CONFIG_DIR/etc/postgresql/postgresql.conf ]]; then
-        cp $CONFIG_DIR/etc/postgresql/postgresql.conf "$PG_CONF"
-
-        sed -i "s|%%PG_MAX_CONNECTIONS%%|$PG_MAX_CONNECTIONS|g"                  "$PG_CONF"
-        sed -i "s|%%PG_SHARED_BUFFERS%%|${PG_SHARED_BUFFERS_MB}MB|g"             "$PG_CONF"
-        sed -i "s|%%PG_WORK_MEM%%|${PG_WORK_MEM_MB}MB|g"                        "$PG_CONF"
-        sed -i "s|%%PG_EFFECTIVE_CACHE_SIZE%%|${PG_EFFECTIVE_CACHE_MB}MB|g"      "$PG_CONF"
-        sed -i "s|%%PG_MAX_WORKER_PROCESSES%%|$PG_MAX_WORKER_PROCESSES|g"        "$PG_CONF"
-        sed -i "s|%%PG_MAX_PARALLEL_WORKERS%%|$PG_MAX_PARALLEL_WORKERS|g"        "$PG_CONF"
-        sed -i "s|%%PG_MAX_PARALLEL_WORKERS_PG%%|$PG_MAX_PARALLEL_WORKERS_PG|g"  "$PG_CONF"
-        sed -i "s|%%PG_EFFECTIVE_IO_CONCURRENCY%%|$PG_EFFECTIVE_IO_CONCURRENCY|g" "$PG_CONF"
+    if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ && "$ISINSTALLED_VALKEY" == "y" ]]; then
+        echo "  Copying Valkey config files"
+        if [[ -f $CONFIG_DIR/etc/valkey/valkey.conf ]]; then
+            cp $CONFIG_DIR/etc/valkey/valkey.conf /etc/valkey/valkey.conf
+        fi
     fi
 
-    if [[ -f $CONFIG_DIR/etc/postgresql/pg_hba.conf ]]; then
-        cp $CONFIG_DIR/etc/postgresql/pg_hba.conf "$PG_HBA"
+    if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ && "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+        echo "  Copying PostgreSQL config files"
+        PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
+        PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
+
+        if [[ -f $CONFIG_DIR/etc/postgresql/postgresql.conf ]]; then
+            cp $CONFIG_DIR/etc/postgresql/postgresql.conf "$PG_CONF"
+
+            sed -i "s|%%PG_MAX_CONNECTIONS%%|$PG_MAX_CONNECTIONS|g"                  "$PG_CONF"
+            sed -i "s|%%PG_SHARED_BUFFERS%%|${PG_SHARED_BUFFERS_MB}MB|g"             "$PG_CONF"
+            sed -i "s|%%PG_WORK_MEM%%|${PG_WORK_MEM_MB}MB|g"                        "$PG_CONF"
+            sed -i "s|%%PG_EFFECTIVE_CACHE_SIZE%%|${PG_EFFECTIVE_CACHE_MB}MB|g"      "$PG_CONF"
+            sed -i "s|%%PG_MAX_WORKER_PROCESSES%%|$PG_MAX_WORKER_PROCESSES|g"        "$PG_CONF"
+            sed -i "s|%%PG_MAX_PARALLEL_WORKERS%%|$PG_MAX_PARALLEL_WORKERS|g"        "$PG_CONF"
+            sed -i "s|%%PG_MAX_PARALLEL_WORKERS_PG%%|$PG_MAX_PARALLEL_WORKERS_PG|g"  "$PG_CONF"
+            sed -i "s|%%PG_EFFECTIVE_IO_CONCURRENCY%%|$PG_EFFECTIVE_IO_CONCURRENCY|g" "$PG_CONF"
+        fi
+
+        if [[ -f $CONFIG_DIR/etc/postgresql/pg_hba.conf ]]; then
+            cp $CONFIG_DIR/etc/postgresql/pg_hba.conf "$PG_HBA"
+        fi
+
+        if [[ -f $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf ]]; then
+            # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
+            mkdir -p /etc/systemd/system/postgresql.service.d
+            cp $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf /etc/systemd/system/postgresql.service.d/override.conf
+        fi
+
+        # Set superuser password (PostgreSQL must be running)
+        echo "  Setting PostgreSQL superuser password..."
+        PG_PASSWORD_ESCAPED=$(printf "%s" "$PG_PASSWORD" | sed "s/'/''/g")
+        sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${PG_PASSWORD_ESCAPED}';" || true
     fi
 
-    if [[ -f $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf ]]; then
-        # /etc/security/limits.d/ changes only apply to PAM-authenticated sessions. Services managed by systemd use their own LimitNOFILE directives in their unit files.
-        mkdir -p /etc/systemd/system/postgresql.service.d
-        cp $CONFIG_DIR/etc/systemd/system/postgresql.service.d/override.conf /etc/systemd/system/postgresql.service.d/override.conf
+    if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ && "$ISINSTALLED_GRAFANA" == "y" ]]; then
+        echo "  Copying Grafana config files"
+
+        if [[ -f $CONFIG_DIR/etc/grafana/grafana.ini ]]; then
+            cp $CONFIG_DIR/etc/grafana/grafana.ini /etc/grafana/grafana.ini
+
+            GRAFANA_RANDOM_SECRET=$(openssl rand -hex 32)
+            sed -i "s|%%GRAFANA_RANDOM_SECRET%%|$GRAFANA_RANDOM_SECRET|g"            /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_ENABLED%%|$GRAFANA_SMTP_ENABLED|g"              /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_HOST%%|$GRAFANA_SMTP_HOST|g"                    /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_PORT%%|$GRAFANA_SMTP_PORT|g"                    /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_USER%%|$GRAFANA_SMTP_USER|g"                    /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_PASSWORD%%|$GRAFANA_SMTP_PASSWORD|g"            /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_FROM_ADDRESS%%|$GRAFANA_SMTP_FROM_ADDRESS|g"    /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_FROM_NAME%%|$GRAFANA_SMTP_FROM_NAME|g"          /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_EHLO_IDENTITY%%|$GRAFANA_SMTP_EHLO_IDENTITY|g"  /etc/grafana/grafana.ini
+            sed -i "s|%%GRAFANA_SMTP_STARTTLS_POLICY%%|$GRAFANA_SMTP_STARTTLS_POLICY|g" /etc/grafana/grafana.ini
+        fi
     fi
 
-    # Set superuser password (PostgreSQL must be running)
-    echo "  Setting PostgreSQL superuser password..."
-    PG_PASSWORD_ESCAPED=$(printf "%s" "$PG_PASSWORD" | sed "s/'/''/g")
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${PG_PASSWORD_ESCAPED}';" || true
-fi
+    if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ && "$ISINSTALLED_FORGEJO" == "y" ]]; then
+        echo "  Copying Forgejo config files"
+        if [[ -f $CONFIG_DIR/etc/forgejo/app.ini ]]; then
+            cp $CONFIG_DIR/etc/forgejo/app.ini /etc/forgejo/app.ini
 
-if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ && "$ISINSTALLED_GRAFANA" == "y" ]]; then
-    echo "  Copying Grafana config files"
+            # Generate a random secret key for this installation
+            FORGEJO_SECRET_KEY=$(openssl rand -hex 32)
 
-    if [[ -f $CONFIG_DIR/etc/grafana/grafana.ini ]]; then
-        cp $CONFIG_DIR/etc/grafana/grafana.ini /etc/grafana/grafana.ini
+            sed -i "s|%%FORGEJO_DOMAIN%%|$FORGEJO_DOMAIN|g"             /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_PORT%%|$FORGEJO_PORT|g"                 /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SECRET_KEY%%|$FORGEJO_SECRET_KEY|g"     /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_DB_TYPE%%|$FORGEJO_DB_TYPE|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_DB_HOST%%|$FORGEJO_DB_HOST|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_DB_NAME%%|$FORGEJO_DB_NAME|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_DB_USER%%|$FORGEJO_DB_USER|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_DB_PASSWORD%%|$FORGEJO_DB_PASSWORD|g"   /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_MAILER_ENABLED%%|$FORGEJO_MAILER_ENABLED|g" /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_ADDR%%|$FORGEJO_SMTP_ADDR|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_PORT%%|$FORGEJO_SMTP_PORT|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_PROTOCOL%%|$FORGEJO_SMTP_PROTOCOL|g"   /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_FROM%%|$FORGEJO_SMTP_FROM|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_USER%%|$FORGEJO_SMTP_USER|g"           /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_SMTP_PASSWORD%%|$FORGEJO_SMTP_PASSWORD|g"   /etc/forgejo/app.ini
 
-        GRAFANA_RANDOM_SECRET=$(openssl rand -hex 32)
-        sed -i "s|%%GRAFANA_RANDOM_SECRET%%|$GRAFANA_RANDOM_SECRET|g"            /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_ENABLED%%|$GRAFANA_SMTP_ENABLED|g"              /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_HOST%%|$GRAFANA_SMTP_HOST|g"                    /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_PORT%%|$GRAFANA_SMTP_PORT|g"                    /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_USER%%|$GRAFANA_SMTP_USER|g"                    /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_PASSWORD%%|$GRAFANA_SMTP_PASSWORD|g"            /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_FROM_ADDRESS%%|$GRAFANA_SMTP_FROM_ADDRESS|g"    /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_FROM_NAME%%|$GRAFANA_SMTP_FROM_NAME|g"          /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_EHLO_IDENTITY%%|$GRAFANA_SMTP_EHLO_IDENTITY|g"  /etc/grafana/grafana.ini
-        sed -i "s|%%GRAFANA_SMTP_STARTTLS_POLICY%%|$GRAFANA_SMTP_STARTTLS_POLICY|g" /etc/grafana/grafana.ini
-    fi
-fi
+            # make app.ini writeable for Forgejo so that it can update the configuration
+            chown git:git /etc/forgejo/app.ini || true
+            chmod 640 /etc/forgejo/app.ini || true
 
-if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ && "$ISINSTALLED_FORGEJO" == "y" ]]; then
-    echo "  Copying Forgejo config files"
-    if [[ -f $CONFIG_DIR/etc/forgejo/app.ini ]]; then
-        cp $CONFIG_DIR/etc/forgejo/app.ini /etc/forgejo/app.ini
+            # Restart Forgejo to pick up new config, wait for it to be ready
+            echo "  Starting Forgejo..."
+            systemctl restart forgejo || true
+            FORGEJO_READY=0
+            for i in {1..30}; do
+                if curl -s -o /dev/null -4 --max-time 2 "http://127.0.0.1:${FORGEJO_PORT}" 2>/dev/null; then
+                    FORGEJO_READY=1
+                    break
+                fi
+                sleep 2
+            done
 
-        # Generate a random secret key for this installation
-        FORGEJO_SECRET_KEY=$(openssl rand -hex 32)
-
-        sed -i "s|%%FORGEJO_DOMAIN%%|$FORGEJO_DOMAIN|g"             /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_PORT%%|$FORGEJO_PORT|g"                 /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SECRET_KEY%%|$FORGEJO_SECRET_KEY|g"     /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_DB_TYPE%%|$FORGEJO_DB_TYPE|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_DB_HOST%%|$FORGEJO_DB_HOST|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_DB_NAME%%|$FORGEJO_DB_NAME|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_DB_USER%%|$FORGEJO_DB_USER|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_DB_PASSWORD%%|$FORGEJO_DB_PASSWORD|g"   /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_MAILER_ENABLED%%|$FORGEJO_MAILER_ENABLED|g" /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_ADDR%%|$FORGEJO_SMTP_ADDR|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_PORT%%|$FORGEJO_SMTP_PORT|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_PROTOCOL%%|$FORGEJO_SMTP_PROTOCOL|g"   /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_FROM%%|$FORGEJO_SMTP_FROM|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_USER%%|$FORGEJO_SMTP_USER|g"           /etc/forgejo/app.ini
-        sed -i "s|%%FORGEJO_SMTP_PASSWORD%%|$FORGEJO_SMTP_PASSWORD|g"   /etc/forgejo/app.ini
-
-        # make app.ini writeable for Forgejo so that it can update the configuration
-        chown git:git /etc/forgejo/app.ini || true
-        chmod 640 /etc/forgejo/app.ini || true
-
-        # Restart Forgejo to pick up new config, wait for it to be ready
-        echo "  Starting Forgejo..."
-        systemctl restart forgejo || true
-        FORGEJO_READY=0
-        for i in {1..30}; do
-            if curl -s -o /dev/null -4 --max-time 2 "http://127.0.0.1:${FORGEJO_PORT}" 2>/dev/null; then
-                FORGEJO_READY=1
-                break
+            if [[ "$FORGEJO_READY" -eq 1 ]]; then
+                echo "  [V] Forgejo is responding — creating admin user..."
+                sudo -u git forgejo admin user create \
+                    --username "$FORGEJO_ADMIN_USERNAME" \
+                    --password "$FORGEJO_ADMIN_PASSWORD" \
+                    --email "$FORGEJO_ADMIN_EMAIL" \
+                    --admin \
+                    --must-change-password=false \
+                    --config /etc/forgejo/app.ini 2>/dev/null \
+                    && echo "  [V] Admin user created: $FORGEJO_ADMIN_USERNAME" \
+                    || echo "  [!] Could not create admin user — may already exist"
+            else
+                echo "  [!] Forgejo did not respond within 60s — skipping admin user creation"
+                echo "      Run manually: sudo -u git forgejo admin user create --username admin --password <pwd> --email <email> --admin"
             fi
-            sleep 2
+        fi
+    fi
+
+    if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ && "$ISINSTALLED_POSTFIX" == "y" ]]; then
+        echo "  Configuring Postfix relay"
+
+        if [[ -f $CONFIG_DIR/etc/postfix/main.cf ]]; then
+            cp $CONFIG_DIR/etc/postfix/main.cf /etc/postfix/main.cf
+
+            sed -i "s|%%POSTFIX_RELAY_HOST%%|$POSTFIX_RELAY_HOST|g"      /etc/postfix/main.cf
+            sed -i "s|%%POSTFIX_RELAY_PORT%%|$POSTFIX_RELAY_PORT|g"      /etc/postfix/main.cf
+            sed -i "s|%%POSTFIX_DOMAIN%%|$POSTFIX_DOMAIN|g"              /etc/postfix/main.cf
+            sed -i "s|%%POSTFIX_SERVER_HOSTNAME%%|$LOCAL_HOSTNAME|g"     /etc/postfix/main.cf
+        fi
+
+        # Set mailname, otherwise outgoing mail will show the server hostname
+        echo "$POSTFIX_DOMAIN" > /etc/mailname || true
+
+        # Write and secure SASL credentials, hash, then delete plaintext
+        echo "[$POSTFIX_RELAY_HOST]:$POSTFIX_RELAY_PORT $POSTFIX_RELAY_USERNAME:$POSTFIX_RELAY_PASSWORD" > /etc/postfix/sasl_passwd || true
+        chmod 600 /etc/postfix/sasl_passwd || true
+        postmap /etc/postfix/sasl_passwd || true
+        rm -f /etc/postfix/sasl_passwd || true
+
+        # sender_canonical_maps - rewrites envelope and header sender to FROM address
+        echo "/.+/    $POSTFIX_FROM_ADDRESS" > /etc/postfix/sender_canonical_maps
+        chmod 644 /etc/postfix/sender_canonical_maps
+        postmap /etc/postfix/sender_canonical_maps
+
+        # header_check - rewrites From header to FROM address
+        echo "/From:.*/    REPLACE From: $POSTFIX_FROM_ADDRESS" > /etc/postfix/header_check
+        chmod 644 /etc/postfix/header_check
+        postmap /etc/postfix/header_check
+
+        # generic - maps local user@hostname addresses to external FROM address
+        HOSTNAME=$(hostname)
+        echo "root@${HOSTNAME}    $POSTFIX_FROM_ADDRESS" > /etc/postfix/generic
+        echo "${USER_SUDO_USER_USERNAME}@${HOSTNAME}    $POSTFIX_FROM_ADDRESS" >> /etc/postfix/generic
+        chmod 644 /etc/postfix/generic
+        postmap /etc/postfix/generic
+
+        # Forward root mail to alias
+        if grep -q "^root:" /etc/aliases; then
+            sed -i "s|^root:.*|root: $POSTFIX_ROOT_ALIAS|" /etc/aliases
+        else
+            echo "root: $POSTFIX_ROOT_ALIAS" >> /etc/aliases
+        fi
+        newaliases
+
+        systemctl enable --now postfix || echo "Warning: could not start postfix"
+    fi
+
+    if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
+        echo "  Copying Monit config files"
+
+        if [[ -f $CONFIG_DIR/etc/monit/monitrc ]]; then
+            cp $CONFIG_DIR/etc/monit/monitrc /etc/monit/monitrc
+
+            sed -i "s|%%MONIT_HOST_NAME%%|$MONIT_HOST_NAME|g"            /etc/monit/monitrc
+            sed -i "s|%%MONIT_MAILSERVER_HOST%%|$MONIT_MAILSERVER_HOST|g"    /etc/monit/monitrc
+            sed -i "s|%%MONIT_MAILSERVER_PORT%%|$MONIT_MAILSERVER_PORT|g"    /etc/monit/monitrc
+            sed -i "s|%%MONIT_MAILSERVER_USERNAME%%|$MONIT_MAILSERVER_USERNAME|g" /etc/monit/monitrc
+            sed -i "s|%%MONIT_MAILSERVER_PASSWORD%%|$MONIT_MAILSERVER_PASSWORD|g" /etc/monit/monitrc
+            sed -i "s|%%MONIT_ADMIN_USERNAME%%|$MONIT_ADMIN_USERNAME|g"      /etc/monit/monitrc
+            sed -i "s|%%MONIT_ADMIN_PASSWORD%%|$MONIT_ADMIN_PASSWORD|g"      /etc/monit/monitrc
+            sed -i "s|%%MONIT_ALERT_SENDER%%|$MONIT_ALERT_SENDER|g"          /etc/monit/monitrc
+            sed -i "s|%%MONIT_ALERT_RECIPIENT%%|$MONIT_ALERT_RECIPIENT|g"    /etc/monit/monitrc
+        fi
+
+        # Set strict permissions since monitrc contains credentials
+        chmod 600 /etc/monit/monitrc
+
+        # Copy and link only the conf-available files for installed services
+        for SERVICE in \
+            "$( [[ "$ISINSTALLED_MYSQL"      == "y" ]] && echo mysql )" \
+            "$( [[ "$ISINSTALLED_MARIADB"    == "y" ]] && echo mariadb )" \
+            "$( [[ "$ISINSTALLED_NGINX"      == "y" ]] && echo nginx )" \
+            "$( [[ "$ISINSTALLED_VALKEY"     == "y" ]] && echo valkey-server )" \
+            "$( [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && echo postgresql )" \
+            "$( [[ "$ISINSTALLED_MOSQUITTO"  == "y" ]] && echo mosquitto )" \
+            "$( [[ "$ISINSTALLED_POSTFIX"    == "y" ]] && echo postfix )" \
+            "$( [[ "$ISINSTALLED_WEBMIN"     == "y" ]] && echo webmin )" \
+            "$( [[ "$ISINSTALLED_GRAFANA"    == "y" ]] && echo grafana-server )" \
+            "$( [[ "$ISINSTALLED_FORGEJO"    == "y" ]] && echo forgejo )" \
+            "openssh-server"; do
+            [[ -z "$SERVICE" ]] && continue
+            SRC="$CONFIG_DIR/etc/monit/conf-available/$SERVICE"
+            DEST="/etc/monit/conf-available/$SERVICE"
+            LINK="/etc/monit/conf-enabled/$SERVICE"
+            if [[ -f "$SRC" ]]; then
+                cp -f "$SRC" "$DEST"
+                # Substitute version-specific paths
+                if [[ "$SERVICE" == "postgresql" ]]; then
+                    sed -i "s|%%PG_VERSION%%|$PG_VERSION|g" "$DEST"
+                fi
+                rm -f "$LINK"
+                ln -s "$DEST" /etc/monit/conf-enabled/
+            else
+                echo "  Warning: Monit config not found for $SERVICE, skipping."
+            fi
         done
 
-        if [[ "$FORGEJO_READY" -eq 1 ]]; then
-            echo "  [V] Forgejo is responding — creating admin user..."
-            sudo -u git forgejo admin user create \
-                --username "$FORGEJO_ADMIN_USERNAME" \
-                --password "$FORGEJO_ADMIN_PASSWORD" \
-                --email "$FORGEJO_ADMIN_EMAIL" \
-                --admin \
-                --must-change-password=false \
-                --config /etc/forgejo/app.ini 2>/dev/null \
-                && echo "  [V] Admin user created: $FORGEJO_ADMIN_USERNAME" \
-                || echo "  [!] Could not create admin user — may already exist"
-        else
-            echo "  [!] Forgejo did not respond within 60s — skipping admin user creation"
-            echo "      Run manually: sudo -u git forgejo admin user create --username admin --password <pwd> --email <email> --admin"
-        fi
-    fi
-fi
-
-if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ && "$ISINSTALLED_POSTFIX" == "y" ]]; then
-    echo "  Configuring Postfix relay"
-
-    if [[ -f $CONFIG_DIR/etc/postfix/main.cf ]]; then
-        cp $CONFIG_DIR/etc/postfix/main.cf /etc/postfix/main.cf
-
-        sed -i "s|%%POSTFIX_RELAY_HOST%%|$POSTFIX_RELAY_HOST|g"      /etc/postfix/main.cf
-        sed -i "s|%%POSTFIX_RELAY_PORT%%|$POSTFIX_RELAY_PORT|g"      /etc/postfix/main.cf
-        sed -i "s|%%POSTFIX_DOMAIN%%|$POSTFIX_DOMAIN|g"              /etc/postfix/main.cf
-        sed -i "s|%%POSTFIX_SERVER_HOSTNAME%%|$LOCAL_HOSTNAME|g"     /etc/postfix/main.cf
-    fi
-
-    # Set mailname, otherwise outgoing mail will show the server hostname
-    echo "$POSTFIX_DOMAIN" > /etc/mailname || true
-
-    # Write and secure SASL credentials, hash, then delete plaintext
-    echo "[$POSTFIX_RELAY_HOST]:$POSTFIX_RELAY_PORT $POSTFIX_RELAY_USERNAME:$POSTFIX_RELAY_PASSWORD" > /etc/postfix/sasl_passwd || true
-    chmod 600 /etc/postfix/sasl_passwd || true
-    postmap /etc/postfix/sasl_passwd || true
-    rm -f /etc/postfix/sasl_passwd || true
-
-    # sender_canonical_maps - rewrites envelope and header sender to FROM address
-    echo "/.+/    $POSTFIX_FROM_ADDRESS" > /etc/postfix/sender_canonical_maps
-    chmod 644 /etc/postfix/sender_canonical_maps
-    postmap /etc/postfix/sender_canonical_maps
-
-    # header_check - rewrites From header to FROM address
-    echo "/From:.*/    REPLACE From: $POSTFIX_FROM_ADDRESS" > /etc/postfix/header_check
-    chmod 644 /etc/postfix/header_check
-    postmap /etc/postfix/header_check
-
-    # generic - maps local user@hostname addresses to external FROM address
-    HOSTNAME=$(hostname)
-    echo "root@${HOSTNAME}    $POSTFIX_FROM_ADDRESS" > /etc/postfix/generic
-    echo "${USER_SUDO_USER_USERNAME}@${HOSTNAME}    $POSTFIX_FROM_ADDRESS" >> /etc/postfix/generic
-    chmod 644 /etc/postfix/generic
-    postmap /etc/postfix/generic
-
-    # Forward root mail to alias
-    if grep -q "^root:" /etc/aliases; then
-        sed -i "s|^root:.*|root: $POSTFIX_ROOT_ALIAS|" /etc/aliases
-    else
-        echo "root: $POSTFIX_ROOT_ALIAS" >> /etc/aliases
-    fi
-    newaliases
-
-    systemctl enable --now postfix || echo "Warning: could not start postfix"
-fi
-
-if [[ "$INSTALL_MONIT" =~ ^[Yy]$ && "$ISINSTALLED_MONIT" == "y" ]]; then
-    echo "  Copying Monit config files"
-
-    if [[ -f $CONFIG_DIR/etc/monit/monitrc ]]; then
-        cp $CONFIG_DIR/etc/monit/monitrc /etc/monit/monitrc
-
-        sed -i "s|%%MONIT_HOST_NAME%%|$MONIT_HOST_NAME|g"            /etc/monit/monitrc
-        sed -i "s|%%MONIT_MAILSERVER_HOST%%|$MONIT_MAILSERVER_HOST|g"    /etc/monit/monitrc
-        sed -i "s|%%MONIT_MAILSERVER_PORT%%|$MONIT_MAILSERVER_PORT|g"    /etc/monit/monitrc
-        sed -i "s|%%MONIT_MAILSERVER_USERNAME%%|$MONIT_MAILSERVER_USERNAME|g" /etc/monit/monitrc
-        sed -i "s|%%MONIT_MAILSERVER_PASSWORD%%|$MONIT_MAILSERVER_PASSWORD|g" /etc/monit/monitrc
-        sed -i "s|%%MONIT_ADMIN_USERNAME%%|$MONIT_ADMIN_USERNAME|g"      /etc/monit/monitrc
-        sed -i "s|%%MONIT_ADMIN_PASSWORD%%|$MONIT_ADMIN_PASSWORD|g"      /etc/monit/monitrc
-        sed -i "s|%%MONIT_ALERT_SENDER%%|$MONIT_ALERT_SENDER|g"          /etc/monit/monitrc
-        sed -i "s|%%MONIT_ALERT_RECIPIENT%%|$MONIT_ALERT_RECIPIENT|g"    /etc/monit/monitrc
-    fi
-
-    # Set strict permissions since monitrc contains credentials
-    chmod 600 /etc/monit/monitrc
-
-    # Copy and link only the conf-available files for installed services
-    for SERVICE in \
-        "$( [[ "$ISINSTALLED_MYSQL"      == "y" ]] && echo mysql )" \
-        "$( [[ "$ISINSTALLED_MARIADB"    == "y" ]] && echo mariadb )" \
-        "$( [[ "$ISINSTALLED_NGINX"      == "y" ]] && echo nginx )" \
-        "$( [[ "$ISINSTALLED_VALKEY"     == "y" ]] && echo valkey-server )" \
-        "$( [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && echo postgresql )" \
-        "$( [[ "$ISINSTALLED_MOSQUITTO"  == "y" ]] && echo mosquitto )" \
-        "$( [[ "$ISINSTALLED_POSTFIX"    == "y" ]] && echo postfix )" \
-        "$( [[ "$ISINSTALLED_WEBMIN"     == "y" ]] && echo webmin )" \
-        "$( [[ "$ISINSTALLED_GRAFANA"    == "y" ]] && echo grafana-server )" \
-        "$( [[ "$ISINSTALLED_FORGEJO"    == "y" ]] && echo forgejo )" \
-        "openssh-server"; do
-        [[ -z "$SERVICE" ]] && continue
-        SRC="$CONFIG_DIR/etc/monit/conf-available/$SERVICE"
-        DEST="/etc/monit/conf-available/$SERVICE"
-        LINK="/etc/monit/conf-enabled/$SERVICE"
-        if [[ -f "$SRC" ]]; then
+        # Link remaining utilities
+        for UTILITY in "reboot-required" "disk-alerts"; do
+            SRC="$CONFIG_DIR/etc/monit/conf-available/$UTILITY"
+            DEST="/etc/monit/conf-available/$UTILITY"
+            LINK="/etc/monit/conf-enabled/$UTILITY"
+            [[ ! -f "$SRC" ]] && continue
+            [[ -L "$LINK" ]] && continue
             cp -f "$SRC" "$DEST"
-            # Substitute version-specific paths
-            if [[ "$SERVICE" == "postgresql" ]]; then
-                sed -i "s|%%PG_VERSION%%|$PG_VERSION|g" "$DEST"
-            fi
-            rm -f "$LINK"
             ln -s "$DEST" /etc/monit/conf-enabled/
-        else
-            echo "  Warning: Monit config not found for $SERVICE, skipping."
-        fi
-    done
+        done
 
-    # Link remaining utilities
-    for UTILITY in "reboot-required" "disk-alerts"; do
-        SRC="$CONFIG_DIR/etc/monit/conf-available/$UTILITY"
-        DEST="/etc/monit/conf-available/$UTILITY"
-        LINK="/etc/monit/conf-enabled/$UTILITY"
-        [[ ! -f "$SRC" ]] && continue
-        [[ -L "$LINK" ]] && continue
-        cp -f "$SRC" "$DEST"
-        ln -s "$DEST" /etc/monit/conf-enabled/
-    done
+        # Remove conf-enabled links for services that are no longer installed
+        declare -A SERVICE_VAR_MAP=(
+            ["mysql"]="ISINSTALLED_MYSQL"
+            ["mariadb"]="ISINSTALLED_MARIADB"
+            ["nginx"]="ISINSTALLED_NGINX"
+            ["valkey-server"]="ISINSTALLED_VALKEY"
+            ["postgresql"]="ISINSTALLED_POSTGRESQL"
+            ["mosquitto"]="ISINSTALLED_MOSQUITTO"
+            ["postfix"]="ISINSTALLED_POSTFIX"
+            ["webmin"]="ISINSTALLED_WEBMIN"
+            ["grafana-server"]="ISINSTALLED_GRAFANA"
+            ["forgejo"]="ISINSTALLED_FORGEJO"
+        )
+        for LINK in /etc/monit/conf-enabled/*; do
+            [[ -L "$LINK" ]] || continue
+            SERVICE=$(basename "$LINK")
+            [[ "$SERVICE" == "openssh-server" ]] && continue
+            ISINSTALLED_VAR="${SERVICE_VAR_MAP[$SERVICE]:-}"
+            if [[ -n "$ISINSTALLED_VAR" && "${!ISINSTALLED_VAR}" == "n" ]]; then
+                rm -f "$LINK"
+                echo "  Removed Monit link for $SERVICE (no longer installed)"
+            fi
+        done
+    fi
 
-    # Remove conf-enabled links for services that are no longer installed
-    declare -A SERVICE_VAR_MAP=(
-        ["mysql"]="ISINSTALLED_MYSQL"
-        ["mariadb"]="ISINSTALLED_MARIADB"
-        ["nginx"]="ISINSTALLED_NGINX"
-        ["valkey-server"]="ISINSTALLED_VALKEY"
-        ["postgresql"]="ISINSTALLED_POSTGRESQL"
-        ["mosquitto"]="ISINSTALLED_MOSQUITTO"
-        ["postfix"]="ISINSTALLED_POSTFIX"
-        ["webmin"]="ISINSTALLED_WEBMIN"
-        ["grafana-server"]="ISINSTALLED_GRAFANA"
-        ["forgejo"]="ISINSTALLED_FORGEJO"
-    )
-    for LINK in /etc/monit/conf-enabled/*; do
-        [[ -L "$LINK" ]] || continue
-        SERVICE=$(basename "$LINK")
-        [[ "$SERVICE" == "openssh-server" ]] && continue
-        ISINSTALLED_VAR="${SERVICE_VAR_MAP[$SERVICE]:-}"
-        if [[ -n "$ISINSTALLED_VAR" && "${!ISINSTALLED_VAR}" == "n" ]]; then
-            rm -f "$LINK"
-            echo "  Removed Monit link for $SERVICE (no longer installed)"
+
+    # Wazuh Agent log monitoring configuration
+    if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ && "$ISINSTALLED_WAZUH" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
+        echo "  Configuring Wazuh log monitoring..."
+
+        append_localfile_to_ossec() {
+            local guard="$1"
+            local xml="$2"
+            if ! grep -qF "$guard" /var/ossec/etc/ossec.conf; then
+                printf "\n<ossec_config>\n%s\n</ossec_config>\n" "$xml" \
+                    >> /var/ossec/etc/ossec.conf
+                echo "  [+] Added log monitor: $guard"
+            else
+                echo "  [=] Already present: $guard"
+            fi
+        }
+
+        append_localfile_to_ossec "/var/log/syslog" \
+    '  <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/syslog</location>
+      </localfile>'
+
+        if [[ "$ISINSTALLED_AUDITD" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/audit/audit.log" \
+    '  <localfile>
+        <log_format>audit</log_format>
+        <location>/var/log/audit/audit.log</location>
+      </localfile>'
         fi
-    done
+
+        if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/nginx/access.log" \
+    '  <localfile>
+        <log_format>apache</log_format>
+        <location>/var/log/nginx/access.log</location>
+      </localfile>
+      <localfile>
+        <log_format>apache</log_format>
+        <location>/var/log/nginx/error.log</location>
+      </localfile>'
+        fi
+
+        if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/mysql/error.log" \
+    '  <localfile>
+        <log_format>mysql_log</log_format>
+        <location>/var/log/mysql/error.log</location>
+      </localfile>'
+        fi
+
+        if [[ "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+            append_localfile_to_ossec "postgresql-${PG_VERSION}-main.log" \
+    "  <localfile>
+        <log_format>postgresql_log</log_format>
+        <location>/var/log/postgresql/postgresql-${PG_VERSION}-main.log</location>
+      </localfile>"
+        fi
+
+        if [[ "$ISINSTALLED_GRAFANA" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/grafana/grafana.log" \
+    '  <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/grafana/grafana.log</location>
+      </localfile>'
+        fi
+
+        if [[ "$ISINSTALLED_FORGEJO" == "y" ]]; then
+            append_localfile_to_ossec "/var/lib/forgejo/log/gitea.log" \
+    '  <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/lib/forgejo/log/gitea.log</location>
+      </localfile>
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/lib/forgejo/log/access.log</location>
+      </localfile>'
+        fi
+
+        if [[ "$ISINSTALLED_SURICATA" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/suricata/eve.json" \
+    '  <localfile>
+        <log_format>json</log_format>
+        <location>/var/log/suricata/eve.json</location>
+      </localfile>'
+        fi
+
+        if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
+            append_localfile_to_ossec "/var/log/mail.log" \
+    '  <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/mail.log</location>
+      </localfile>'
+        fi
+
+        echo "  Wazuh log monitoring configured."
+    fi
+
+
+    # Restart services to apply new configs
+    echo "  Restarting services to apply configs"
+    [[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
+    [[ "$ISINSTALLED_MARIADB" == "y" ]]    && systemctl restart mariadb         || true
+    [[ "$ISINSTALLED_NGINX" == "y" ]]      && systemctl restart nginx           || true
+    [[ "$ISINSTALLED_VALKEY" == "y" ]]     && systemctl restart valkey-server   || true
+    [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && systemctl restart postgresql      || true
+    [[ "$ISINSTALLED_POSTFIX" == "y" ]]    && systemctl restart postfix         || true
+    [[ "$ISINSTALLED_GRAFANA" == "y" ]]    && systemctl restart grafana-server  || true
+    [[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
+    [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
+    [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
+    [[ "$ISINSTALLED_WAZUH" == "y" ]]      && systemctl restart wazuh-agent     || true
+    sleep 2
+    echo "  Services restarted"
+
+    echo "Configuration files installed."
+
+else
+    echo "Skipping configuration files"
 fi
-
-
-# Wazuh Agent log monitoring configuration
-if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ && "$ISINSTALLED_WAZUH" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
-    echo "  Configuring Wazuh log monitoring..."
-
-    append_localfile_to_ossec() {
-        local guard="$1"
-        local xml="$2"
-        if ! grep -qF "$guard" /var/ossec/etc/ossec.conf; then
-            printf "\n<ossec_config>\n%s\n</ossec_config>\n" "$xml" \
-                >> /var/ossec/etc/ossec.conf
-            echo "  [+] Added log monitor: $guard"
-        else
-            echo "  [=] Already present: $guard"
-        fi
-    }
-
-    append_localfile_to_ossec "/var/log/syslog" \
-'  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/syslog</location>
-  </localfile>'
-
-    if [[ "$ISINSTALLED_AUDITD" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/audit/audit.log" \
-'  <localfile>
-    <log_format>audit</log_format>
-    <location>/var/log/audit/audit.log</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/nginx/access.log" \
-'  <localfile>
-    <log_format>apache</log_format>
-    <location>/var/log/nginx/access.log</location>
-  </localfile>
-  <localfile>
-    <log_format>apache</log_format>
-    <location>/var/log/nginx/error.log</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/mysql/error.log" \
-'  <localfile>
-    <log_format>mysql_log</log_format>
-    <location>/var/log/mysql/error.log</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-        append_localfile_to_ossec "postgresql-${PG_VERSION}-main.log" \
-"  <localfile>
-    <log_format>postgresql_log</log_format>
-    <location>/var/log/postgresql/postgresql-${PG_VERSION}-main.log</location>
-  </localfile>"
-    fi
-
-    if [[ "$ISINSTALLED_GRAFANA" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/grafana/grafana.log" \
-'  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/grafana/grafana.log</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_FORGEJO" == "y" ]]; then
-        append_localfile_to_ossec "/var/lib/forgejo/log/gitea.log" \
-'  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/lib/forgejo/log/gitea.log</location>
-  </localfile>
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/lib/forgejo/log/access.log</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_SURICATA" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/suricata/eve.json" \
-'  <localfile>
-    <log_format>json</log_format>
-    <location>/var/log/suricata/eve.json</location>
-  </localfile>'
-    fi
-
-    if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
-        append_localfile_to_ossec "/var/log/mail.log" \
-'  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/mail.log</location>
-  </localfile>'
-    fi
-
-    echo "  Wazuh log monitoring configured."
-fi
-
-
-# Restart services to apply new configs
-echo "  Restarting services to apply configs"
-[[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
-[[ "$ISINSTALLED_MARIADB" == "y" ]]    && systemctl restart mariadb         || true
-[[ "$ISINSTALLED_NGINX" == "y" ]]      && systemctl restart nginx           || true
-[[ "$ISINSTALLED_VALKEY" == "y" ]]     && systemctl restart valkey-server   || true
-[[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && systemctl restart postgresql      || true
-[[ "$ISINSTALLED_POSTFIX" == "y" ]]    && systemctl restart postfix         || true
-[[ "$ISINSTALLED_GRAFANA" == "y" ]]    && systemctl restart grafana-server  || true
-[[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
-[[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
-[[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
-[[ "$ISINSTALLED_WAZUH" == "y" ]]      && systemctl restart wazuh-agent     || true
-sleep 2
-echo "  Services restarted"
-
-echo "Configuration files installed."
 
 echo ""
 echo "--- 46. Finalise installation ---"
 
-sysctl --system
+if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
+    sysctl --system
 
-apt-get --fix-broken install || true
-# Cleanup leftover config packages
-# apt-get autoremove -y ; apt-get -y purge $(dpkg --list | grep ^rc | awk '{ print $2; }')
-mapfile -t RC_PACKAGES < <(dpkg --list | awk '/^rc/ {print $2}')
-if [ ${#RC_PACKAGES[@]} -gt 0 ]; then
-    echo "Purging leftover configuration packages: ${RC_PACKAGES[*]}"
-    apt-get purge -y "${RC_PACKAGES[@]}" || true
+    apt-get --fix-broken install || true
+    # Cleanup leftover config packages
+    # apt-get autoremove -y ; apt-get -y purge $(dpkg --list | grep ^rc | awk '{ print $2; }')
+    mapfile -t RC_PACKAGES < <(dpkg --list | awk '/^rc/ {print $2}')
+    if [ ${#RC_PACKAGES[@]} -gt 0 ]; then
+        echo "Purging leftover configuration packages: ${RC_PACKAGES[*]}"
+        apt-get purge -y "${RC_PACKAGES[@]}" || true
+    else
+        echo "No leftover config packages found."
+    fi
+    apt-get -y autoremove || true
+
+    echo "Restarting unattended upgrades"
+    restart_autoupdate
 else
-    echo "No leftover config packages found."
+    echo "Skipping finalising"
 fi
-apt-get -y autoremove || true
-
-echo "Restarting unattended upgrades"
-restart_autoupdate
 
 
 echo ""
@@ -3445,6 +3501,19 @@ else
 fi
 
 echo ""
+echo "IP Blocklist"
+echo "==========================================="
+if [[ -n "$(sudo ipset list -n 2>/dev/null | grep ufw-blocklist-ipsum)" ]]; then
+    UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/T/ /' | cut -d. -f1)
+    # Get last update time from syslog
+    UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}')
+    echo -e "  Blocked IPs  : ${COUNT:-unknown}"
+    echo -e "  Last updated : ${UPDATED:-unknown}"
+else
+    echo -e "  ${RED}[NOT ACTIVE]${NC}"
+fi
+
+echo ""
 echo "Recent AppArmor denials"
 echo "==========================================="
 DENIALS=$(grep "apparmor=\"DENIED\"" /var/log/syslog 2>/dev/null \
@@ -3454,7 +3523,7 @@ if [[ -n "$DENIALS" ]]; then
     echo "$DENIALS" | grep -oP 'profile="\K[^"]*|operation="\K[^"]*|name="\K[^"]*' \
         | paste - - - | sort | uniq -c | sort -rn
 else
-    echo "None"
+    echo "  None"
 fi
 
 echo ""
@@ -3590,11 +3659,13 @@ else smoke_skip "Mosquitto"; fi
 
 echo ""
 EOF
-echo "Script $HEALTH_CHECK_SCRIPT created"
+echo "  Script $HEALTH_CHECK_SCRIPT created"
 
 chown $USER_SUDO_USER_USERNAME:$USER_SUDO_USER_USERNAME $HEALTH_CHECK_SCRIPT
 chmod +x $HEALTH_CHECK_SCRIPT
 
+echo "  Running $HEALTH_CHECK_SCRIPT ..."
+echo ""
 # Run health check
 $HEALTH_CHECK_SCRIPT
 
@@ -3604,7 +3675,7 @@ echo "--- 48. Postfix Test ---"
 
 # HTTP, database, Valkey and Mosquitto tests are in the health check script.
 # Only the Postfix test email runs here since we don't want it firing on every health check.
-if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
+if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ && "$ISINSTALLED_POSTFIX" == "y" ]]; then
     echo ""
     echo "  Sending Postfix test mail to $POSTFIX_ROOT_ALIAS..."
     echo "Postfix test mail from $(hostname) after provisioning." \
@@ -3612,7 +3683,7 @@ if [[ "$ISINSTALLED_POSTFIX" == "y" ]]; then
         && echo "  [V] Test mail sent to $POSTFIX_ROOT_ALIAS." \
         || echo "  [!] Test mail failed — check: sudo tail -n 20 /var/log/mail.log"
 else
-    echo "  Postfix not installed — skipping test email."
+    echo "  Skipping Postfix test email."
 fi
 
 
@@ -3641,12 +3712,12 @@ if [ ${#APT_PACKAGES_NOT_INSTALLED[@]} -ne 0 ]; then
 fi
 
 
-echo "Logfile written to: $LOG_FILE"
-echo "Config backup written to current directory by ubuntu_backup_config.sh"
+echo "  Logfile written to: $LOG_FILE"
+echo "  Config backup written to current directory by ubuntu_backup_config.sh"
 
 echo ""
-echo "SSH connect command with port forwards (localport:hostname:hostport):"
-SSH_CMD="ssh"
+echo "  SSH connect command with port forwards (localport:hostname:hostport):"
+SSH_CMD="  ssh"
 [[ "$ISINSTALLED_MOSQUITTO" =~ ^[Yy]$ ]]  && SSH_CMD="$SSH_CMD -L 11883:localhost:1883"
 [[ "$ISINSTALLED_MONIT" =~ ^[Yy]$ ]]      && SSH_CMD="$SSH_CMD -L 12812:localhost:2812"
 [[ "$ISINSTALLED_GRAFANA" =~ ^[Yy]$ ]]    && SSH_CMD="$SSH_CMD -L 13000:localhost:3000"
@@ -3659,7 +3730,6 @@ SSH_CMD="ssh"
 SSH_CMD="$SSH_CMD $USER_SUDO_USER_USERNAME@$LOCAL_IP"
 echo "$SSH_CMD"
 
-
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     echo ""
     echo "AppArmor: nginx, postgresql, postfix, grafana set to complain mode."
@@ -3668,6 +3738,10 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
-echo "ACTION REQUIRED: Test SSH login in a NEW window before closing this one or you may be locked out."
-echo "ACTION REQUIRED: Reboot the system to apply all changes."
+if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
+    echo "ACTION REQUIRED: Test SSH login in a NEW window before closing this one or you may be locked out."
+fi
 
+if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
+    echo "ACTION REQUIRED: Reboot the system to apply all changes."
+fi
