@@ -276,7 +276,9 @@ echo "Port usage"
 echo "==========================================="
 ufw_status() {
     local port="$1"
-    if ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
+    if [ "$(ufw status)" = "Status: inactive" ]; then
+        echo "${RED}[ALLOWED (UFW inactive)]${NC}"
+    elif ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
         echo -e "${RED}[ALLOWED]${NC}"
     else
         echo -e "${GREEN}[BLOCKED]${NC}"
