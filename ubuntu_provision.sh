@@ -1380,19 +1380,19 @@ fi
 
 
 echo ""
-echo "--- 8. Upgrade system packages ---"
+echo "--- 8. Update/Upgrade system packages ---"
 if [[ "$UPDATE_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
-    echo "  Updating packages."
+    echo "  Updating packages ..."
     apt-get update
-    echo "  Upgrading packages."
+    echo "  Upgrading packages ..."
     apt-get -y full-upgrade
 elif [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     # update, but not ugprade
     wait_for_apt
-    echo "  Updating packages."
+    echo "  Updating packages ..."
     apt-get update
-    echo "  Skipping upgrade."
+    echo "  Skipping upgrade ..."
 else
     echo "  Skipping update and upgrade."
 fi
@@ -2961,6 +2961,13 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
 
         # Set mailname, otherwise outgoing mail will show the server hostname
         echo "$POSTFIX_DOMAIN" > /etc/mailname || true
+
+        # Set mail headers to UTC timestamps. In case system time is not UTC.
+        mkdir -p /etc/systemd/system/postfix.service.d
+        cat << EOF > /etc/systemd/system/postfix.service.d/timezone.conf
+[Service]
+Environment=TZ=UTC
+EOF
 
         # Write and secure SASL credentials, hash, then delete plaintext
         echo "[$POSTFIX_RELAY_HOST]:$POSTFIX_RELAY_PORT $POSTFIX_RELAY_USERNAME:$POSTFIX_RELAY_PASSWORD" > /etc/postfix/sasl_passwd || true

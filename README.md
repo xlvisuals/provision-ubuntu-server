@@ -469,12 +469,15 @@ Files containing `%%PLACEHOLDER%%` variables are copied to the target path after
 
 ### Postfix (`etc/postfix/main.cf`)
 
-| Placeholder | Value |
-|---|---|
-| `%%POSTFIX_RELAY_HOST%%` | SMTP relay hostname |
-| `%%POSTFIX_RELAY_PORT%%` | SMTP relay port |
-| `%%POSTFIX_DOMAIN%%` | Mail domain (also written to `/etc/mailname`) |
-| `%%POSTFIX_SERVER_HOSTNAME%%` | Server FQDN (auto-detected via `hostname -f`) |
+| Placeholder | Value                                                     |
+|---|-----------------------------------------------------------|
+| `%%POSTFIX_RELAY_HOST%%` | SMTP relay hostname or ip                                 |
+| `%%POSTFIX_RELAY_PORT%%` | SMTP relay port, e.g. 587                                 |
+| `%%POSTFIX_RELAY_USERNAME%%` | Username for SMTP host                                    |
+| `%%POSTFIX_RELAY_PASSWORD%%` | Password for POSTFIX_RELAY_USERNAME at POSTFIX_RELAY_HOST |
+| `%%POSTFIX_DOMAIN%%` | Mail domain (also written to `/etc/mailname`)             |
+| `%%POSTFIX_FROM_ADDRESS%%` | From address                                      |
+| `%%POSTFIX_ROOT_ALIAS%%` | Forward local root mail to this address                   |
 
 `sasl_passwd`, `sender_canonical_maps`, `header_check`, and `generic` are written directly by the script using `POSTFIX_FROM_ADDRESS` — no templates needed for these.
 
