@@ -98,6 +98,9 @@ LOCAL_HOSTNAME=$(hostname -f)
 LOCAL_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
 USER_SUDO_USER_USERNAME=""
+CURRENT_TIMEZONE=$(timedatectl | awk '/Time zone:/ {print $3}')
+NEW_TIMEZONE=${NEW_TIMEZONE:-}
+ZONEINFO_DIR="/usr/share/zoneinfo"
 
 # Exit when any command fails silently
 set -Eeuo pipefail
@@ -451,6 +454,9 @@ if [[ -z "$USER_SUDO_USER_USERNAME" ]]; then
 fi
 
 ## LVM
+LVM_RESIZE_VOLUME=${LVM_RESIZE_VOLUME:-}
+LVM_RESIZE_TARGET_GB=${LVM_RESIZE_TARGET_GB:-}
+
 prompt_if_unset CONFIGURE_LVM "Would you like to configure LVM disks? (y/n)" n "y"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
     # 1. Check if the logical volume exists
@@ -497,6 +503,15 @@ fi
 
 prompt_if_unset TUNE_SYSTEM "Would you like to tune the system? (y/n)" n "y"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
+    while true; do
+        prompt_if_unset NEW_TIMEZONE "  Please enter the system timezone" n "${CURRENT_TIMEZONE}"
+        if [ -n "$NEW_TIMEZONE" ] && [ -f "$ZONEINFO_DIR/$NEW_TIMEZONE" ]; then
+            break
+        fi
+        NEW_TIMEZONE=''
+        echo "  Invalid timezone. Please try again."
+    done
+
     while true; do
         prompt_if_unset AUTO_UPDATE_DAILY_HOUR "  Hour to run apt-get update (0-23)" n "10"
         if [[ "$AUTO_UPDATE_DAILY_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
@@ -1025,8 +1040,12 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ && "$ACTIVE_SWAP" == "No" ]]; then
 fi
 echo "Tune system?                 : $TUNE_SYSTEM"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
-  echo "  apt update hour (UTC)      : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
-  echo "  apt upgrade hour (UTC)     : $AUTO_UPGRADE_DAILY_HOUR"
+  echo "  Current timezone           : $CURRENT_TIMEZONE"
+  if [[ -n "$NEW_TIMEZONE" && "$NEW_TIMEZONE" != "$CURRENT_TIMEZONE" ]]; then
+      echo "  New timezone               : $NEW_TIMEZONE"
+  fi
+  echo "  apt update hour            : $AUTO_UPDATE_DAILY_HOUR and $AUTO_UPDATE_DAILY_HOUR_2 (twice daily)"
+  echo "  apt upgrade hour           : $AUTO_UPGRADE_DAILY_HOUR"
 fi
 echo "Uninstall extra packages?    : $UNINSTALL_PACKAGES"
 echo "Update installed packages?   : $UPDATE_PACKAGES"
@@ -1507,12 +1526,14 @@ fi
 
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
 
-
     echo ""
     echo "--- 13. Localization  ---"
-    echo "  Set timezone to UTC"
-    timedatectl set-timezone UTC
-
+    if [[ -n "$NEW_TIMEZONE" && "$NEW_TIMEZONE" != "$CURRENT_TIMEZONE" ]]; then
+        timedatectl set-timezone "$NEW_TIMEZONE"
+        echo "  Timezone changed from $CURRENT_TIMEZONE to $NEW_TIMEZONE."
+    else
+        echo "  Skipping changing timezone from $CURRENT_TIMEZONE"
+    fi
 
     echo ""
     echo "--- 14. Override sudo settings ---"
@@ -1539,6 +1560,7 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
 
     echo ""
     echo "--- 16. Configure system file limits ---"
+    echo "  Writing file limits to /etc/security/limits.d/xlvisuals.conf"
     rm -f /etc/security/limits.d/xlvisuals.conf
     cat <<'EOF' > /etc/security/limits.d/xlvisuals.conf
 # Recommended limits
@@ -1556,7 +1578,7 @@ EOF
 
     echo ""
     echo "--- 17. Kernel tuning and hardening ---"
-    echo "  Writing sysctl kernel parameters"
+    echo "  Writing sysctl kernel parameters to /etc/sysctl.d/99-xlvisuals.conf"
     rm -f /etc/sysctl.d/99-xlvisuals.conf
     cat <<'EOF' > /etc/sysctl.d/99-xlvisuals.conf
 # XLVISUALS recommended kernel tuning
@@ -1599,10 +1621,9 @@ net.ipv4.conf.all.accept_source_route = 0
 EOF
 
     echo "  Applying sysctl changes"
-    #sysctl -p  # requires /etc/sysctl.conf
     sysctl --system
 
-    echo "  Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag"
+    echo "  Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag to /etc/modprobe.d/dirty-frag.conf"
     rm -f /etc/modprobe.d/dirty-frag.conf
     cat <<'EOF' > /etc/modprobe.d/dirty-frag.conf
 # Disable vulnerable crypto/net modules to mitigate CVE-2026-31431 and Dirty Frag
@@ -1643,8 +1664,8 @@ EOF
     echo ""
     echo "--- 20. Configure timeouts ---"
     # Set apt timeout so apt doesn't hang waiting on a temporarily unavailable mirror
+    echo "  setting apt timeout set to 5s with no retries in /etc/apt/apt.conf.d/99timeout"
     echo -e "Acquire::http::Timeout \"5\";\nAcquire::https::Timeout \"5\";\nAcquire::Retries \"0\";" > /etc/apt/apt.conf.d/99timeout
-    echo "  apt timeout set to 5s with no retries"
 
 
     echo ""
@@ -2723,8 +2744,34 @@ if [[ "${CONFIGURE_MODULEJAIL:-}" =~ ^[Yy]$ ]]; then
     echo "  Downloading modulejail script v${MODULEJAIL_LATEST} ..."
     curl -fsSL https://raw.githubusercontent.com/jnuyens/modulejail/v${MODULEJAIL_LATEST}/modulejail -o /tmp/modulejail || true
     if [[ -f "/tmp/modulejail" ]]; then
+
+        # Create a whitelist in case modulejail is installed in a separate run before other networking services
+        echo "  Creating module whitelist for networking, firewall, and IDS at /etc/modprobe.d/modulejail-whitelist.conf"
+        rm -f /etc/modulejail/whitelist.conf || true
+        install -d -m 0755 /etc/modulejail || true
+        cat << EOF > /etc/modulejail/whitelist.conf
+# Netfilter and Firewall Core
+ip_tables
+iptable_filter
+nf_tables
+nfnetlink
+x_tables
+
+# Fail2Ban and IP Sets
+ip_set
+ip_set_hash_ip
+ip_set_hash_net
+
+# Suricata IDS Packet Capture
+af_packet
+nfnetlink_queue
+nf_conntrack
+EOF
+        chmod 0644 /etc/modulejail/whitelist.conf || true
+
         echo "  Running modulejail script to jail unused modules..."
-        sudo sh /tmp/modulejail || true
+        rm -f /etc/modprobe.d/modulejail-blacklist.conf || true
+        sh /tmp/modulejail || true
 
         if [[ -f "/etc/modprobe.d/modulejail-blacklist.conf" ]]; then
             echo "  [V] Success. To revert: sudo rm /etc/modprobe.d/modulejail-blacklist.conf "
