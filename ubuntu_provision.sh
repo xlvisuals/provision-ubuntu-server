@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Axel Busch
-# 22 May 2026
+# 05 June 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -16,7 +16,7 @@
 # INSTALLS (all optional):
 #   - Web stack:    Nginx, MySQL, MariaDB, PostgreSQL, Valkey, Mosquitto
 #   - Mail:         Postfix (relay-only; Monit, Grafana, Forgejo can route through it)
-#   - Management:   Webmin, Monit, Grafana, Forgejo
+#   - Management:   Monit, Grafana, Forgejo, Webmin (not recommended; see README)
 #   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
 #   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist
 #   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils,
@@ -24,7 +24,9 @@
 #
 # MODIFIES (all optional):
 #   - System:   LVM resize, swap file, file limits, kernel tuning (sysctl)
-#   - Security: SSH hardening (key-only), UFW rules, sudo timeout/NOPASSWD
+#   - Security: SSH hardening (key-only), UFW rules, sudo timeout/NOPASSWD,
+#               CIS Level 1 hardening (passwords, PAM, cron, umask, modules,
+#               AIDE/Wazuh FIM, core dumps, sysctl, NTP, session timeout)
 #   - Timers:   Unattended-upgrades scheduled at prompted UTC hours
 #   - User:     Creates or configures a sudo user, sets up SSH key access
 
@@ -78,7 +80,8 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
     done
     for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
                UNINSTALL_PACKAGES UPDATE_PACKAGES INSTALL_PACKAGES \
-               DISABLE_TX_OFFLOAD CONFIGURE_MODULEJAIL; do
+               DISABLE_TX_OFFLOAD CONFIGURE_MODULEJAIL CONFIGURE_CIS_HARDENING \
+               CONFIGURE_UBUNTU_PRO; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
 fi
@@ -241,15 +244,26 @@ wait_for_apt() {
 }
 
 apt_install() {
-    # Unix convention: 0 means "no error"
-    if ! apt-get install $APT_FLAGS "$@" 2>&1; then
-        echo "  [!] Warning: failed to install package(s): $*"
-        echo "  [!] Continuing — some functionality may be missing"
-        APT_PACKAGES_NOT_INSTALLED+=("$@")
-        return 1
-    fi
-    return 0
+    local max_attempts=3
+    local attempt=1
+    local wait_between_attempts=10
+    while (( attempt <= max_attempts )); do
+        if apt-get install $APT_FLAGS "$@" 2>&1; then
+            return 0
+        fi
+        echo "  [!] Install attempt $attempt of $max_attempts failed for: $*"
+        (( attempt++ ))
+        if (( attempt <= max_attempts )); then
+            echo "  Retrying in 10 seconds..."
+            sleep $wait_between_attempts
+        fi
+    done
+    echo "  [!] Warning: failed to install package(s) after $max_attempts attempts: $*"
+    echo "  [!] Continuing — some functionality may be missing"
+    APT_PACKAGES_NOT_INSTALLED+=("$@")
+    return 1
 }
+
 
 prompt_if_unset() {
     local varname="$1"
@@ -1011,6 +1025,25 @@ fi
 
 prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
 
+# Detect current Ubuntu Pro attachment status for use in the prompt
+UBUNTU_PRO_ATTACHED="n"
+if pro status --format json 2>/dev/null | grep -q '"attached": true'; then
+    UBUNTU_PRO_ATTACHED="y"
+fi
+
+if [[ "$UBUNTU_PRO_ATTACHED" == "y" ]]; then
+    echo "  Ubuntu Pro: already attached — no token needed"
+    CONFIGURE_UBUNTU_PRO="y"
+    UBUNTU_PRO_TOKEN=""
+else
+    prompt_if_unset CONFIGURE_UBUNTU_PRO "Would you like to attach Ubuntu Pro? (y/n)" n "y"
+    if [[ "$CONFIGURE_UBUNTU_PRO" =~ ^[Yy]$ ]]; then
+        prompt_if_unset UBUNTU_PRO_TOKEN "  Ubuntu Pro token" secret
+    fi
+fi
+
+prompt_if_unset CONFIGURE_CIS_HARDENING "Would you like to apply CIS Level 1 hardening? (y/n)" n "y"
+
 prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
 
 echo "Configuration complete."
@@ -1199,6 +1232,13 @@ if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
   echo "  Enforce mode               : $APPARMOR_ENFORCE"
 fi
 echo "Configure modulejail?        : $CONFIGURE_MODULEJAIL"
+echo "Attach Ubuntu Pro?           : $CONFIGURE_UBUNTU_PRO"
+if [[ "$UBUNTU_PRO_ATTACHED" == "y" ]]; then
+  echo "  (already attached)"
+elif [[ "$CONFIGURE_UBUNTU_PRO" =~ ^[Yy]$ ]]; then
+  echo "  Token                      : [provided]"
+fi
+echo "Apply CIS Level 1 hardening? : $CONFIGURE_CIS_HARDENING"
 echo "Create and run Health Check? : $CREATE_HEALTHSCRIPT"
 echo ""
 save_config
@@ -1524,6 +1564,36 @@ else
 fi
 
 
+echo ""
+echo "--- 12. Harden PAM: Prevent Login to Accounts With Empty Password ---"
+# Remove 'nullok' from PAM config to prevent authentication with empty passwords.
+# This satisfies CIS Level 1 / USG benchmark: "Prevent Login to Accounts With Empty Password" (High severity).
+# Check for accounts with empty passwords first — should return nothing on a properly set up server.
+EMPTY_PASSWORD_ACCOUNTS=$(awk -F: '($2 == "") {print $1}' /etc/shadow 2>/dev/null || true)
+if [[ -n "$EMPTY_PASSWORD_ACCOUNTS" ]]; then
+    echo "  [!] WARNING: The following accounts have empty passwords: $EMPTY_PASSWORD_ACCOUNTS"
+    echo "  [!] These accounts should be reviewed and locked immediately."
+    for ACCOUNT in $EMPTY_PASSWORD_ACCOUNTS; do
+        passwd -l "$ACCOUNT"
+        echo "  Locked account: $ACCOUNT"
+    done
+else
+    echo "  No accounts with empty passwords found."
+fi
+
+# Remove 'nullok' from all PAM config files to enforce the policy at the PAM level
+NULLOK_FILES=$(grep -rl 'nullok' /etc/pam.d/ 2>/dev/null || true)
+if [[ -n "$NULLOK_FILES" ]]; then
+    echo "  Removing 'nullok' from PAM configuration files:"
+    for PAM_FILE in $NULLOK_FILES; do
+        sed -i 's/ nullok//g' "$PAM_FILE"
+        echo "  [V] Patched: $PAM_FILE"
+    done
+else
+    echo "  'nullok' not present in any PAM config files — already hardened."
+fi
+
+
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
 
     echo ""
@@ -1670,21 +1740,386 @@ EOF
 
     echo ""
     echo "--- 21. Ubuntu Pro ---"
-    if pro status --format json 2>/dev/null | grep -q '"attached": false'; then
-        # Removing Ubuntu Pro can sometimes cause issues with apt on Ubuntu since it's fairly integrated.
-        # Safer to just disabling the services
+    if [[ "$UBUNTU_PRO_ATTACHED" == "y" ]]; then
+        echo "  Ubuntu Pro already attached — no changes"
+    elif [[ "$CONFIGURE_UBUNTU_PRO" =~ ^[Yy]$ ]] && [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
+        echo "  Attaching Ubuntu Pro ..."
+        if pro attach "$UBUNTU_PRO_TOKEN"; then
+            echo "  [V] Ubuntu Pro attached successfully"
+            echo "  Enabling ESM-Apps and ESM-Infra ..."
+            pro enable esm-apps 2>/dev/null || true
+            pro enable esm-infra 2>/dev/null || true
+        else
+            echo "  [!] Ubuntu Pro attach failed — check token and try manually: sudo pro attach <token>"
+        fi
+    else
+        # Not attached and not attaching — disable background Pro services to reduce noise
+        # Removing Ubuntu Pro can cause issues with apt on Ubuntu since it's fairly integrated.
+        # Safer to just disable the services.
         echo "  Ubuntu Pro not attached — disabling Pro services"
         pro config set apt_news=false 2>/dev/null || true
         systemctl stop ubuntu-advantage ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
         systemctl mask ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
-    else
-        echo "  Ubuntu Pro is attached — no changes"
     fi
 
 else
     echo ""
     echo "--- 13.-21. System Tuning ---"
     echo "  Skipping system tuning steps."
+fi
+
+
+echo ""
+echo "--- 21b. CIS Level 1 Hardening ---"
+if [[ "${CONFIGURE_CIS_HARDENING:-}" =~ ^[Yy]$ ]]; then
+
+    echo ""
+    echo "  [CIS] Removing insecure packages (ftp, telnet) ..."
+    apt-get purge -y ftp tnftp telnet 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Disabling Apport crash reporting ..."
+    systemctl disable --now apport.service 2>/dev/null || true
+    systemctl mask apport.service 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Installing pam_pwquality ..."
+    wait_for_apt
+    apt_install libpam-pwquality || true
+
+    echo ""
+    echo "  [CIS] Configuring password quality (pwquality.conf) ..."
+    cat <<'EOF' > /etc/security/pwquality.conf
+# CIS Level 1 - Password quality requirements
+minlen = 14
+dcredit = -1
+ucredit = -1
+ocredit = -1
+lcredit = -1
+maxrepeat = 3
+EOF
+
+    echo ""
+    echo "  [CIS] Configuring pam_pwquality and pam_pwhistory in common-password ..."
+    # Ensure pam_pwquality is active
+    if ! grep -q 'pam_pwquality' /etc/pam.d/common-password; then
+        sed -i '/pam_unix.so/i password        requisite                       pam_pwquality.so retry=3' \
+            /etc/pam.d/common-password
+    fi
+    # Ensure pam_pwhistory is active (remember last 5 passwords)
+    if ! grep -q 'pam_pwhistory' /etc/pam.d/common-password; then
+        sed -i '/pam_unix.so/i password        required                        pam_pwhistory.so remember=5 use_authtok' \
+            /etc/pam.d/common-password
+    fi
+    # Ensure use_authtok is set on pam_unix line
+    sed -i '/pam_unix.so/ s/$/ use_authtok/' /etc/pam.d/common-password
+
+    echo ""
+    echo "  [CIS] Configuring pam_faillock (account lockout after failed attempts) ..."
+    # Add faillock preauth to common-auth if not already present
+    if ! grep -q 'pam_faillock' /etc/pam.d/common-auth; then
+        sed -i '1s/^/auth        required                        pam_faillock.so preauth silent deny=5 unlock_time=900\n/' \
+            /etc/pam.d/common-auth
+        echo 'auth        [default=die]                   pam_faillock.so authfail deny=5 unlock_time=900' \
+            >> /etc/pam.d/common-auth
+        echo 'auth        sufficient                      pam_faillock.so authsucc deny=5 unlock_time=900' \
+            >> /etc/pam.d/common-auth
+    fi
+    # Also configure faillock.conf for permanence
+    cat <<'EOF' > /etc/security/faillock.conf
+# CIS Level 1 - Account lockout policy
+deny = 5
+unlock_time = 900
+silent
+EOF
+
+    echo ""
+    echo "  [CIS] Setting password maximum age and expiry defaults in login.defs ..."
+    sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   365/' /etc/login.defs
+    sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/'   /etc/login.defs
+    sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/'  /etc/login.defs
+    # Apply max age to existing non-system accounts
+    awk -F: '($3 >= 1000 && $1 != "nobody") {print $1}' /etc/passwd | while read -r USER_ACCOUNT; do
+        chage --maxdays 365 --mindays 1 --warndays 14 "$USER_ACCOUNT" 2>/dev/null || true
+    done
+
+    echo ""
+    echo "  [CIS] Setting account inactivity lock (30 days after password expiry) ..."
+    useradd -D -f 30
+    # Apply to existing non-system accounts
+    awk -F: '($3 >= 1000 && $1 != "nobody") {print $1}' /etc/passwd | while read -r USER_ACCOUNT; do
+        chage --inactive 30 "$USER_ACCOUNT" 2>/dev/null || true
+    done
+
+    echo ""
+    echo "  [CIS] Setting default umask to 027 ..."
+    # login.defs
+    sed -i 's/^UMASK.*/UMASK           027/' /etc/login.defs
+    # /etc/profile
+    if grep -q '^umask' /etc/profile; then
+        sed -i 's/^umask.*/umask 027/' /etc/profile
+    else
+        echo 'umask 027' >> /etc/profile
+    fi
+    # /etc/bash.bashrc
+    if grep -q '^umask' /etc/bash.bashrc; then
+        sed -i 's/^umask.*/umask 027/' /etc/bash.bashrc
+    else
+        echo 'umask 027' >> /etc/bash.bashrc
+    fi
+
+    echo ""
+    echo "  [CIS] Restricting su to wheel group (pam_wheel) ..."
+    # Create wheel group if it doesn't exist, ensure it's empty
+    groupadd -f wheel
+    # Remove all members from wheel — only explicitly added users should be in it
+    grpck -r 2>/dev/null || true
+    # Configure pam_wheel in su PAM config
+    if ! grep -q 'pam_wheel' /etc/pam.d/su; then
+        sed -i '1s/^/auth            required        pam_wheel.so use_uid group=wheel\n/' /etc/pam.d/su
+    fi
+
+    echo ""
+    echo "  [CIS] Ensuring system accounts do not have a login shell ..."
+    awk -F: '($3 < 1000 && $1 != "root" && $7 != "/usr/sbin/nologin" && $7 != "/bin/false" && $7 != "/sbin/nologin") {print $1}' \
+        /etc/passwd | while read -r SYS_ACCOUNT; do
+        usermod -s /usr/sbin/nologin "$SYS_ACCOUNT" 2>/dev/null \
+            && echo "  Locked shell for system account: $SYS_ACCOUNT" || true
+    done
+
+    echo ""
+    echo "  [CIS] Setting cron and at directory permissions ..."
+    chmod 700 /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.monthly /etc/cron.weekly 2>/dev/null || true
+    chmod 600 /etc/crontab 2>/dev/null || true
+    chown root:root /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.monthly /etc/cron.weekly /etc/crontab 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Creating /etc/cron.allow and /etc/at.allow (restrict to root only) ..."
+    echo "root" > /etc/cron.allow
+    chmod 600 /etc/cron.allow
+    chown root:root /etc/cron.allow
+    echo "root" > /etc/at.allow
+    chmod 600 /etc/at.allow
+    chown root:root /etc/at.allow
+    rm -f /etc/cron.deny /etc/at.deny 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Setting SSH config file permissions ..."
+    chmod 600 /etc/ssh/sshd_config 2>/dev/null || true
+    find /etc/ssh/sshd_config.d/ -type f -name '*.conf' -exec chmod 600 {} \; 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Hardening SSH server settings ..."
+    # Write additional SSH hardening into its own drop-in file
+    cat <<'EOF' > /etc/ssh/sshd_config.d/02-cis-hardening.conf
+# CIS Level 1 SSH hardening
+LogLevel INFO
+Banner /etc/issue.net
+HostbasedAuthentication no
+PermitUserEnvironment no
+ClientAliveInterval 300
+Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com
+MACs hmac-sha2-256,hmac-sha2-512,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521
+EOF
+    # Create SSH warning banner
+    cat <<'EOF' > /etc/issue.net
+Authorized access only. All activity may be monitored and reported.
+EOF
+    systemctl restart ssh || true
+
+    echo ""
+    echo "  [CIS] Adding sudo logfile ..."
+    if [[ "$VERSION_ID" == "26.04" ]]; then
+        # Ubuntu 26.04 ships sudo-rs which does not support the 'logfile' Defaults directive.
+        # sudo-rs logs natively to journald, captured by auditd and Wazuh — no drop-in needed.
+        echo "  Ubuntu 26.04 detected (sudo-rs) — skipping sudo logfile drop-in; journald handles sudo logging."
+        rm -f /etc/sudoers.d/cis-sudo-logfile 2>/dev/null || true
+    else
+        echo 'Defaults logfile="/var/log/sudo.log"' > /etc/sudoers.d/cis-sudo-logfile
+        chmod 440 /etc/sudoers.d/cis-sudo-logfile
+        visudo -c && echo "  Sudoers syntax valid." || echo "  [!] Sudoers syntax error — check /etc/sudoers.d/cis-sudo-logfile"
+    fi
+
+    echo ""
+    echo "  [CIS] Disabling core dumps ..."
+    # PAM limits
+    echo '* hard core 0' > /etc/security/limits.d/cis-coredumps.conf
+    # sysctl
+    echo 'fs.suid_dumpable = 0' > /etc/sysctl.d/98-cis-coredumps.conf
+    sysctl -w fs.suid_dumpable=0 2>/dev/null || true
+    # systemd
+    mkdir -p /etc/systemd/coredump.conf.d
+    cat <<'EOF' > /etc/systemd/coredump.conf.d/cis.conf
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+
+    echo ""
+    echo "  [CIS] Configuring sysctl CIS additions ..."
+    cat <<'EOF' > /etc/sysctl.d/98-cis-hardening.conf
+# CIS Level 1 sysctl hardening
+
+# ASLR - randomize virtual address space
+kernel.randomize_va_space = 2
+
+# TCP SYN flood protection
+net.ipv4.tcp_syncookies = 1
+
+# Log martian packets (unexpected source addresses)
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# Disable secure ICMP redirects
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+
+# Disable sending ICMP redirects
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# Disable source routed packets (default interface)
+net.ipv4.conf.default.accept_source_route = 0
+
+# Disable IP forwarding
+net.ipv4.ip_forward = 0
+
+# IPv6 hardening
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.default.accept_ra = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv6.conf.all.forwarding = 0
+EOF
+    sysctl --system
+
+    echo ""
+    echo "  [CIS] Blacklisting unused filesystem and USB storage modules ..."
+    cat <<'EOF' > /etc/modprobe.d/cis-blacklist.conf
+# CIS Level 1 - Disable unused filesystem modules
+install cramfs /bin/false
+blacklist cramfs
+install freevxfs /bin/false
+blacklist freevxfs
+install hfs /bin/false
+blacklist hfs
+install hfsplus /bin/false
+blacklist hfsplus
+install jffs2 /bin/false
+blacklist jffs2
+install udf /bin/false
+blacklist udf
+
+# CIS Level 1 - Disable USB storage
+install usb-storage /bin/false
+blacklist usb-storage
+EOF
+
+    echo ""
+    echo "  [CIS] Configuring /dev/shm mount options (nodev, nosuid, noexec) ..."
+    if grep -q '/dev/shm' /etc/fstab; then
+        # Update existing entry to ensure all three options are present
+        sed -i '/\/dev\/shm/ s/defaults/defaults,nodev,nosuid,noexec/' /etc/fstab
+        # Avoid duplicating options on re-runs
+        sed -i '/\/dev\/shm/ s/\(nodev,nosuid,noexec\)\(.*\)\1/\1\2/' /etc/fstab
+    else
+        echo 'tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec 0 0' >> /etc/fstab
+    fi
+    mount -o remount /dev/shm 2>/dev/null || true
+
+    echo ""
+    echo "  [CIS] Configuring journald to forward to rsyslog ..."
+    mkdir -p /etc/systemd/journald.conf.d
+    cat <<'EOF' > /etc/systemd/journald.conf.d/cis.conf
+[Journal]
+ForwardToSyslog=yes
+EOF
+    systemctl restart systemd-journald || true
+
+    echo ""
+    echo "  [CIS] Configuring NTP via systemd-timesyncd ..."
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    cat <<'EOF' > /etc/systemd/timesyncd.conf.d/cis.conf
+[Time]
+NTP=0.ubuntu.pool.ntp.org 1.ubuntu.pool.ntp.org 2.ubuntu.pool.ntp.org 3.ubuntu.pool.ntp.org
+FallbackNTP=ntp.ubuntu.com
+EOF
+    systemctl restart systemd-timesyncd || true
+
+    echo ""
+    echo "  [CIS] Setting interactive session timeout (TMOUT=900) ..."
+    cat <<'EOF' > /etc/profile.d/cis-timeout.conf
+# CIS Level 1 - Auto-logout idle interactive sessions after 15 minutes
+TMOUT=900
+readonly TMOUT
+export TMOUT
+EOF
+
+    echo ""
+    echo "  [CIS] File integrity monitoring (AIDE) ..."
+    if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ || "$ISINSTALLED_WAZUH" == "y" ]]; then
+        echo "  Wazuh is installed/selected — skipping AIDE. Wazuh FIM provides equivalent"
+        echo "  real-time file integrity monitoring via the Wazuh dashboard."
+    else
+        wait_for_apt
+        if apt_install aide aide-common; then
+            # Initialise the AIDE database (takes a few minutes on first run)
+            echo "  Building AIDE database — this may take a few minutes ..."
+            aideinit --yes 2>/dev/null || aideinit 2>/dev/null || true
+            # Activate the database
+            if [[ -f /var/lib/aide/aide.db.new ]]; then
+                cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+                echo "  [V] AIDE database initialised at /var/lib/aide/aide.db"
+            elif [[ -f /var/lib/aide/aide.db.new.gz ]]; then
+                cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+                echo "  [V] AIDE database initialised at /var/lib/aide/aide.db.gz"
+            else
+                echo "  [!] AIDE database file not found — run 'sudo aideinit' manually after provisioning"
+            fi
+            # Add a daily cron job to check integrity
+            cat <<'EOF' > /etc/cron.daily/aide-check
+#!/bin/bash
+/usr/bin/aide --check 2>&1 | mail -s "AIDE integrity check - $(hostname)" root
+EOF
+            chmod 700 /etc/cron.daily/aide-check
+            chown root:root /etc/cron.daily/aide-check
+        else
+            echo "  [!] AIDE installation failed — skipping"
+        fi
+    fi
+
+    echo ""
+    echo "  [CIS] Configuring Postfix to listen on loopback only ..."
+    if [[ "$ISINSTALLED_POSTFIX" == "y" ]] || [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+        postconf -e 'inet_interfaces = loopback-only' 2>/dev/null || true
+        echo "  inet_interfaces = loopback-only set"
+    else
+        echo "  Postfix not installed — skipping"
+    fi
+
+    echo ""
+    echo "  [CIS] Setting up Monit password expiry alert for sudo user ..."
+    if [[ "$INSTALL_MONIT" =~ ^[Yy]$ || "$ISINSTALLED_MONIT" == "y" ]] && [[ -n "$USER_SUDO_USER_USERNAME" ]]; then
+        # Copy and configure the companion check script
+        cp "$CONFIG_DIR/usr/local/bin/check-password-expiry.sh" /usr/local/bin/check-password-expiry.sh
+        sed -i "s|%%USER_SUDO_USER_USERNAME%%|$USER_SUDO_USER_USERNAME|g" /usr/local/bin/check-password-expiry.sh
+        chmod 750 /usr/local/bin/check-password-expiry.sh
+        chown root:root /usr/local/bin/check-password-expiry.sh
+
+        # Copy the Monit check config and enable it
+        cp "$CONFIG_DIR/etc/monit/conf-available/password-expiry" /etc/monit/conf-available/password-expiry
+        ln -sf /etc/monit/conf-available/password-expiry /etc/monit/conf-enabled/password-expiry
+        echo "  [V] Monit password expiry check configured for user: $USER_SUDO_USER_USERNAME"
+    else
+        echo "  Monit not installed/selected or no sudo user set — skipping password expiry check"
+    fi
+
+    echo ""
+    echo "  [CIS] CIS Level 1 hardening complete."
+
+else
+    echo "  Skipping CIS hardening."
 fi
 
 
@@ -1838,6 +2273,10 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     apt_install nginx apache2-utils || true
     usermod -a -G $USER_SUDO_USER_USERNAME www-data
     systemctl enable --now nginx || true
+
+    # log version and installed modules
+    echo "  Installed nginx:"
+    nginx -V || true
 
     if command -v ufw >/dev/null && ufw status | grep -q active; then
         ufw allow 80/tcp
@@ -2858,10 +3297,12 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
 
     if [[ "$INSTALL_NGINX" =~ ^[Yy]$ && "$ISINSTALLED_NGINX" == "y" ]]; then
         echo "  Copying Nginx config files"
-        if [[ -f $CONFIG_DIR/etc/nginx/nginx/nginx.conf ]]; then
+        if [[ -f $CONFIG_DIR/etc/nginx/nginx.conf ]]; then
             cp $CONFIG_DIR/etc/nginx/nginx.conf /etc/nginx/nginx.conf
             NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-$PROCESSOR_COUNT}
+            NGINX_CLIENT_BODY_MAX_SIZE=${NGINX_CLIENT_BODY_MAX_SIZE:-20M}
             sed -i "s|%%NGINX_WORKER_PROCESSES%%|$NGINX_WORKER_PROCESSES|g" /etc/nginx/nginx.conf
+            sed -i "s|%%NGINX_CLIENT_BODY_MAX_SIZE%%|$NGINX_CLIENT_BODY_MAX_SIZE|g" /etc/nginx/nginx.conf
         fi
 
         if [[ -f $CONFIG_DIR/etc/nginx/sites-available/default ]]; then
@@ -2873,6 +3314,9 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
             mkdir -p /etc/systemd/system/nginx.service.d
             cp $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf /etc/systemd/system/nginx.service.d/override.conf
         fi
+
+        echo "  Testing nginx configuration"
+        nginx -T || true
     fi
 
     if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ && "$ISINSTALLED_VALKEY" == "y" ]]; then

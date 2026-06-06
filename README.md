@@ -9,6 +9,7 @@ quickly provision a hardened server and install any of the following services if
 - Firewall<sup>*</sup>
 - Grafana
 - IP Blocklists<sup>*</sup>
+- CIS Level 1 hardening<sup>*</sup>
 - Kernel module blocklists<sup>*</sup>
 - Monit<sup>*</sup>
 - Mosquitto
@@ -125,6 +126,7 @@ Would you like to configure AppArmor? (y/n) : y
   Enable AppArmor? (y/n) : y
   Set profiles to enforce mode? (y/n) : y
 Blacklist unused kernel modules using modulejail? (y/n): y
+Would you like to apply CIS Level 1 hardening? (y/n) : y
 Would you like to create and run the Health Check script? (y/n) : y
 Configuration complete.
 ```
@@ -184,6 +186,7 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | TCP TX Offload | Optionally disables TCP transmit offloading on the primary interface via a systemd oneshot service |
 | AppArmor | Optionally enables AppArmor, enforces available profiles, and sets installed services without profiles to complain mode |
 | Ubuntu Pro | If not attached, disables Ubuntu Pro background services to reduce noise |
+| CIS Level 1 Hardening | Applies CIS Level 1 server benchmark controls: password policy (complexity, max age, history, lockout), PAM hardening (`nullok` removal, `pam_faillock`), account inactivity lock, umask `027`, `su` restricted to wheel group, system account shell lockdown, cron/at access control, SSH drop-in (ciphers, MACs, KEX, banner, `HostbasedAuthentication no`), sudo logfile, core dump disabling, additional sysctl hardening (ASLR, syncookies, martian logging, ICMP redirect, IPv6), kernel module blacklist (cramfs, hfs, hfsplus, jffs2, udf, usb-storage), `/dev/shm` mount options, journald→rsyslog forwarding, NTP configuration, session timeout (`TMOUT=900`), file integrity monitoring (AIDE, or Wazuh FIM if Wazuh is installed), and Postfix loopback-only binding. Controlled by `CONFIGURE_CIS_HARDENING`. |
 
 ### Software Installed (optional)
 
@@ -328,6 +331,7 @@ CONFIGURE_APPARMOR=y
 APPARMOR_ENABLE=y
 APPARMOR_ENFORCE=y
 CONFIGURE_MODULEJAIL=y
+CONFIGURE_CIS_HARDENING=y
 CREATE_HEALTHSCRIPT=y
 
 # Packages
@@ -462,7 +466,10 @@ etc/
   forgejo/app.ini
   monit/monitrc
   monit/conf-available/
+  monit/conf-available/password-expiry
   systemd/system/disable-offload.service
+usr/
+  local/bin/check-password-expiry.sh
 ```
 
 Files containing `%%PLACEHOLDER%%` variables are copied to the target path after all services are installed and substituted with `sed`. Files without placeholders are copied as-is.
@@ -532,6 +539,14 @@ A `pg_hba.conf` template is also required at `etc/postgresql/pg_hba.conf`.
 | `%%GRAFANA_SMTP_FROM_NAME%%` | From name |
 | `%%GRAFANA_SMTP_EHLO_IDENTITY%%` | EHLO identity (empty if via Postfix) |
 | `%%GRAFANA_SMTP_STARTTLS_POLICY%%` | `NoConfig` if via Postfix, else `MandatoryStartTLS` |
+
+### Password Expiry Check (`usr/local/bin/check-password-expiry.sh`)
+
+| Placeholder | Value |
+|---|---|
+| `%%USER_SUDO_USER_USERNAME%%` | Sudo username — substituted at install time |
+
+Called by Monit to alert when the sudo user's password is approaching expiry. Alerts at 30, 20, 10, and 5 days remaining. Exits 0 (OK) if the password is set to never expire.
 
 ### Forgejo (`etc/forgejo/app.ini`)
 
@@ -605,6 +620,7 @@ sudo ~/ubuntu_health_check.sh
 
 ## Notes
 
+- **CIS Level 1 hardening:** applies a broad set of CIS benchmark controls in a single optional step (`CONFIGURE_CIS_HARDENING`). Controls are applied idempotently — safe to re-run. File integrity monitoring uses AIDE unless Wazuh is installed or selected, in which case Wazuh FIM is used instead (real-time via inotify, feeding into the Wazuh dashboard). A Monit check for sudo user password expiry is added when both Monit and a sudo user are configured — alerts are sent at 30, 20, 10, and 5 days remaining. Postfix is set to `inet_interfaces = loopback-only` regardless of the value in `main.cf` to satisfy the CIS "Disable Postfix Network Listening" control.
 - **MySQL / MariaDB health check user:** a passwordless `healthcheck@localhost` user with SELECT-only access is created during installation. The health check script uses this user for connection tests — no root credentials are stored anywhere in the health check script.
 - **curl and IPv6:** on Ubuntu 26.04, curl prefers IPv6 when connecting to `localhost`. The health check smoke tests use `curl -4` to force IPv4, ensuring consistent behaviour regardless of how `localhost` resolves on the system.
 - **Idempotent-friendly:** the script detects already-installed services and prompts to `reinstall` rather than blindly overwriting. On re-runs, services that were skipped are still detected as installed and their configs updated.

@@ -61,5 +61,5 @@ header_size_limit = 4096000
 relayhost = [%%POSTFIX_RELAY_HOST%%]:%%POSTFIX_RELAY_PORT%%
 
 # accept email from our web-server only
-inet_interfaces = 127.0.0.1
+inet_interfaces = loopback-only
 
