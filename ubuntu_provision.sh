@@ -445,7 +445,7 @@ else
     # If run via sudo, offer the current user as the default
     if [[ -n "$REAL_USER" && "$REAL_USER" != "root" ]]; then
         #read -p "Use current user '$REAL_USER' for setup?    (y/n)" USER_USE_CURRENT_USERNAME
-        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'? (y/n)" n "y"
+        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'? (y/n)" n "n"
         if [[ "$USER_USE_CURRENT_USERNAME" =~ ^[Yy]$ || -z "$USER_USE_CURRENT_USERNAME" ]]; then
             USER_SUDO_USER_USERNAME=$REAL_USER
         fi
@@ -473,7 +473,7 @@ fi
 LVM_RESIZE_VOLUME=${LVM_RESIZE_VOLUME:-}
 LVM_RESIZE_TARGET_GB=${LVM_RESIZE_TARGET_GB:-}
 
-prompt_if_unset CONFIGURE_LVM "Would you like to configure LVM disks? (y/n)" n "y"
+prompt_if_unset CONFIGURE_LVM "Would you like to configure LVM disks? (y/n)" n "n"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
     # 1. Check if the logical volume exists
     # 2. Check if the Volume Group has more than 0 free space
@@ -487,7 +487,7 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
 
         if [ "$LVM_FREE_SPACE" -gt 0 ]; then
             echo "  LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
-            prompt_if_unset LVM_RESIZE_VOLUME "  Resize root LVM? (y/n)" n "y"
+            prompt_if_unset LVM_RESIZE_VOLUME "  Resize root LVM? (y/n)" n "n"
             if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
                 prompt_if_unset LVM_RESIZE_TARGET_GB "  Enter target size in GB (or type 'all')" n "all"
             fi
@@ -501,13 +501,13 @@ fi
 
 ## SWAP
 ACTIVE_SWAP=''
-prompt_if_unset CONFIGURE_SWAP "Would you like to configure swap space? (y/n)" n "y"
+prompt_if_unset CONFIGURE_SWAP "Would you like to configure swap space? (y/n)" n "n"
 if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     CURRENT_SWAP_ACTIVE=$(tail -n +2 /proc/swaps)
     if [ -z "$CURRENT_SWAP_ACTIVE" ]; then
         ACTIVE_SWAP='No'
         echo "  No active swap detected."
-        prompt_if_unset CONFIGURE_SWAP "  Would you like to create a swap file? (y/n)" n "y"
+        prompt_if_unset CONFIGURE_SWAP "  Would you like to create a swap file? (y/n)" n "n"
         if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
             prompt_if_unset SWAP_SIZE_GB "  Enter swap size in GB" n "2"
         fi
@@ -517,7 +517,7 @@ if [[ "$CONFIGURE_SWAP" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-prompt_if_unset TUNE_SYSTEM "Would you like to tune the system? (y/n)" n "y"
+prompt_if_unset TUNE_SYSTEM "Would you like to tune the system? (y/n)" n "n"
 if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
     while true; do
         prompt_if_unset NEW_TIMEZONE "  Please enter the system timezone" n "${CURRENT_TIMEZONE}"
@@ -548,19 +548,19 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
     done
 fi
 
-prompt_if_unset UNINSTALL_PACKAGES "Would you like to uninstall packages? (y/n)" n "y"
+prompt_if_unset UNINSTALL_PACKAGES "Would you like to uninstall packages? (y/n)" n "n"
 
-prompt_if_unset UPDATE_PACKAGES "Would you like to update packages? (y/n)" n "y"
+prompt_if_unset UPDATE_PACKAGES "Would you like to update packages? (y/n)" n "n"
 
-prompt_if_unset INSTALL_PACKAGES "Would you like to install new packages? (y/n)" n "y"
+prompt_if_unset INSTALL_PACKAGES "Would you like to install new packages? (y/n)" n "n"
 
-prompt_if_unset INSTALL_UFW "Would you like to configure ufw? (y/n)" n "y"
+prompt_if_unset INSTALL_UFW "Would you like to configure ufw? (y/n)" n "n"
 
-prompt_if_unset INSTALL_SSH "Would you like to configure ssh? (y/n)" n "y"
+prompt_if_unset INSTALL_SSH "Would you like to configure ssh? (y/n)" n "n"
 
-prompt_if_unset INSTALL_FONTS "Would you like to install fonts? (y/n)" n "y"
+prompt_if_unset INSTALL_FONTS "Would you like to install fonts? (y/n)" n "n"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
-    prompt_if_unset INSTALL_MS_FONTS "   Install Microsoft core fonts? (y/n)" n "y"
+    prompt_if_unset INSTALL_MS_FONTS "   Install Microsoft core fonts? (y/n)" n "n"
 fi
 
 [[ "$PROMPT_WEASYPRINT" == "install" ]] && default_val="y" || default_val="n"
@@ -812,7 +812,7 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     fi
     prompt_if_unset POSTFIX_DOMAIN          "  Mail domain (used in From address)"       n $TEMP_POSTFIX_DOMAIN
 
-    if [[ -n "$TEMP_POSTFIX_FROM_ADDRESS "]] then
+    if [[ -n "$TEMP_POSTFIX_FROM_ADDRESS" ]] then
         if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
             TEMP_POSTFIX_FROM_ADDRESS="$POSTFIX_RELAY_USERNAME"
         else
@@ -838,7 +838,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     MONIT_HOST_NAME="${MONIT_HOST_NAME:-$LOCAL_HOSTNAME}"
 
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
-        prompt_if_unset MONIT_USE_POSTFIX "  Send Monit alerts via Postfix? (y/n)" n "y"
+        prompt_if_unset MONIT_USE_POSTFIX "  Send Monit alerts via Postfix? (y/n)" n "n"
     else
         MONIT_USE_POSTFIX="n"
     fi
@@ -882,7 +882,7 @@ prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" 
 prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
-        prompt_if_unset GRAFANA_USE_POSTFIX "  Send Grafana alerts via Postfix? (y/n)" n "y"
+        prompt_if_unset GRAFANA_USE_POSTFIX "  Send Grafana alerts via Postfix? (y/n)" n "n"
     else
         GRAFANA_USE_POSTFIX="n"
     fi
@@ -936,7 +936,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     prompt_if_unset FORGEJO_DOMAIN "  Enter Forgejo domain or ip" n "$LOCAL_IP"
 
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
-        prompt_if_unset FORGEJO_USE_POSTFIX "  Send Forgejo mail via Postfix? (y/n)" n "y"
+        prompt_if_unset FORGEJO_USE_POSTFIX "  Send Forgejo mail via Postfix? (y/n)" n "n"
     else
         FORGEJO_USE_POSTFIX="n"
     fi
@@ -1014,7 +1014,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     FORGEJO_SMTP_FROM="${FORGEJO_SMTP_FROM:-forgejo@${POSTFIX_DOMAIN:-}}"
     prompt_if_unset FORGEJO_ADMIN_EMAIL "  Forgejo admin email" n $FORGEJO_SMTP_FROM
 fi
-prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "y"
+prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "n"
 
 [[ "$PROMPT_FAIL2BAN" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_FAIL2BAN "Would you like to $PROMPT_FAIL2BAN Fail2Ban? (y/n)" n  $default_val
@@ -1047,14 +1047,14 @@ else
     WAZUH_MANAGER=''
 fi
 
-prompt_if_unset CONFIGURE_APPARMOR "Would you like to configure AppArmor? (y/n)" n "y"
+prompt_if_unset CONFIGURE_APPARMOR "Would you like to configure AppArmor? (y/n)" n "n"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
     echo "  AppArmor status: installed=$APPARMOR_INSTALLED, enabled=$APPARMOR_ENABLED, mode=$APPARMOR_CURRENT_MODE"
-    prompt_if_unset APPARMOR_ENABLE "  Enable AppArmor? (y/n)" n "y"
+    prompt_if_unset APPARMOR_ENABLE "  Enable AppArmor? (y/n)" n "n"
     prompt_if_unset APPARMOR_ENFORCE "  Set profiles to enforce mode? (y/n)" n "$( [[ "$APPARMOR_CURRENT_MODE" == "enforce" ]] && echo y || echo n )"
 fi
 
-prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "y"
+prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "n"
 
 # Detect current Ubuntu Pro attachment status for use in the prompt
 UBUNTU_PRO_ATTACHED="n"
@@ -1067,15 +1067,15 @@ if [[ "$UBUNTU_PRO_ATTACHED" == "y" ]]; then
     CONFIGURE_UBUNTU_PRO="y"
     UBUNTU_PRO_TOKEN=""
 else
-    prompt_if_unset CONFIGURE_UBUNTU_PRO "Would you like to attach Ubuntu Pro? (y/n)" n "y"
+    prompt_if_unset CONFIGURE_UBUNTU_PRO "Would you like to attach Ubuntu Pro? (y/n)" n "n"
     if [[ "$CONFIGURE_UBUNTU_PRO" =~ ^[Yy]$ ]]; then
         prompt_if_unset UBUNTU_PRO_TOKEN "  Ubuntu Pro token" secret
     fi
 fi
 
-prompt_if_unset CONFIGURE_CIS_HARDENING "Would you like to apply CIS Level 1 hardening? (y/n)" n "y"
+prompt_if_unset CONFIGURE_CIS_HARDENING "Would you like to apply CIS Level 1 hardening? (y/n)" n "n"
 
-prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
+prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "n"
 
 echo "Configuration complete."
 
@@ -1381,7 +1381,7 @@ if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
 
         if [ "$LVM_FREE_SPACE" -gt 0 ]; then
             echo "  LVM detected. Free space in Volume Group: ${LVM_FREE_GB}GB"
-            prompt_if_unset LVM_RESIZE_VOLUME "Resize root LVM? (y/n)" n "y"
+            prompt_if_unset LVM_RESIZE_VOLUME "Resize root LVM? (y/n)" n "n"
             if [[ "$LVM_RESIZE_VOLUME" =~ ^[Yy]$ ]]; then
                 prompt_if_unset LVM_RESIZE_TARGET_GB "Enter target size in GB (or type 'all')" n "all"
 
