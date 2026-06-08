@@ -445,7 +445,7 @@ else
     # If run via sudo, offer the current user as the default
     if [[ -n "$REAL_USER" && "$REAL_USER" != "root" ]]; then
         #read -p "Use current user '$REAL_USER' for setup?    (y/n)" USER_USE_CURRENT_USERNAME
-        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'? (y/n)" n "n"
+        prompt_if_unset USER_USE_CURRENT_USERNAME "Use current user '$REAL_USER'? (y/n)" n "y"
         if [[ "$USER_USE_CURRENT_USERNAME" =~ ^[Yy]$ || -z "$USER_USE_CURRENT_USERNAME" ]]; then
             USER_SUDO_USER_USERNAME=$REAL_USER
         fi
@@ -569,7 +569,8 @@ prompt_if_unset INSTALL_WEASYPRINT "Would you like to $PROMPT_WEASYPRINT weasypr
 [[ "$PROMPT_IMAGEMAGICK" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_IMAGEMAGICK "Would you like to $PROMPT_IMAGEMAGICK imagemagick? (y/n)" n $default_val
 
-[[ "$PROMPT_CPYTHON314" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_CPYTHON314" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_CPYTHON314 "Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n $default_val
 if [[ ! "$INSTALL_CPYTHON314" =~ ^[Yy]$ && $PROMPT_CPYTHON314 == "reinstall" ]]; then
     # Python installed and choice is do not reinstall python. Check if important packages are installed.
@@ -782,6 +783,7 @@ if [[ "$ISINSTALLED_POSTFIX" == "y" && -f /etc/postfix/main.cf ]]; then
     TEMP_POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-$(grep -oP '^root:\s*\K.*' /etc/aliases 2>/dev/null | head -1 | xargs || true)}"
     TEMP_POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
     TEMP_POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
+    TEMP_POSTFIX_RELAY_USERNAME=""
     echo "  Existing postfix configuration loaded"
 else
     TEMP_POSTFIX_RELAY_HOST=''
