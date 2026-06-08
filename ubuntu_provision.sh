@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Axel Busch
-# 05 June 2026
+# 08 June 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -35,9 +35,9 @@
 ## --------------------------------------------
 
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22
+PYPY_FALLBACK_VERSION=pypy3.11-v7.3.23
 FORGEJO_FALLBACK_VERSION=15.0.2
-MODULEJAIL_FALLBACK_VERSION=1.2.3
+MODULEJAIL_FALLBACK_VERSION=1.4.0
 FORGEJO_FALLBACK_PORT=3030
 
 
