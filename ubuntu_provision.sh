@@ -1061,6 +1061,7 @@ fi
 prompt_if_unset CONFIGURE_MODULEJAIL "Blacklist unused kernel modules using modulejail? (y/n)" n "n"
 
 # Detect current Ubuntu Pro attachment status for use in the prompt
+echo "Detecting current Ubuntu Pro attachment status ..."
 UBUNTU_PRO_ATTACHED="n"
 if pro status --format json 2>/dev/null | grep -q '"attached": true'; then
     UBUNTU_PRO_ATTACHED="y"
@@ -2418,18 +2419,20 @@ EOS
 else
     echo "  Skipping MySQL installation."
 
-    # Check if MySQL is currently running before attempting to connect
-    if systemctl is-active --quiet mysql.service; then
-        echo "  Testing if healthcheck user exists..."
+    if [[ "$ISINSTALLED_MYSQL" == "y" ]]; then
+        # Check if MySQL is currently running before attempting to connect
+        if systemctl is-active --quiet mysql.service; then
+            echo "  Testing if healthcheck user exists..."
 
-        # Execute the query inside the 'if' condition to protect it from 'set -e'
-        if mysql -u healthcheck -e "SELECT 1" &>/dev/null; then
-            echo "  [+] Success: 'healthcheck' user exists."
+            # Execute the query inside the 'if' condition to protect it from 'set -e'
+            if mysql -u healthcheck -e "SELECT 1" &>/dev/null; then
+                echo "  [+] Success: 'healthcheck' user exists."
+            else
+                echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+            fi
         else
-            echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+            echo "  [!] Warning: MySQL service is not running. Could not verify healthcheck user."
         fi
-    else
-        echo "  [!] Warning: MySQL service is not running. Could not verify healthcheck user."
     fi
 fi
 
@@ -2506,18 +2509,21 @@ EOS
 else
     echo "  Skipping MariaDB installation."
 
-    # Check if MariaDB is currently running before attempting to connect
-    if systemctl is-active --quiet mariadb.service; then
-        echo "  Testing if healthcheck user exists..."
+    if [[ "$ISINSTALLED_MARIADB" == "y" ]]; then
+        # Check if MariaDB is currently running before attempting to connect
 
-        # Execute the client query inside the 'if' condition to protect it from 'set -e'
-        if mariadb -u healthcheck -e "SELECT 1" &>/dev/null; then
-            echo "  [+] Success: 'healthcheck' user exists."
+        if systemctl is-active --quiet mariadb.service; then
+            echo "  Testing if healthcheck user exists..."
+
+            # Execute the client query inside the 'if' condition to protect it from 'set -e'
+            if mariadb -u healthcheck -e "SELECT 1" &>/dev/null; then
+                echo "  [+] Success: 'healthcheck' user exists."
+            else
+                echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+            fi
         else
-            echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+            echo "  [!] Warning: MariaDB service is not running. Could not verify healthcheck user."
         fi
-    else
-        echo "  [!] Warning: MariaDB service is not running. Could not verify healthcheck user."
     fi
 fi
 
@@ -4181,7 +4187,7 @@ else smoke_skip "Webmin"; fi
 
 # Database checks
 if systemctl is-active --quiet mysql 2>/dev/null; then
-    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" &>/dev/null; then
         smoke_ok "MySQL: connection OK"
     else
         smoke_warn "MySQL: connection failed — check service status"
@@ -4189,7 +4195,7 @@ if systemctl is-active --quiet mysql 2>/dev/null; then
 else smoke_skip "MySQL"; fi
 
 if systemctl is-active --quiet mariadb 2>/dev/null; then
-    if mysql -u healthcheck -e "SELECT 1;" mysql &>/dev/null; then
+    if mysql -u healthcheck -e "SELECT 1;" &>/dev/null; then
         smoke_ok "MariaDB: connection OK"
     else
         smoke_warn "MariaDB: connection failed — check service status"
