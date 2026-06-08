@@ -395,8 +395,8 @@ check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
 check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
 check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
 check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUHAGENT
-check_service_installed wazuh-manager PROMPT_WAZUH ISINSTALLED_WAZUHMANAGER
+check_service_installed wazuh-agent PROMPT_WAZUHAGENT ISINSTALLED_WAZUHAGENT
+check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
 
 # Detect AppArmor state
 APPARMOR_INSTALLED=n
@@ -595,20 +595,23 @@ fi
 default_val="n"
 prompt_if_unset INSTALL_PYPY311 "Would you like to $PROMPT_PYPY311 Pypy 3.11? (y/n)" n $default_val
 
-[[ "$PROMPT_NGINX" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_NGINX" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_NGINX "Would you like to $PROMPT_NGINX nginx? (y/n)" n $default_val
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   prompt_if_unset NGINX_WORKER_PROCESSES "  nginx worker processes?" n "$PROCESSOR_COUNT"
 fi
 
-[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" n $default_val
 
-if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-    default_val='n'
-else
-    default_val='y'
-fi
+#if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+#    default_val='n'
+#else
+#    default_val='y'
+#fi
+default_val="n"
 prompt_if_unset INSTALL_MYSQL "Would you like to $PROMPT_MYSQL MySQL? (y/n)" n $default_val
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     # Installing both MySQL and MariaDB is not supported. Disabling MariaDB
@@ -675,11 +678,12 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
 fi
 
-if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-    default_val='n'
-else
-    default_val='y'
-fi
+#if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+#    default_val='n'
+#else
+#    default_val='y'
+#fi
+default_val="n"
 prompt_if_unset INSTALL_MARIADB "Would you like to $PROMPT_MARIADB MariaDB? (y/n)" n  $default_val
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
@@ -727,11 +731,12 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
 fi
 
 
-if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
-    default_val='n'
-else
-    default_val='y'
-fi
+#if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+#    default_val='n'
+#else
+#    default_val='y'
+#fi
+default_val="n"
 prompt_if_unset INSTALL_POSTGRESQL "Would you like to $PROMPT_POSTGRESQL PostgreSQL $PG_VERSION? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
     # Interactive password prompt with 4-character minimum
@@ -771,7 +776,8 @@ else
     PG_PASSWORD_ESCAPED=''
 fi
 
-[[ "$PROMPT_MOSQUITTO" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_MOSQUITTO" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_MOSQUITTO "Would you like to $PROMPT_MOSQUITTO Mosquitto? (y/n)" n  $default_val
 
 # POSTFIX
@@ -794,7 +800,9 @@ else
     TEMP_POSTFIX_FROM_ADDRESS=''
     TEMP_POSTFIX_ROOT_ALIAS=''
 fi
-[[ "$PROMPT_POSTFIX" == "install" ]] && default_val="y" || default_val="n"
+
+#[[ "$PROMPT_POSTFIX" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_POSTFIX "Would you like to $PROMPT_POSTFIX Postfix (relay-only SMTP)? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     prompt_if_unset POSTFIX_RELAY_HOST      "  SMTP relay host (mailserver address)"     n $TEMP_POSTFIX_RELAY_HOST
@@ -833,7 +841,8 @@ else
     POSTFIX_ROOT_ALIAS="$TEMP_POSTFIX_FROM_ADDRESS"
 fi
 
-[[ "$PROMPT_MONIT" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_MONIT" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_MONIT "Would you like to $PROMPT_MONIT Monit? (y/n)" n  $default_val
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     # allow conf file to override, fall back to hostname, never prompt
@@ -1020,24 +1029,29 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
 fi
 prompt_if_unset DISABLE_TX_OFFLOAD "Would you like to disable TCP transmit offloading? (y/n)" n "n"
 
-[[ "$PROMPT_FAIL2BAN" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_FAIL2BAN" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_FAIL2BAN "Would you like to $PROMPT_FAIL2BAN Fail2Ban? (y/n)" n  $default_val
 
-[[ "$PROMPT_AUDITD" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_AUDITD" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_AUDITD "Would you like to $PROMPT_AUDITD auditd? (y/n)" n  $default_val
 
-[[ "$PROMPT_IPBLOCK" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_IPBLOCK" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_IPBLOCK "Would you like to $PROMPT_IPBLOCK IP blocklist? (y/n)" n  $default_val
 
-[[ "$PROMPT_SURICATA" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_SURICATA" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata IDS? (y/n)" n  $default_val
 
-if [[ "$ISINSTALLED_WAZUHAGENT" == "y" || "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
-    default_val='n'
-else
-    default_val='y'
-fi
-prompt_if_unset INSTALL_WAZUHAGENT "Would you like to $PROMPT_WAZUH Wazuh Agent? (y/n)" n  $default_val
+#if [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
+#    default_val='n'
+#else
+#    default_val='y'
+#fi
+default_val='n'
+prompt_if_unset INSTALL_WAZUHAGENT "Would you like to $PROMPT_WAZUHAGENT Wazuh Agent? (y/n)" n  $default_val
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
     # Interactive Manager host prompt
     while true; do
@@ -1080,7 +1094,7 @@ fi
 
 prompt_if_unset CONFIGURE_CIS_HARDENING "Would you like to apply CIS Level 1 hardening? (y/n)" n "n"
 
-prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "n"
+prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health Check script? (y/n)" n "y"
 
 echo "Configuration complete."
 
@@ -1798,15 +1812,34 @@ EOF
         systemctl mask ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
     fi
 
+
+    echo ""
+    echo " --- 22. Disabling noisy MOTD components ---"
+    for f in \
+        /etc/update-motd.d/10-help-text \
+        /etc/update-motd.d/50-motd-news \
+        /etc/update-motd.d/85-fwupd \
+        /etc/update-motd.d/91-contract-ua-esm-status \
+        /etc/update-motd.d/91-release-upgrade \
+        /etc/update-motd.d/95-hwe-eol \
+        /etc/update-motd.d/97-overlayroot \
+        /etc/update-motd.d/98-fsck-at-reboot \
+        /etc/update-motd.d/99-livepatch-kernel-upgrade-required; do
+        [[ -f "$f" ]] && chmod -x "$f" && echo "  [-] Disabled: $(basename $f)"
+    done
+    systemctl disable --now motd-news.timer 2>/dev/null || true
+    rm -f /var/cache/motd-news
+    echo "  [V] MOTD noise disabled"
+
 else
     echo ""
-    echo "--- 13.-21. System Tuning ---"
+    echo "--- 13.-22. System Tuning ---"
     echo "  Skipping system tuning steps."
 fi
 
 
 echo ""
-echo "--- 21b. CIS Level 1 Hardening ---"
+echo "--- 23. CIS Level 1 Hardening ---"
 if [[ "${CONFIGURE_CIS_HARDENING:-}" =~ ^[Yy]$ ]]; then
 
     echo ""
@@ -2124,6 +2157,9 @@ EOF
     if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
         echo "  Wazuh is installed/selected — skipping AIDE. Wazuh FIM provides equivalent"
         echo "  real-time file integrity monitoring via the Wazuh dashboard."
+        # Uninstall AIDE:
+        # sudo apt-get purge -y aide aide-common
+        # sudo rm -rf /var/lib/aide /etc/aide /etc/aide.conf etc/cron.daily/aide-check /var/log/aide
     else
         wait_for_apt
         if apt_install aide aide-common; then
@@ -2187,7 +2223,7 @@ fi
 
 
 echo ""
-echo "--- 22. Install fonts ---"
+echo "--- 24. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
@@ -2207,7 +2243,7 @@ fi
 
 
 echo ""
-echo "--- 23. Install Python 3.14 ---"
+echo "--- 25. Install Python 3.14 ---"
 if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_CPYTHON314" == 'reinstall' ]]; then
         echo "  Uninstall Python 3.14"
@@ -2261,7 +2297,7 @@ fi
 
 
 echo ""
-echo "--- 24. Install PyPy 3.11 ---"
+echo "--- 26. Install PyPy 3.11 ---"
 if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
 
     # Fetch latest PyPy 3.11 version dynamically, fall back to known version if unavailable
@@ -2304,7 +2340,7 @@ fi
 
 
 echo ""
-echo "--- 25. Install weasyprint ---"
+echo "--- 27. Install weasyprint ---"
 if [[ "$INSTALL_WEASYPRINT" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install weasyprint || true
@@ -2314,7 +2350,7 @@ fi
 
 
 echo ""
-echo "--- 26. Install imagemagick ---"
+echo "--- 28. Install imagemagick ---"
 if [[ "$INSTALL_IMAGEMAGICK" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install imagemagick || true
@@ -2324,7 +2360,7 @@ fi
 
 
 echo ""
-echo "--- 27. Install nginx ---"
+echo "--- 29. Install nginx ---"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_NGINX" == 'reinstall' ]]; then
         echo "  Uninstall nginx"
@@ -2351,7 +2387,7 @@ fi
 
 
 echo ""
-echo "--- 28. Install Valkey ---"
+echo "--- 30. Install Valkey ---"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_VALKEY" == 'reinstall' ]]; then
         echo "  Uninstall valkey-server valkey-tools"
@@ -2368,7 +2404,7 @@ fi
 
 
 echo ""
-echo "--- 29a. Install MySQL ---"
+echo "--- 31. Install MySQL ---"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MYSQL" == 'reinstall' ]]; then
         echo "  Uninstall mysql-server mysql-shell mysqltuner"
@@ -2437,7 +2473,7 @@ else
 fi
 
 echo ""
-echo "--- 29b. Install MariaDB ---"
+echo "--- 32. Install MariaDB ---"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MARIADB" == 'reinstall' ]]; then
         echo "  Uninstall mariadb-server"
@@ -2528,7 +2564,7 @@ else
 fi
 
 echo ""
-echo "--- 30. Install PostgreSQL $PG_VERSION ---"
+echo "--- 33. Install PostgreSQL $PG_VERSION ---"
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTGRESQL" == 'reinstall' ]]; then
@@ -2600,7 +2636,7 @@ fi
 
 
 echo ""
-echo "--- 31. Install Mosquitto MQTT broker ---"
+echo "--- 34. Install Mosquitto MQTT broker ---"
 if [[ "$INSTALL_MOSQUITTO" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_MOSQUITTO" == 'reinstall' ]]; then
@@ -2624,7 +2660,7 @@ fi
 
 
 echo ""
-echo "--- 32. Install Postfix (relay-only) ---"
+echo "--- 35. Install Postfix (relay-only) ---"
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_POSTFIX" == 'reinstall' ]]; then
@@ -2650,7 +2686,7 @@ fi
 
 
 echo ""
-echo "--- 33. Install Monit ---"
+echo "--- 36. Install Monit ---"
 if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_MONIT" == 'reinstall' ]]; then
         echo "  Uninstall monit"
@@ -2670,7 +2706,7 @@ fi
 
 
 echo ""
-echo "--- 34. Install Webmin ---"
+echo "--- 37. Install Webmin ---"
 if [[ "$INSTALL_WEBMIN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_WEBMIN" == 'reinstall' ]]; then
         echo "  Uninstall webmin"
@@ -2724,7 +2760,7 @@ fi
 
 
 echo ""
-echo "--- 35. Install Grafana ---"
+echo "--- 38. Install Grafana ---"
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_GRAFANA" == 'reinstall' ]]; then
         echo "  Uninstall grafana"
@@ -2767,7 +2803,7 @@ fi
 
 
 echo ""
-echo "--- 36. Install Forgejo ---"
+echo "--- 39. Install Forgejo ---"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FORGEJO" == 'reinstall' ]]; then
         echo "  Uninstall forgejo (deleting folders)"
@@ -2859,7 +2895,7 @@ fi
 FORGEJO_PORT="${FORGEJO_PORT:-3000}"
 
 echo ""
-echo "--- 35. Disable TCP Transmit Offloading ---"
+echo "--- 40. Disable TCP Transmit Offloading ---"
 if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/disable-offload.service ]]; then
@@ -2877,7 +2913,7 @@ else
 fi
 
 echo ""
-echo "--- 38. Install Fail2Ban ---"
+echo "--- 41. Install Fail2Ban ---"
 if [[ "$INSTALL_FAIL2BAN" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_FAIL2BAN" == 'reinstall' ]]; then
         echo "  Uninstall fail2ban"
@@ -2908,7 +2944,7 @@ fi
 
 
 echo ""
-echo "--- 39. Install auditd ---"
+echo "--- 42. Install auditd ---"
 if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_AUDITD" == 'reinstall' ]]; then
         echo "  Uninstall auditd"
@@ -2970,7 +3006,7 @@ fi
 
 
 echo ""
-echo "--- 40. Install ip blocklist (ipset + ipsum) ---"
+echo "--- 43. Install ip blocklist (ipset + ipsum) ---"
 if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_IPBLOCK" == 'reinstall' ]]; then
         echo "  Uninstall ip blocklist"
@@ -3063,7 +3099,7 @@ fi
 
 
 echo ""
-echo "--- 41. Install Suricata IDS ---"
+echo "--- 44. Install Suricata IDS ---"
 if [[ "$INSTALL_SURICATA" =~ ^[Yy]$ ]]; then
     # The idea is that wazuh agent monitors /var/log/suricata/eve.json for attacks and responses are configured and triggered via wazuh manager
 
@@ -3129,10 +3165,10 @@ fi
 
 
 echo ""
-echo "--- 42. Install and configure Wazuh Agent ---"
+echo "--- 45. Install and configure Wazuh Agent ---"
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
 
-    if [[ "$PROMPT_WAZUH" == 'reinstall' ]]; then
+    if [[ "$PROMPT_WAZUHAGENT" == 'reinstall' ]]; then
         echo "  Uninstall wazuh-agent"
         wait_for_apt
         apt-get purge -y wazuh-agent || true
@@ -3173,7 +3209,7 @@ fi
 
 
 echo ""
-echo "--- 43. Configure AppArmor ---"
+echo "--- 46. Configure AppArmor ---"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
 
     # Always ensure utilities and profiles are installed
@@ -3260,7 +3296,7 @@ fi
 
 # Configure modulejail only after all services are running. Otherwise detecting unused modules will be wrong.
 echo ""
-echo "--- 44. Configure Modulejail kernel blocklist ---"
+echo "--- 47. Configure Modulejail kernel blocklist ---"
 if [[ "${CONFIGURE_MODULEJAIL:-}" =~ ^[Yy]$ ]]; then
 
     # Dynamically fetch the latest tag name via the GitHub API
@@ -3318,7 +3354,7 @@ else
 fi
 
 echo ""
-echo "--- 45. Install configuration files ---"
+echo "--- 48. Install configuration files ---"
 
 if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     # Re-detect installed services now that installation is complete.
@@ -3340,7 +3376,8 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
     check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
     check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-    check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUHAGENT
+    check_service_installed wazuh-agent PROMPT_WAZUHAGENT ISINSTALLED_WAZUHAGENT
+    check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
 
 
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
@@ -3770,6 +3807,40 @@ EOF
 
         echo "  Wazuh log monitoring configured."
     fi
+    
+    # Wazuh-Agent self-monitoring adjustment for server running Wazuh-Manager
+    if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ && "$ISINSTALLED_WAZUHAGENT" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
+        if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+            echo "  [Wazuh] Manager detected — adjusting agent for local self-monitoring ..."
+    
+            # Point agent to localhost instead of external manager IP
+            sed -i 's|<address>.*</address>|<address>127.0.0.1</address>|' \
+                /var/ossec/etc/ossec.conf
+    
+            # Add syscheck exclusions and monitors (idempotent)
+            if ! grep -qF 'Exclude noisy Wazuh runtime directories' /var/ossec/etc/ossec.conf; then
+                sed -i '/<\/syscheck>/i \
+        <!-- Exclude noisy Wazuh runtime directories -->\
+        <ignore>/var/ossec/queue</ignore>\
+        <ignore>/var/ossec/logs</ignore>\
+        <ignore>/var/ossec/stats</ignore>\
+        <ignore>/var/ossec/var</ignore>\
+        <ignore>/var/ossec/tmp</ignore>\
+        <!-- Monitor sensitive Wazuh config and binaries -->\
+        <directories check_all="yes" realtime="yes">/var/ossec/etc</directories>\
+        <directories check_all="yes" realtime="yes">/var/ossec/bin</directories>\
+        <directories check_all="yes" realtime="yes">/var/ossec/active-response</directories>' \
+                    /var/ossec/etc/ossec.conf
+                echo "  [+] Wazuh syscheck exclusions and monitors added"
+            else
+                echo "  [=] Wazuh syscheck config already present"
+            fi
+    
+            # Restart agent after config changes (manager must already be running)
+            systemctl restart wazuh-agent || echo "  [!] Warning: wazuh-agent restart failed"
+            echo "  [V] Wazuh agent configured for manager self-monitoring"
+        fi
+    fi    
 
 
     # Restart services to apply new configs
@@ -3784,7 +3855,7 @@ EOF
     [[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
     [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
     [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
-    [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]]      && systemctl restart wazuh-agent     || true
+    [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]] && systemctl restart wazuh-agent     || true
     sleep 2
     echo "  Services restarted"
 
@@ -3795,7 +3866,7 @@ else
 fi
 
 echo ""
-echo "--- 46. Finalise installation ---"
+echo "--- 49. Finalise installation ---"
 
 if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     sysctl --system
@@ -3820,7 +3891,7 @@ fi
 
 
 echo ""
-echo "--- 47. Generating Health Check Script ---"
+echo "--- 50. Generating Health Check Script ---"
 
 if [[ "$CREATE_HEALTHSCRIPT" =~ ^[Yy]$ ]]; then
     HEALTH_CHECK_SCRIPT="/home/$USER_SUDO_USER_USERNAME/ubuntu_health_check.sh"
@@ -4251,7 +4322,7 @@ fi
 
 
 echo ""
-echo "--- 48. Postfix Test ---"
+echo "--- 51. Postfix Test ---"
 
 # HTTP, database, Valkey and Mosquitto tests are in the health check script.
 # Only the Postfix test email runs here since we don't want it firing on every health check.
@@ -4279,7 +4350,7 @@ unset FORGEJO_SMTP_PASSWORD
 
 
 echo ""
-echo "--- 49. Setup Complete ---"
+echo "--- 52. Setup Complete ---"
 
 if [ ${#APT_PACKAGES_NOT_INSTALLED[@]} -ne 0 ]; then
     echo "Failed packages"
