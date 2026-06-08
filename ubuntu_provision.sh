@@ -75,7 +75,7 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
         INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
         INSTALL_MARIADB INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
         INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
-        INSTALL_SURICATA INSTALL_WAZUH CREATE_HEALTHSCRIPT; do
+        INSTALL_SURICATA INSTALL_WAZUHAGENT CREATE_HEALTHSCRIPT; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
     for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
@@ -112,6 +112,7 @@ set -Eeuo pipefail
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
+GREY='\033[0;37m'
 
 # reset color after using one of the colors above
 NC='\033[0m'
@@ -135,7 +136,7 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_)" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|CURRENT_TIMEZONE)" \
         | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
@@ -394,7 +395,8 @@ check_service_installed forgejo PROMPT_FORGEJO ISINSTALLED_FORGEJO
 check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
 check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
 check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUHAGENT
+check_service_installed wazuh-manager PROMPT_WAZUH ISINSTALLED_WAZUHMANAGER
 
 # Detect AppArmor state
 APPARMOR_INSTALLED=n
@@ -601,7 +603,11 @@ fi
 [[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" n $default_val
 
-[[ "$PROMPT_MYSQL" == "install" ]] && default_val="y" || default_val="n"
+if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+    default_val='n'
+else
+    default_val='y'
+fi
 prompt_if_unset INSTALL_MYSQL "Would you like to $PROMPT_MYSQL MySQL? (y/n)" n $default_val
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     # Installing both MySQL and MariaDB is not supported. Disabling MariaDB
@@ -668,7 +674,11 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
     prompt_if_unset MYSQL_READ_RND_BUFFER_KB    "  Read rnd buffer size (KB)"          n "1024"
 fi
 
-[[ "$PROMPT_MARIADB" == "install" ]] && default_val="y" || default_val="n"
+if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+    default_val='n'
+else
+    default_val='y'
+fi
 prompt_if_unset INSTALL_MARIADB "Would you like to $PROMPT_MARIADB MariaDB? (y/n)" n  $default_val
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
@@ -715,7 +725,12 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-[[ "$PROMPT_POSTGRESQL" == "install" ]] && default_val="y" || default_val="n"
+
+if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
+    default_val='n'
+else
+    default_val='y'
+fi
 prompt_if_unset INSTALL_POSTGRESQL "Would you like to $PROMPT_POSTGRESQL PostgreSQL $PG_VERSION? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ ]]; then
     # Interactive password prompt with 4-character minimum
@@ -758,12 +773,31 @@ fi
 [[ "$PROMPT_MOSQUITTO" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_MOSQUITTO "Would you like to $PROMPT_MOSQUITTO Mosquitto? (y/n)" n  $default_val
 
+# POSTFIX
+if [[ "$ISINSTALLED_POSTFIX" == "y" && -f /etc/postfix/main.cf ]]; then
+    # Read existing Postfix config as defaults and so downstream prompts (Monit, Grafana, Forgejo)
+    # can use POSTFIX_DOMAIN and POSTFIX_FROM_ADDRESS for their default From addresses
+    TEMP_POSTFIX_DOMAIN="${POSTFIX_DOMAIN:-$(cat /etc/mailname 2>/dev/null || true)}"
+    TEMP_POSTFIX_FROM_ADDRESS="${POSTFIX_FROM_ADDRESS:-$(awk '{print $2}' /etc/postfix/sender_canonical_maps 2>/dev/null | head -1 || true)}"
+    TEMP_POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-$(grep -oP '^root:\s*\K.*' /etc/aliases 2>/dev/null | head -1 | xargs || true)}"
+    TEMP_POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
+    TEMP_POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
+    echo "  Existing postfix configuration loaded"
+else
+    TEMP_POSTFIX_RELAY_HOST=''
+    TEMP_POSTFIX_RELAY_PORT='587'
+    TEMP_POSTFIX_RELAY_USERNAME=''
+    TEMP_POSTFIX_RELAY_PASSWORD=''
+    TEMP_POSTFIX_DOMAIN=''
+    TEMP_POSTFIX_FROM_ADDRESS=''
+    TEMP_POSTFIX_ROOT_ALIAS=''
+fi
 [[ "$PROMPT_POSTFIX" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_POSTFIX "Would you like to $PROMPT_POSTFIX Postfix (relay-only SMTP)? (y/n)" n  $default_val
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
-    prompt_if_unset POSTFIX_RELAY_HOST      "  SMTP relay host (mailserver address)"     n
-    prompt_if_unset POSTFIX_RELAY_PORT      "  SMTP relay port"                          n "587"
-    prompt_if_unset POSTFIX_RELAY_USERNAME  "  SMTP relay username"                      n
+    prompt_if_unset POSTFIX_RELAY_HOST      "  SMTP relay host (mailserver address)"     n $TEMP_POSTFIX_RELAY_HOST
+    prompt_if_unset POSTFIX_RELAY_PORT      "  SMTP relay port"                          n $TEMP_POSTFIX_RELAY_PORT
+    prompt_if_unset POSTFIX_RELAY_USERNAME  "  SMTP relay username"                      n $TEMP_POSTFIX_RELAY_USERNAME
     while true; do
         prompt_if_unset POSTFIX_RELAY_PASSWORD "  SMTP relay password"                   secret
         if [ "${#POSTFIX_RELAY_PASSWORD}" -ge 4 ]; then
@@ -772,35 +806,29 @@ if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
         POSTFIX_RELAY_PASSWORD=''
         echo "  Password is too short. Must be at least 4 characters."
     done
-    TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
-    if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
-        TEMP_POSTFIX_FROM_ADDRESS="$POSTFIX_RELAY_USERNAME"
-    else
-        TEMP_POSTFIX_FROM_ADDRESS="root@${POSTFIX_DOMAIN}"
-    fi
 
+    if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
+        TEMP_POSTFIX_DOMAIN="${POSTFIX_RELAY_USERNAME#*@}"
+    fi
     prompt_if_unset POSTFIX_DOMAIN          "  Mail domain (used in From address)"       n $TEMP_POSTFIX_DOMAIN
+
+    if [[ -n "$TEMP_POSTFIX_FROM_ADDRESS "]] then
+        if [[ -n "$TEMP_POSTFIX_DOMAIN" ]]; then
+            TEMP_POSTFIX_FROM_ADDRESS="$POSTFIX_RELAY_USERNAME"
+        else
+            TEMP_POSTFIX_FROM_ADDRESS="root@${POSTFIX_DOMAIN}"
+        fi
+    fi
     prompt_if_unset POSTFIX_FROM_ADDRESS    "  From address (e.g. root@domain.com)"      n $TEMP_POSTFIX_FROM_ADDRESS
     prompt_if_unset POSTFIX_ROOT_ALIAS      "  Forward local root mail to (root alias)"  n $POSTFIX_FROM_ADDRESS
 else
-    if [[ "$ISINSTALLED_POSTFIX" == "y" && -f /etc/postfix/main.cf ]]; then
-        # Read existing Postfix config so downstream prompts (Monit, Grafana, Forgejo)
-        # can use POSTFIX_DOMAIN and POSTFIX_FROM_ADDRESS for their default From addresses
-        POSTFIX_DOMAIN="${POSTFIX_DOMAIN:-$(cat /etc/mailname 2>/dev/null || true)}"
-        POSTFIX_FROM_ADDRESS="${POSTFIX_FROM_ADDRESS:-$(awk '{print $2}' /etc/postfix/sender_canonical_maps 2>/dev/null | head -1 || true)}"
-        POSTFIX_ROOT_ALIAS="${POSTFIX_ROOT_ALIAS:-$(grep -oP '^root:\s*\K.*' /etc/aliases 2>/dev/null | head -1 | xargs || true)}"
-        POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
-        POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
-        echo "  Existing postfix configuration loaded"
-    else
-        POSTFIX_RELAY_HOST=''
-        POSTFIX_RELAY_PORT=''
-        POSTFIX_RELAY_USERNAME=''
-        POSTFIX_RELAY_PASSWORD=''
-        POSTFIX_DOMAIN=''
-        POSTFIX_FROM_ADDRESS=''
-        POSTFIX_ROOT_ALIAS=''
-    fi
+    POSTFIX_RELAY_HOST="$TEMP_POSTFIX_RELAY_HOST"
+    POSTFIX_RELAY_PORT="$TEMP_POSTFIX_RELAY_PORT"
+    POSTFIX_RELAY_USERNAME="$TEMP_POSTFIX_RELAY_USERNAME"
+    POSTFIX_RELAY_PASSWORD=''
+    POSTFIX_DOMAIN="$TEMP_POSTFIX_DOMAIN"
+    POSTFIX_FROM_ADDRESS="$TEMP_POSTFIX_FROM_ADDRESS"
+    POSTFIX_ROOT_ALIAS="$TEMP_POSTFIX_FROM_ADDRESS"
 fi
 
 [[ "$PROMPT_MONIT" == "install" ]] && default_val="y" || default_val="n"
@@ -848,8 +876,7 @@ if [[ "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
     prompt_if_unset MONIT_ALERT_RECIPIENT     "  Alert recipient address" n $POSTFIX_ROOT_ALIAS
 fi
 
-[[ "$PROMPT_WEBMIN" == "install" ]] && default_val="y" || default_val="n"
-prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n $default_val
+prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n "n"
 
 [[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
@@ -1001,9 +1028,13 @@ prompt_if_unset INSTALL_IPBLOCK "Would you like to $PROMPT_IPBLOCK IP blocklist?
 [[ "$PROMPT_SURICATA" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata IDS? (y/n)" n  $default_val
 
-[[ "$PROMPT_WAZUH" == "install" ]] && default_val="y" || default_val="n"
-prompt_if_unset INSTALL_WAZUH "Would you like to $PROMPT_WAZUH Wazuh Agent? (y/n)" n  $default_val
-if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
+if [[ "$ISINSTALLED_WAZUHAGENT" == "y" || "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+    default_val='n'
+else
+    default_val='y'
+fi
+prompt_if_unset INSTALL_WAZUHAGENT "Would you like to $PROMPT_WAZUH Wazuh Agent? (y/n)" n  $default_val
+if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
     # Interactive Manager host prompt
     while true; do
         #read -p "  Enter IP or Hostname of Wazuh Manager : " WAZUH_MANAGER
@@ -1222,8 +1253,8 @@ echo "Install Fail2Ban?            : $INSTALL_FAIL2BAN"
 echo "Install auditd?              : $INSTALL_AUDITD"
 echo "Install IP blocklist?        : $INSTALL_IPBLOCK"
 echo "Install Suricata IDS?        : $INSTALL_SURICATA"
-echo "Install Wazuh Agent?         : $INSTALL_WAZUH"
-if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
+echo "Install Wazuh Agent?         : $INSTALL_WAZUHAGENT"
+if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
   echo "  Wazuh Manager              : $WAZUH_MANAGER"
 fi
 echo "Configure AppArmor?          : $CONFIGURE_APPARMOR"
@@ -1789,41 +1820,68 @@ if [[ "${CONFIGURE_CIS_HARDENING:-}" =~ ^[Yy]$ ]]; then
 
     echo ""
     echo "  [CIS] Configuring password quality (pwquality.conf) ..."
+#    cat <<'EOF' > /etc/security/pwquality.conf
+## CIS Level 1 - Password quality requirements
+#minlen = 14
+#dcredit = -1
+#ucredit = -1
+#ocredit = -1
+#lcredit = -1
+#maxrepeat = 3
+#EOF
+
+    echo "    CIS exception: minclass=3, maxrepeat=5 to accommodate passphrase-style"
+    echo "    passwords with repeated separator characters (e.g. hyphens in passphrases)"
     cat <<'EOF' > /etc/security/pwquality.conf
-# CIS Level 1 - Password quality requirements
+# Password quality requirements
+# CIS exception: minclass=3, maxrepeat=5 to accommodate passphrase-style
+# passwords with repeated separator characters (e.g. hyphens in passphrases)
 minlen = 14
-dcredit = -1
-ucredit = -1
-ocredit = -1
-lcredit = -1
-maxrepeat = 3
+minclass = 3
+maxrepeat = 5
+maxsequence = 4
 EOF
 
-    echo ""
-    echo "  [CIS] Configuring pam_pwquality and pam_pwhistory in common-password ..."
-    # Ensure pam_pwquality is active
-    if ! grep -q 'pam_pwquality' /etc/pam.d/common-password; then
-        sed -i '/pam_unix.so/i password        requisite                       pam_pwquality.so retry=3' \
+echo ""
+echo "  [CIS] Configuring pam_pwquality and pam_pwhistory in common-password ..."
+
+    # Idempotent: only modify if our marker isn't already present
+    if ! grep -q '# CIS-MANAGED' /etc/pam.d/common-password; then
+        # Back up original
+        cp /etc/pam.d/common-password /etc/pam.d/common-password.pre-cis
+
+        # Insert ABOVE the existing pam_unix line, in correct order:
+        # pwquality must come first so the token exists for pwhistory and pam_unix
+        sed -i '/pam_unix.so/i \
+password        requisite                       pam_pwquality.so retry=3\
+password        required                        pam_pwhistory.so remember=5 use_authtok' \
             /etc/pam.d/common-password
+
+        # Add use_authtok to pam_unix only once
+        sed -i '/pam_unix.so/ { /use_authtok/! s/$/ use_authtok/ }' /etc/pam.d/common-password
+
+        # Mark as managed
+        echo '# CIS-MANAGED' >> /etc/pam.d/common-password
     fi
-    # Ensure pam_pwhistory is active (remember last 5 passwords)
-    if ! grep -q 'pam_pwhistory' /etc/pam.d/common-password; then
-        sed -i '/pam_unix.so/i password        required                        pam_pwhistory.so remember=5 use_authtok' \
-            /etc/pam.d/common-password
-    fi
-    # Ensure use_authtok is set on pam_unix line
-    sed -i '/pam_unix.so/ s/$/ use_authtok/' /etc/pam.d/common-password
 
     echo ""
     echo "  [CIS] Configuring pam_faillock (account lockout after failed attempts) ..."
-    # Add faillock preauth to common-auth if not already present
-    if ! grep -q 'pam_faillock' /etc/pam.d/common-auth; then
-        sed -i '1s/^/auth        required                        pam_faillock.so preauth silent deny=5 unlock_time=900\n/' \
+    if ! grep -q '# CIS-MANAGED' /etc/pam.d/common-auth; then
+        cp /etc/pam.d/common-auth /etc/pam.d/common-auth.pre-cis
+
+        # Insert authfail and authsucc immediately after the pam_unix line
+        sed -i '/pam_unix.so/a \
+auth        [default=die]                   pam_faillock.so authfail deny=5 unlock_time=900\
+auth        sufficient                      pam_faillock.so authsucc deny=5 unlock_time=900' \
             /etc/pam.d/common-auth
-        echo 'auth        [default=die]                   pam_faillock.so authfail deny=5 unlock_time=900' \
-            >> /etc/pam.d/common-auth
-        echo 'auth        sufficient                      pam_faillock.so authsucc deny=5 unlock_time=900' \
-            >> /etc/pam.d/common-auth
+
+        # Insert preauth before the pam_unix line
+        sed -i '/pam_unix.so/i \
+auth        required                        pam_faillock.so preauth silent deny=5 unlock_time=900' \
+            /etc/pam.d/common-auth
+
+        # Mark as managed
+        echo '# CIS-MANAGED' >> /etc/pam.d/common-auth
     fi
     # Also configure faillock.conf for permanence
     cat <<'EOF' > /etc/security/faillock.conf
@@ -2058,7 +2116,7 @@ EOF
 
     echo ""
     echo "  [CIS] File integrity monitoring (AIDE) ..."
-    if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ || "$ISINSTALLED_WAZUH" == "y" ]]; then
+    if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
         echo "  Wazuh is installed/selected — skipping AIDE. Wazuh FIM provides equivalent"
         echo "  real-time file integrity monitoring via the Wazuh dashboard."
     else
@@ -2343,10 +2401,9 @@ EOS
 
         mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql_root mysql
 
-        # Create a passwordless read-only healthcheck user for the health check script
+        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
         mysql_root <<EOS
 CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
-GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
@@ -2356,6 +2413,19 @@ EOS
     fi
 else
     echo "  Skipping MySQL installation."
+
+    # Check if MySQL is currently running before attempting to connect
+    if systemctl is-active --quiet mysql.service; then
+        echo "  Ensuring healthcheck user exists..."
+
+        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
+        mysql_root <<EOS
+CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
+FLUSH PRIVILEGES;
+EOS
+    else
+        echo "  [!] Warning: MySQL service is not running. Could not verify healthcheck user."
+    fi
 fi
 
 echo ""
@@ -2396,13 +2466,11 @@ EOS
 
         mariadb-tzinfo-to-sql /usr/share/zoneinfo | mysql_root mysql
 
-        # Create a passwordless read-only healthcheck user for the health check script
+        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
         mysql_root <<EOS
 CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
-GRANT SELECT ON *.* TO 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
-
         echo "  MariaDB root password set and security initialized."
 
         # Create MySQL compatibility symlinks for operator convenience.
@@ -2432,6 +2500,19 @@ EOS
     fi
 else
     echo "  Skipping MariaDB installation."
+
+    # Check if MariaDB is currently running before attempting to connect
+    if systemctl is-active --quiet mariadb.service; then
+        echo "  Ensuring healthcheck user exists..."
+
+        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
+        mysql_root <<EOS
+CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
+FLUSH PRIVILEGES;
+EOS
+    else
+        echo "  [!] Warning: MariaDB service is not running. Could not verify healthcheck user."
+    fi
 fi
 
 echo ""
@@ -3037,7 +3118,7 @@ fi
 
 echo ""
 echo "--- 42. Install and configure Wazuh Agent ---"
-if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
 
     if [[ "$PROMPT_WAZUH" == 'reinstall' ]]; then
         echo "  Uninstall wazuh-agent"
@@ -3247,7 +3328,7 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     check_service_installed fail2ban PROMPT_FAIL2BAN ISINSTALLED_FAIL2BAN
     check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
     check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
-    check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUH
+    check_service_installed wazuh-agent PROMPT_WAZUH ISINSTALLED_WAZUHAGENT
 
 
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
@@ -3582,7 +3663,7 @@ EOF
 
 
     # Wazuh Agent log monitoring configuration
-    if [[ "$INSTALL_WAZUH" =~ ^[Yy]$ && "$ISINSTALLED_WAZUH" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
+    if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ && "$ISINSTALLED_WAZUHAGENT" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
         echo "  Configuring Wazuh log monitoring..."
 
         append_localfile_to_ossec() {
@@ -3691,7 +3772,7 @@ EOF
     [[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
     [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
     [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
-    [[ "$ISINSTALLED_WAZUH" == "y" ]]      && systemctl restart wazuh-agent     || true
+    [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]]      && systemctl restart wazuh-agent     || true
     sleep 2
     echo "  Services restarted"
 
@@ -3747,6 +3828,7 @@ fi
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
+GREY='\033[0;37m'
 NC='\033[0m'
 
 # --- Function to check service status ---
@@ -3756,7 +3838,7 @@ check_service_status() {
     local units
     units=$(systemctl list-unit-files "${service}.service" 2>/dev/null) || true
     if ! echo "$units" | grep -q "${service}.service"; then
-        echo -e "$name: ${RED}[NOT INSTALLED]${NC}"
+        echo -e "$name: ${GREY}[NOT INSTALLED]${NC}"
     elif systemctl is-active --quiet "$service" 2>/dev/null; then
         echo -e "$name: ${GREEN}[RUNNING]${NC}"
     elif systemctl is-failed --quiet "$service" 2>/dev/null; then
