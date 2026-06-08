@@ -784,7 +784,7 @@ if [[ "$ISINSTALLED_POSTFIX" == "y" && -f /etc/postfix/main.cf ]]; then
     TEMP_POSTFIX_RELAY_HOST="${POSTFIX_RELAY_HOST:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=\[)[^\]]+' || true)}"
     TEMP_POSTFIX_RELAY_PORT="${POSTFIX_RELAY_PORT:-$(postconf -h relayhost 2>/dev/null | grep -oP '(?<=:)\d+' || true)}"
     TEMP_POSTFIX_RELAY_USERNAME=""
-    echo "  Existing postfix configuration loaded"
+    echo "Existing postfix configuration loaded"
 else
     TEMP_POSTFIX_RELAY_HOST=''
     TEMP_POSTFIX_RELAY_PORT='587'
@@ -880,7 +880,8 @@ fi
 
 prompt_if_unset INSTALL_WEBMIN "Would you like to $PROMPT_WEBMIN Webmin? (y/n)" n "n"
 
-[[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_GRAFANA" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_GRAFANA "Would you like to $PROMPT_GRAFANA Grafana? (y/n)" n  $default_val
 if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
@@ -921,7 +922,8 @@ if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ ]]; then
     fi
 fi
 
-[[ "$PROMPT_FORGEJO" == "install" ]] && default_val="y" || default_val="n"
+#[[ "$PROMPT_FORGEJO" == "install" ]] && default_val="y" || default_val="n"
+default_val="n"
 prompt_if_unset INSTALL_FORGEJO "Would you like to $PROMPT_FORGEJO Forgejo? (y/n)" n  $default_val
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_GRAFANA" =~ ^[Yy]$ || "$ISINSTALLED_GRAFANA" == "y" ]]; then
@@ -2418,13 +2420,14 @@ else
 
     # Check if MySQL is currently running before attempting to connect
     if systemctl is-active --quiet mysql.service; then
-        echo "  Ensuring healthcheck user exists..."
+        echo "  Testing if healthcheck user exists..."
 
-        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
-        mysql_root <<EOS
-CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
-FLUSH PRIVILEGES;
-EOS
+        # Execute the query inside the 'if' condition to protect it from 'set -e'
+        if mysql -u healthcheck -e "SELECT 1" &>/dev/null; then
+            echo "  [+] Success: 'healthcheck' user exists."
+        else
+            echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+        fi
     else
         echo "  [!] Warning: MySQL service is not running. Could not verify healthcheck user."
     fi
@@ -2505,13 +2508,14 @@ else
 
     # Check if MariaDB is currently running before attempting to connect
     if systemctl is-active --quiet mariadb.service; then
-        echo "  Ensuring healthcheck user exists..."
+        echo "  Testing if healthcheck user exists..."
 
-        # Create a passwordless read-only healthcheck user for the health check script. Needs no access to any table.
-        mysql_root <<EOS
-CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
-FLUSH PRIVILEGES;
-EOS
+        # Execute the client query inside the 'if' condition to protect it from 'set -e'
+        if mariadb -u healthcheck -e "SELECT 1" &>/dev/null; then
+            echo "  [+] Success: 'healthcheck' user exists."
+        else
+            echo "  [!] Warning: 'healthcheck' user does not exist or credentials are invalid."
+        fi
     else
         echo "  [!] Warning: MariaDB service is not running. Could not verify healthcheck user."
     fi
