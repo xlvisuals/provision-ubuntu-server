@@ -1099,6 +1099,8 @@ prompt_if_unset CREATE_HEALTHSCRIPT "Would you like to create and run the Health
 echo "Configuration complete."
 
 
+SSH_HARDENED_CONF="/etc/ssh/sshd_config.d/01-$USER_SUDO_USER_USERNAME-hardened.conf"
+
 ## Print Configuration
 ## --------------------------------------------
 echo ""
@@ -1135,6 +1137,7 @@ echo "Update installed packages?   : $UPDATE_PACKAGES"
 echo "Install admin packages?      : $INSTALL_PACKAGES"
 echo "Install ufw?                 : $INSTALL_UFW"
 echo "Install ssh?                 : $INSTALL_SSH"
+echo "  SSH overwrite file         : $SSH_HARDENED_CONF"
 echo "Install fonts?               : $INSTALL_FONTS"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
   echo "  Install MS core fonts?     : $INSTALL_MS_FONTS"
@@ -1584,7 +1587,7 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
         echo "  Hardening ssh..."
         # Override file ensures custom settings take precedence in Ubuntu 26.04.
         # Using <<EOF, not <<'EOF', so that $USER_SUDO_USER_USERNAME is replaced.
-        cat <<EOF > /etc/ssh/sshd_config.d/01-$USER_SUDO_USER_USERNAME-hardened.conf
+        cat <<EOF > $SSH_HARDENED_CONF
 UsePAM yes
 PermitRootLogin no
 ChallengeResponseAuthentication no
@@ -1977,8 +1980,18 @@ EOF
 
     echo ""
     echo "  [CIS] Ensuring system accounts do not have a login shell ..."
-    awk -F: '($3 < 1000 && $1 != "root" && $7 != "/usr/sbin/nologin" && $7 != "/bin/false" && $7 != "/sbin/nologin") {print $1}' \
-        /etc/passwd | while read -r SYS_ACCOUNT; do
+    # Build exclusion list for service accounts that need a shell
+    SHELL_LOCK_EXCLUDE="nobody"
+    [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ || "$ISINSTALLED_FORGEJO" == "y" ]] && SHELL_LOCK_EXCLUDE="$SHELL_LOCK_EXCLUDE|forgejo"
+    # Add other services here as needed e.g:
+    # [[ "$INSTALL_GITLAB" =~ ^[Yy]$ ]] && SHELL_LOCK_EXCLUDE="$SHELL_LOCK_EXCLUDE|git"
+
+    awk -F: -v exclude="$SHELL_LOCK_EXCLUDE" \
+        '($3 < 1000 && $7 != "/usr/sbin/nologin" && $7 != "/bin/false" && $7 != "/sbin/nologin") {
+            split(exclude, ex, "|")
+            for (i in ex) if ($1 == ex[i]) next
+            if ($1 != "root") print $1
+        }' /etc/passwd | while read -r SYS_ACCOUNT; do
         usermod -s /usr/sbin/nologin "$SYS_ACCOUNT" 2>/dev/null \
             && echo "  Locked shell for system account: $SYS_ACCOUNT" || true
     done
@@ -1992,7 +2005,8 @@ EOF
     echo ""
     echo "  [CIS] Creating /etc/cron.allow and /etc/at.allow (restrict to root only) ..."
     echo "root" > /etc/cron.allow
-    chmod 600 /etc/cron.allow
+    [[ -n "$USER_SUDO_USER_USERNAME" ]] && echo "$USER_SUDO_USER_USERNAME" >> /etc/cron.allow
+    chmod 644 /etc/cron.allow
     chown root:root /etc/cron.allow
     echo "root" > /etc/at.allow
     chmod 600 /etc/at.allow
@@ -2006,18 +2020,40 @@ EOF
 
     echo ""
     echo "  [CIS] Hardening SSH server settings ..."
-    # Write additional SSH hardening into its own drop-in file
-    cat <<'EOF' > /etc/ssh/sshd_config.d/02-cis-hardening.conf
-# CIS Level 1 SSH hardening
-LogLevel INFO
-Banner /etc/issue.net
-HostbasedAuthentication no
-PermitUserEnvironment no
-ClientAliveInterval 300
-Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com
-MACs hmac-sha2-256,hmac-sha2-512,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521
-EOF
+    # Write additional SSH hardening into our drop-in file $SSH_HARDENED_CONF
+
+    # Each directive only added if not already present
+    declare -A CIS_SSH_SETTINGS=(
+        [LogLevel]="INFO"
+        [Banner]="/etc/issue.net"
+        [HostbasedAuthentication]="no"
+        [PermitUserEnvironment]="no"
+        [ClientAliveInterval]="300"
+    )
+
+    for KEY in "${!CIS_SSH_SETTINGS[@]}"; do
+        VALUE="${CIS_SSH_SETTINGS[$KEY]}"
+        if grep -qi "^${KEY}" "$CIS_SSH_CONF"; then
+            # Already set by default hardening — skip
+            echo "  [=] Already set: $KEY"
+        else
+            echo "$KEY $VALUE" >> "$CIS_SSH_CONF"
+            echo "  [+] Added: $KEY $VALUE"
+        fi
+    done
+
+    # Ciphers/MACs/KexAlgorithms — always overwrite since CIS is more specific
+    grep -qi "^Ciphers" "$CIS_SSH_CONF" || \
+        echo "Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com" \
+        >> "$CIS_SSH_CONF"
+
+    grep -qi "^MACs" "$CIS_SSH_CONF" || \
+        echo "MACs hmac-sha2-256,hmac-sha2-512,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com" \
+        >> "$CIS_SSH_CONF"
+
+    grep -qi "^KexAlgorithms" "$CIS_SSH_CONF" || \
+        echo "KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521" \
+        >> "$CIS_SSH_CONF"
     # Create SSH warning banner
     cat <<'EOF' > /etc/issue.net
 Authorized access only. All activity may be monitored and reported.
@@ -2157,9 +2193,6 @@ EOF
     if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
         echo "  Wazuh is installed/selected — skipping AIDE. Wazuh FIM provides equivalent"
         echo "  real-time file integrity monitoring via the Wazuh dashboard."
-        # Uninstall AIDE:
-        # sudo apt-get purge -y aide aide-common
-        # sudo rm -rf /var/lib/aide /etc/aide /etc/aide.conf etc/cron.daily/aide-check /var/log/aide
     else
         wait_for_apt
         if apt_install aide aide-common; then
@@ -2183,6 +2216,10 @@ EOF
 EOF
             chmod 700 /etc/cron.daily/aide-check
             chown root:root /etc/cron.daily/aide-check
+
+            echo  "  AIDE installed. To uninstall AIDE, run:"
+            echo  "    sudo apt-get purge -y aide aide-common"
+            echo  "    sudo rm -rf /var/lib/aide /etc/aide /etc/aide.conf /etc/cron.daily/aide-check /var/log/aide"
         else
             echo "  [!] AIDE installation failed — skipping"
         fi
