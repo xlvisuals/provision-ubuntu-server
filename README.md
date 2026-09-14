@@ -145,7 +145,7 @@ Or without git and unzip, e.g. on a fresh minimized Ubuntu Server installation:
 ```
 wget https://github.com/xlvisuals/provision-ubuntu-server/archive/refs/heads/main.zip -O provision-ubuntu-server.zip
 python3 -c "import zipfile; zipfile.ZipFile('provision-ubuntu-server.zip').extractall('.')"
-cd provision-ubuntu-server
+cd provision-ubuntu-server-main
 ```
 
 Then run ubuntu_provision.sh 

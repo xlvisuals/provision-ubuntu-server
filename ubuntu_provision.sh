@@ -192,10 +192,14 @@ on_ctrl_c() {
 
     if [[ "${USER_SUDO_USER_USERNAME:-}" ]]; then
         config_debug_file="provision_aborted.conf"
-        echo ""
-        echo "  [!] Aborting."
+        echo "  [!] Aborted by user."
         save_config "$config_debug_file"
-        echo "  Run 'sudo bash ubuntu_provision.sh $config_debug_file' if you want to continue with these settings."
+        echo "  Configuration saved to: $(pwd)/$config_debug_file"
+        echo "  To resume with these settings:"
+        echo "    sudo bash ubuntu_provision.sh $config_debug_file"
+        echo ""
+    else
+        echo "  [!] Aborted by user (no configuration saved — script was interrupted before any settings were entered)."
         echo ""
     fi
     exit 0
@@ -276,19 +280,20 @@ prompt_if_unset() {
     if [[ -z "${!varname-}" ]]; then
         if [[ "$silent" == "secret" ]]; then
             while true; do
-                read -rsp "$prompt : " "$varname"; echo ""
+                read -rsp "$prompt : " "$varname" || { echo ""; on_ctrl_c; }
+                echo ""
                 [[ -n "${!varname}" ]] && break
                 echo "  Value cannot be empty."
             done
         else
             if [[ -n "$default" ]]; then
-                read -rp "$prompt [$default]: " "$varname"
+                read -rp "$prompt [$default]: " "$varname" || { echo ""; on_ctrl_c; }
                 if [[ -z "${!varname}" ]]; then
                     printf -v "$varname" '%s' "$default"
                 fi
             else
                 while true; do
-                    read -rp "$prompt : " "$varname"
+                    read -rp "$prompt : " "$varname" || { echo ""; on_ctrl_c; }
                     [[ -n "${!varname}" ]] && break
                     echo "  Value cannot be empty."
                 done
