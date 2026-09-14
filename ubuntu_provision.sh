@@ -1611,7 +1611,12 @@ if [[ "$INSTALL_UFW" =~ ^[Yy]$ ]]; then
             ufw allow 443/tcp
         fi
         ufw --force enable
-        sed -i 's/#& stop/\& stop/' /etc/rsyslog.d/20-ufw.conf
+        # Copy and configure the rsyslog UFW log filter
+        if [[ -f "$CONFIG_DIR/etc/rsyslog.d/20-ufw.conf" ]]; then
+            mkdir -p /etc/rsyslog.d
+            cp "$CONFIG_DIR/etc/rsyslog.d/20-ufw.conf" /etc/rsyslog.d/20-ufw.conf
+            sed -i 's/#& stop/\& stop/' /etc/rsyslog.d/20-ufw.conf
+        fi
         systemctl restart rsyslog || true
     else
         echo "  [!] Firewall installation failed — skipping configuration"
@@ -3093,9 +3098,13 @@ if [[ "$INSTALL_AUDITD" =~ ^[Yy]$ ]]; then
 
         # FIX: Comment out rules for users that don't exist on this system
         # This prevents the "Unknown user" errors from breaking the rule load
-        sed -i 's/^-a always,exit -F arch=b64 -S connect -F auid>=1000 -F auid!=4294967295 -F key=export/#&/' /etc/audit/rules.d/audit.rules
-        sed -i '/-u chrony/s/^/#/' /etc/audit/rules.d/audit.rules
-        sed -i '/-u ntp/s/^/#/' /etc/audit/rules.d/audit.rules
+        if [[ -f /etc/audit/rules.d/audit.rules ]]; then
+            sed -i 's/^-a always,exit -F arch=b64 -S connect -F auid>=1000 -F auid!=4294967295 -F key=export/#&/' /etc/audit/rules.d/audit.rules
+            sed -i '/-u chrony/s/^/#/' /etc/audit/rules.d/audit.rules
+            sed -i '/-u ntp/s/^/#/' /etc/audit/rules.d/audit.rules
+        else
+            echo "  [!] Warning: audit.rules download failed — skipping rule customisation"
+        fi
 
         # increase the backlog limit
         echo "-b 8192" > /etc/audit/rules.d/00-backlog.conf
@@ -3175,8 +3184,8 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
     wait_for_apt
     if apt_install ipset; then
 
-        # Backup the original ufw after.init if not already backed up
-        if [ ! -f /etc/ufw/after.init.orig ]; then
+        # Backup the original ufw after.init if it exists and not already backed up
+        if [ -f /etc/ufw/after.init ] && [ ! -f /etc/ufw/after.init.orig ]; then
             echo "  Backing up the original ufw after.init to /etc/ufw/after.init.orig"
             cp /etc/ufw/after.init /etc/ufw/after.init.orig
         fi
