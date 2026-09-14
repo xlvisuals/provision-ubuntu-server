@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Axel Busch
-# 08 June 2026
+# 15 September 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -18,7 +18,7 @@
 #   - Mail:         Postfix (relay-only; Monit, Grafana, Forgejo can route through it)
 #   - Management:   Monit, Grafana, Forgejo, Webmin (not recommended; see README)
 #   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
-#   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist
+#   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist
 #   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils,
 #                   nmap, lynis, git, git-lfs, jq, smartmontools (bare metal only)
 #
@@ -36,8 +36,8 @@
 
 PG_VERSION=18
 PYPY_FALLBACK_VERSION=pypy3.11-v7.3.23
-FORGEJO_FALLBACK_VERSION=15.0.2
-MODULEJAIL_FALLBACK_VERSION=1.4.0
+FORGEJO_FALLBACK_VERSION=16.0.4
+MODULEJAIL_FALLBACK_VERSION=1.6.1
 FORGEJO_FALLBACK_PORT=3030
 
 
@@ -1055,14 +1055,24 @@ prompt_if_unset INSTALL_WAZUHAGENT "Would you like to $PROMPT_WAZUHAGENT Wazuh A
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
     # Interactive Manager host prompt
     while true; do
-        #read -p "  Enter IP or Hostname of Wazuh Manager : " WAZUH_MANAGER
         prompt_if_unset WAZUH_MANAGER "  Enter IP or Hostname of Wazuh Manager" n
         if [[ ${#WAZUH_MANAGER} -ge 4 ]]; then
             break
         fi
     done
+
+    # Fetch latest available version from Wazuh API to use as default
+    WAZUH_LATEST=$(curl -sSL --max-time 10 \
+        "https://api.github.com/repos/wazuh/wazuh/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | grep -oP '[\d.]+' | head -1) || true
+    WAZUH_LATEST="${WAZUH_LATEST:-4.12.0}"
+    # Prompt for version — defaulting to latest so it can be pinned to match the manager
+    prompt_if_unset WAZUH_AGENT_VERSION \
+        "  Wazuh Agent version to install (must be <= manager version, latest: $WAZUH_LATEST)" \
+        n "$WAZUH_LATEST"
 else
     WAZUH_MANAGER=''
+    WAZUH_AGENT_VERSION=''
 fi
 
 prompt_if_unset CONFIGURE_APPARMOR "Would you like to configure AppArmor? (y/n)" n "n"
@@ -1278,6 +1288,7 @@ echo "Install Suricata IDS?        : $INSTALL_SURICATA"
 echo "Install Wazuh Agent?         : $INSTALL_WAZUHAGENT"
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
   echo "  Wazuh Manager              : $WAZUH_MANAGER"
+  echo "  Wazuh Agent version        : $WAZUH_AGENT_VERSION"
 fi
 echo "Configure AppArmor?          : $CONFIGURE_APPARMOR"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
@@ -1515,7 +1526,7 @@ echo "--- 9. Install recommended tools ---"
 if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install apt-file apt-show-versions apt-utils arping btop ca-certificates curl debsums dnsutils \
-          git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof lynis mc micro mtr nano ncdu ne \
+          git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof mc micro mtr nano ncdu ne \
           needrestart net-tools nethogs nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute tree \
           unattended-upgrades unzip vim vim-gui-common wget zip
     apt-file update
@@ -1528,6 +1539,45 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     fi
 else
     echo "  Skipping tools installation."
+fi
+
+
+echo ""
+echo "--- 9b. Install Lynis (security auditing tool) ---"
+# Install from CISOfy repo to get the current release.
+# The Ubuntu universe package lags significantly (e.g. 3.0.9 from 2023 vs 3.1.x current).
+if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
+    LYNIS_KEY="/etc/apt/keyrings/cisofy-lynis.gpg"
+    LYNIS_LIST="/etc/apt/sources.list.d/cisofy-lynis.list"
+
+    mkdir -p /etc/apt/keyrings
+    rm -f "$LYNIS_KEY" 2>/dev/null || true
+
+    curl -fsSL https://packages.cisofy.com/keys/cisofy-software-public.key \
+        | gpg --dearmor -o "$LYNIS_KEY" || true
+
+    if [[ -f "$LYNIS_KEY" && -s "$LYNIS_KEY" ]]; then
+        echo "deb [signed-by=$LYNIS_KEY] https://packages.cisofy.com/community/lynis/deb/ stable main" \
+            > "$LYNIS_LIST"
+        apt-get update -qq
+        if apt_install lynis; then
+            echo "  [V] Lynis installed: $(lynis show version 2>/dev/null || echo 'version unknown')"
+            echo ""
+            echo "  To run a security audit:"
+            echo "    sudo lynis audit system"
+            echo ""
+            echo "  To run in CIS benchmark mode:"
+            echo "    sudo lynis audit system --profile /etc/lynis/default.prf"
+            echo ""
+            echo "  Reports are saved to /var/log/lynis.log and /var/log/lynis-report.dat"
+        else
+            echo "  [!] Lynis installation from CISOfy repo failed — skipping"
+        fi
+    else
+        echo "  [!] Could not download CISOfy GPG key — skipping Lynis installation"
+    fi
+else
+    echo "  Skipping Lynis installation."
 fi
 
 
@@ -1585,8 +1635,12 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
         fi
 
         echo "  Hardening ssh..."
+        # Build AllowUsers value before the heredoc for clarity
+        SSH_ALLOW_USERS="$USER_SUDO_USER_USERNAME"
+        [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ || "$ISINSTALLED_FORGEJO" == "y" ]] && SSH_ALLOW_USERS="$SSH_ALLOW_USERS forgejo"
+
         # Override file ensures custom settings take precedence in Ubuntu 26.04.
-        # Using <<EOF, not <<'EOF', so that $USER_SUDO_USER_USERNAME is replaced.
+        # Using <<EOF, not <<'EOF', so that variables are expanded.
         cat <<EOF > $SSH_HARDENED_CONF
 UsePAM yes
 PermitRootLogin no
@@ -1597,7 +1651,7 @@ MaxStartups 3:50:10
 LoginGraceTime 10
 MaxAuthTries 3
 PubkeyAuthentication yes
-AllowUsers $USER_SUDO_USER_USERNAME
+AllowUsers $SSH_ALLOW_USERS
 ClientAliveCountMax 2
 MaxSessions 2
 AllowTcpForwarding yes
@@ -2009,7 +2063,8 @@ EOF
     chmod 644 /etc/cron.allow
     chown root:root /etc/cron.allow
     echo "root" > /etc/at.allow
-    chmod 600 /etc/at.allow
+    [[ -n "$USER_SUDO_USER_USERNAME" ]] && echo "$USER_SUDO_USER_USERNAME" >> /etc/at.allow
+    chmod 644 /etc/at.allow
     chown root:root /etc/at.allow
     rm -f /etc/cron.deny /etc/at.deny 2>/dev/null || true
 
@@ -2020,7 +2075,10 @@ EOF
 
     echo ""
     echo "  [CIS] Hardening SSH server settings ..."
-    # Write additional SSH hardening into our drop-in file $SSH_HARDENED_CONF
+    # Append CIS-specific settings to the existing hardened conf (SSH_HARDENED_CONF).
+    # One file on disk avoids first-match-wins precedence issues with multiple drop-ins.
+    # Remove any legacy 02-cis-hardening.conf left by older runs.
+    rm -f /etc/ssh/sshd_config.d/02-cis-hardening.conf
 
     # Each directive only added if not already present
     declare -A CIS_SSH_SETTINGS=(
@@ -2033,27 +2091,38 @@ EOF
 
     for KEY in "${!CIS_SSH_SETTINGS[@]}"; do
         VALUE="${CIS_SSH_SETTINGS[$KEY]}"
-        if grep -qi "^${KEY}" "$CIS_SSH_CONF"; then
+        if grep -qi "^${KEY}" "$SSH_HARDENED_CONF"; then
             # Already set by default hardening — skip
             echo "  [=] Already set: $KEY"
         else
-            echo "$KEY $VALUE" >> "$CIS_SSH_CONF"
+            echo "$KEY $VALUE" >> "$SSH_HARDENED_CONF"
             echo "  [+] Added: $KEY $VALUE"
         fi
     done
 
-    # Ciphers/MACs/KexAlgorithms — always overwrite since CIS is more specific
-    grep -qi "^Ciphers" "$CIS_SSH_CONF" || \
+    # Ciphers/MACs/KexAlgorithms — only added if not already present
+    grep -qi "^Ciphers" "$SSH_HARDENED_CONF" || \
         echo "Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com" \
-        >> "$CIS_SSH_CONF"
+        >> "$SSH_HARDENED_CONF"
 
-    grep -qi "^MACs" "$CIS_SSH_CONF" || \
+    grep -qi "^MACs" "$SSH_HARDENED_CONF" || \
         echo "MACs hmac-sha2-256,hmac-sha2-512,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com" \
-        >> "$CIS_SSH_CONF"
+        >> "$SSH_HARDENED_CONF"
 
-    grep -qi "^KexAlgorithms" "$CIS_SSH_CONF" || \
+    grep -qi "^KexAlgorithms" "$SSH_HARDENED_CONF" || \
         echo "KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521" \
-        >> "$CIS_SSH_CONF"
+        >> "$SSH_HARDENED_CONF"
+
+    # Suppress SSH banner for Forgejo git user — banner text corrupts the git protocol
+    if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ || "$ISINSTALLED_FORGEJO" == "y" ]]; then
+        if ! grep -q 'Match User forgejo' "$SSH_HARDENED_CONF"; then
+            printf '\nMatch User forgejo\n    Banner none\n' >> "$SSH_HARDENED_CONF"
+            echo "  [+] Added Banner none for forgejo user"
+        else
+            echo "  [=] Banner none for forgejo already present"
+        fi
+    fi
+
     # Create SSH warning banner
     cat <<'EOF' > /etc/issue.net
 Authorized access only. All activity may be monitored and reported.
@@ -2190,7 +2259,8 @@ EOF
 
     echo ""
     echo "  [CIS] File integrity monitoring (AIDE) ..."
-    if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
+    if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHAGENT" == "y" || \
+          "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ || "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
         echo "  Wazuh is installed/selected — skipping AIDE. Wazuh FIM provides equivalent"
         echo "  real-time file integrity monitoring via the Wazuh dashboard."
     else
@@ -3227,7 +3297,14 @@ if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
             apt-get update
 
             wait_for_apt
-            if apt_install wazuh-agent; then
+            # Install specific version so the agent never runs ahead of the manager
+            WAZUH_PKG="wazuh-agent=${WAZUH_AGENT_VERSION}-1"
+            if apt_install "$WAZUH_PKG"; then
+                # Pin the version — agent must not auto-upgrade past the manager
+                apt-mark hold wazuh-agent
+                echo "  [V] wazuh-agent pinned at $WAZUH_AGENT_VERSION"
+                echo "  To upgrade: ensure manager is upgraded first, then:"
+                echo "    sudo apt-mark unhold wazuh-agent && sudo apt-get install wazuh-agent=<version>-1 && sudo apt-mark hold wazuh-agent"
                 # Configure Manager Address
                 sed -i "s/<address>MANAGER_IP<\/address>/<address>$WAZUH_MANAGER<\/address>/" /var/ossec/etc/ossec.conf
                 systemctl enable --now wazuh-agent.service || echo "Warning: service failed to start"

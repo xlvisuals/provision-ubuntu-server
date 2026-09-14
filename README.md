@@ -641,6 +641,203 @@ sudo ~/ubuntu_health_check.sh
 - **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy 3.11 release is fetched dynamically at install time, with a hardcoded fallback version if the fetch fails.
 - **Webmin:** installed via the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
 
+## CIS Level 1 Hardening
+
+Enable with `CONFIGURE_CIS_HARDENING=y`. All controls are applied idempotently — safe to re-run.
+
+### What is applied
+
+| Area | Control |
+|---|---|
+| Packages | Removes `ftp`, `telnet`, `tnftp` |
+| PAM passwords | `pam_pwquality`: min 14 chars, 3 character classes, max 5 consecutive identical chars |
+| PAM history | `pam_pwhistory`: remembers last 5 passwords |
+| PAM lockout | `pam_faillock`: locks account after 5 failed attempts, unlocks after 15 minutes |
+| Password ageing | Max 365 days, min 1 day, warn at 14 days — applied to all non-system accounts |
+| Inactivity lock | Account locked 30 days after password expiry |
+| Umask | `027` set in `login.defs`, `/etc/profile`, `/etc/bash.bashrc` |
+| su restriction | `pam_wheel` restricts `su` to members of the `wheel` group |
+| System accounts | All system accounts (UID < 1000) set to `/usr/sbin/nologin`, except `root` and service accounts that legitimately need a shell (e.g. `forgejo`) |
+| Cron/at | Directories set to `700`, `crontab` to `600`. `/etc/cron.allow` and `/etc/at.allow` restrict scheduling to `root` and the sudo user |
+| SSH | `LogLevel INFO`, warning banner, no host-based auth, no user environment, `ClientAliveInterval 300`. CIS cipher suite, MACs, and key exchange algorithms enforced |
+| Sudo logging | `Defaults logfile="/var/log/sudo.log"` (skipped on Ubuntu 26.04 which uses `sudo-rs` and logs to journald) |
+| Core dumps | Disabled via PAM limits, sysctl (`fs.suid_dumpable=0`), and systemd coredump config |
+| sysctl | ASLR, TCP SYN cookies, martian packet logging, ICMP redirect hardening, IPv6 RA disabled |
+| Kernel modules | `cramfs`, `freevxfs`, `hfs`, `hfsplus`, `jffs2`, `udf`, `usb-storage` blacklisted |
+| /dev/shm | Mounted with `nodev,nosuid,noexec` |
+| Journald | Forwarded to rsyslog |
+| NTP | Configured via `systemd-timesyncd` using Ubuntu pool servers |
+| Session timeout | `TMOUT=900` (15 minutes) set readonly in `/etc/profile.d/cis-timeout.conf` |
+| File integrity | AIDE installed and initialised unless Wazuh is present (Wazuh FIM used instead) |
+| Postfix | `inet_interfaces = loopback-only` if Postfix is installed |
+| Password expiry alert | Monit check alerts at 30, 20, 10, and 5 days remaining (requires Monit and a sudo user) |
+| Apport | Disabled and masked |
+
+### CIS exceptions
+
+Two intentional deviations from strict CIS Level 1:
+
+- **Password complexity:** CIS requires all 4 character classes (`dcredit`, `ucredit`, `ocredit`, `lcredit = -1`). This script uses `minclass = 3` instead, in line with NIST SP 800-63B guidance that length matters more than forced complexity. The 14-character minimum is preserved.
+- **`maxrepeat`:** set to `5` rather than the CIS default of `3`, to accommodate passphrase-style passwords with separator characters (e.g. `correct-horse-battery-staple`) which would otherwise be rejected due to repeated hyphens.
+
+### PAM recovery
+
+If PAM is misconfigured and authentication breaks, the fastest recovery is:
+
+```bash
+# From a root console (cloud provider web console / IPMI)
+pam-auth-update --force
+faillock --user YOUR_USERNAME --reset
+passwd YOUR_USERNAME
+```
+
+See `howto/howto-pam-recovery.md` for full recovery procedures including GRUB single-user mode and chroot from a rescue image.
+
+---
+
+## Security Auditing with Lynis
+
+Lynis is installed from the [CISOfy repository](https://packages.cisofy.com) to ensure the current release is used. The Ubuntu universe package lags significantly behind.
+
+### Running an audit
+
+```bash
+# Full system audit
+sudo lynis audit system
+
+# Show the hardening index score
+sudo lynis audit system | grep "Hardening index"
+
+# Audit only a specific category
+sudo lynis audit system --tests-category authentication
+sudo lynis audit system --tests-category networking
+sudo lynis audit system --tests-category storage
+```
+
+### Reports and logs
+
+| File | Contents |
+|---|---|
+| `/var/log/lynis.log` | Full detailed audit log |
+| `/var/log/lynis-report.dat` | Machine-readable report (key=value format) |
+
+### Interpreting results
+
+Lynis produces **Suggestions** and **Warnings**:
+
+- **Warnings** (marked `[WARNING]`) are higher priority — address these first.
+- **Suggestions** (marked `[suggestion]`) are improvements but not necessarily failures.
+- The **Hardening Index** (0–100) gives an overall score. A freshly CIS-hardened server typically scores 75–85. Getting above 90 requires additional manual controls beyond what this script applies.
+
+### Common findings after CIS hardening
+
+Some Lynis findings are intentional and can be acknowledged:
+
+| Finding | Reason acceptable |
+|---|---|
+| `AUTH-9282` — password complexity | Intentional exception — `minclass=3` chosen over strict 4-class requirement |
+| `KRNL-5820` — kernel update available | Ubuntu kernel updates are handled by `unattended-upgrades` |
+| `FIRE-4513` — no outbound firewall rules | UFW outbound is open by design; restrict further if your threat model requires it |
+| `MAIL-8818` — Postfix listening | Only on loopback (`inet_interfaces = loopback-only`) — this is correct |
+
+### Keeping Lynis current
+
+Lynis is installed from the CISOfy apt repo, so it updates with normal system updates:
+
+```bash
+sudo apt-get update && sudo apt-get upgrade lynis
+lynis show version
+```
+
+---
+
+## Upgrading
+
+### Automatic updates via apt
+
+The following are installed from apt repositories and update automatically with `sudo apt-get update && sudo apt-get upgrade` (or via `unattended-upgrades` if enabled):
+
+| Package | Repository |
+|---|---|
+| Ubuntu system packages (nginx, postfix, mysql, mariadb, postgresql, valkey, suricata, fail2ban, auditd, monit, etc.) | Ubuntu / Ubuntu PPA |
+| PostgreSQL | [apt.postgresql.org](https://apt.postgresql.org) |
+| Grafana | [apt.grafana.com](https://apt.grafana.com) |
+| Lynis | [packages.cisofy.com](https://packages.cisofy.com) |
+| Webmin | Webmin apt repo (configured by `webmin-setup-repo.sh`) |
+| Python 3.14 | deadsnakes PPA (`ppa:deadsnakes/ppa`) |
+
+### Manual updates
+
+The following require manual upgrade steps. Check for new releases and follow the instructions below.
+
+#### Wazuh Agent
+
+The Wazuh Agent version must never exceed the manager version, or the agent may fail to connect or drop events silently.
+Wazuh Agent is installed from the Wazuh apt repo but is **pinned with `apt-mark hold`** to prevent it auto-upgrading.
+
+**Always upgrade the Wazuh Manager first, then upgrade agents to match.**
+
+There is no way to query the manager version from the agent host — check it on the manager server before running the upgrade:
+
+```bash
+# On the manager server
+/var/ossec/bin/wazuh-control info | grep VERSION
+```
+
+Then run the upgrade script on each agent:
+
+```bash
+# Prompts for the target version
+sudo ./utils/upgrade_wazuh_agent.sh
+
+# Or pass the version directly
+sudo ./utils/upgrade_wazuh_agent.sh 4.14.7
+```
+
+The script unholds the package, installs the specified version, re-pins with `apt-mark hold`, restarts the service, and verifies the result.
+
+#### Forgejo
+
+Forgejo is downloaded directly from [Codeberg](https://codeberg.org/forgejo/forgejo/releases). The script fetches the latest release at install time and falls back to `FORGEJO_FALLBACK_VERSION` if the API is unreachable.
+
+Use the upgrade script in `utils/`:
+
+```bash
+# Upgrade to latest
+sudo ./utils/upgrade_forgejo.sh
+
+# Or pin to a specific version
+sudo ./utils/upgrade_forgejo.sh 16.0.4
+```
+
+The script fetches the latest release from the Codeberg API, backs up the database (sqlite3, MySQL, or PostgreSQL — detected automatically from `/etc/forgejo/app.ini`), stops the service, replaces the binary, and restarts. Backups are written to `/var/backups/forgejo/`.
+
+#### PyPy 3.11
+
+PyPy is downloaded from [downloads.python.org/pypy](https://downloads.python.org/pypy) and installed to `/opt/`. The symlinks `/usr/local/bin/pypy3`, `pypy3.11`, and `pypy` point to the active version. Old versions in `/opt/` are left in place and must be removed manually.
+
+```bash
+# Upgrade to latest
+sudo ./utils/upgrade_pypy.sh
+
+# Or pin to a specific version
+sudo ./utils/upgrade_pypy.sh pypy3.11-v7.3.23
+```
+
+#### Modulejail
+
+Modulejail is a one-shot script that blacklists unused kernel modules by writing `/etc/modprobe.d/modulejail-blacklist.conf`. It does not run as a service. Re-run it after adding new services to pick up any newly loaded modules. A reboot is required for blacklist changes to take effect.
+
+```bash
+# Re-run at latest version
+sudo ./utils/upgrade_modulejail.sh
+
+# Or use a specific version
+sudo ./utils/upgrade_modulejail.sh 1.6.1
+```
+
+The script preserves the whitelist at `/etc/modulejail/whitelist.conf` and backs up the existing blacklist before regenerating it.
+
 ---
 
 ## Limitations
