@@ -75,7 +75,8 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
         INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
         INSTALL_MARIADB INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
         INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
-        INSTALL_SURICATA INSTALL_WAZUHAGENT CREATE_HEALTHSCRIPT; do
+        INSTALL_SURICATA INSTALL_WAZUHAGENT INSTALL_WAZUHMANAGER \
+        INSTALL_MS_FONTS INSTALL_LIBERATION_FONTS INSTALL_FREEFONT_FONTS CREATE_HEALTHSCRIPT; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
     for var in CONFIGURE_LVM CONFIGURE_SWAP CONFIGURE_APPARMOR TUNE_SYSTEM \
@@ -85,6 +86,14 @@ if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
 fi
+
+# Unconditional fallbacks for variables that are only prompted conditionally
+# and may never be set if their parent option is skipped.
+# These must be set before set -Eeuo pipefail to avoid unbound variable errors.
+: "${INSTALL_WAZUHMANAGER:=n}"
+: "${INSTALL_MS_FONTS:=n}"
+: "${INSTALL_LIBERATION_FONTS:=y}"
+: "${INSTALL_FREEFONT_FONTS:=y}"
 
 # change into current directory
 cd "$(dirname "$(readlink -f "$0")")" || exit
@@ -280,20 +289,19 @@ prompt_if_unset() {
     if [[ -z "${!varname-}" ]]; then
         if [[ "$silent" == "secret" ]]; then
             while true; do
-                read -rsp "$prompt : " "$varname" || { echo ""; on_ctrl_c; }
-                echo ""
+                read -rsp "$prompt : " "$varname"; echo ""
                 [[ -n "${!varname}" ]] && break
                 echo "  Value cannot be empty."
             done
         else
             if [[ -n "$default" ]]; then
-                read -rp "$prompt [$default]: " "$varname" || { echo ""; on_ctrl_c; }
+                read -rp "$prompt [$default]: " "$varname"
                 if [[ -z "${!varname}" ]]; then
                     printf -v "$varname" '%s' "$default"
                 fi
             else
                 while true; do
-                    read -rp "$prompt : " "$varname" || { echo ""; on_ctrl_c; }
+                    read -rp "$prompt : " "$varname"
                     [[ -n "${!varname}" ]] && break
                     echo "  Value cannot be empty."
                 done
@@ -565,7 +573,9 @@ prompt_if_unset INSTALL_SSH "Would you like to configure ssh? (y/n)" n "n"
 
 prompt_if_unset INSTALL_FONTS "Would you like to install fonts? (y/n)" n "n"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
-    prompt_if_unset INSTALL_MS_FONTS "   Install Microsoft core fonts? (y/n)" n "n"
+    prompt_if_unset INSTALL_LIBERATION_FONTS "   Install Liberation fonts? (y/n)" n "y"
+    prompt_if_unset INSTALL_FREEFONT_FONTS   "   Install GNU Freefont fonts? (y/n)" n "y"
+    prompt_if_unset INSTALL_MS_FONTS         "   Install Microsoft core fonts? (y/n)" n "n"
 fi
 
 [[ "$PROMPT_WEASYPRINT" == "install" ]] && default_val="y" || default_val="n"
@@ -1155,6 +1165,8 @@ echo "Install ssh?                 : $INSTALL_SSH"
 echo "  SSH overwrite file         : $SSH_HARDENED_CONF"
 echo "Install fonts?               : $INSTALL_FONTS"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
+  echo "  Install Liberation fonts?  : $INSTALL_LIBERATION_FONTS"
+  echo "  Install Freefont fonts?    : $INSTALL_FREEFONT_FONTS"
   echo "  Install MS core fonts?     : $INSTALL_MS_FONTS"
 fi
 echo "Install weasyprint?          : $INSTALL_WEASYPRINT"
@@ -2339,13 +2351,20 @@ echo "--- 24. Install fonts ---"
 if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
     # install fonts
     wait_for_apt
-    if apt_install fonts-liberation fonts-freefont-ttf; then
-        echo "  Installed Liberation and Freefont fonts."
-    fi;
+    if [[ "$INSTALL_LIBERATION_FONTS" =~ ^[Yy]$ ]]; then
+        if apt_install fonts-liberation; then
+            echo "  Installed Liberation fonts."
+        fi
+    fi
+    if [[ "$INSTALL_FREEFONT_FONTS" =~ ^[Yy]$ ]]; then
+        if apt_install fonts-freefont-ttf; then
+            echo "  Installed GNU Freefont fonts."
+        fi
+    fi
     if [[ "$INSTALL_MS_FONTS" =~ ^[Yy]$ ]]; then
         echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
         if apt_install ttf-mscorefonts-installer; then
-            echo "  Installed Microsoft fonts."
+            echo "  Installed Microsoft core fonts."
         fi
     fi
     fc-cache -f -v
