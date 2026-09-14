@@ -742,10 +742,10 @@ Some Lynis findings are intentional and can be acknowledged:
 
 ### Keeping Lynis current
 
-Lynis is installed from the CISOfy apt repo, so it updates with normal system updates:
+Lynis is installed via direct `.deb` download rather than an apt repo. Use the upgrade script:
 
 ```bash
-sudo apt-get update && sudo apt-get upgrade lynis
+sudo ./utils/upgrade_lynis.sh
 lynis show version
 ```
 
