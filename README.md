@@ -762,7 +762,6 @@ The following are installed from apt repositories and update automatically with 
 | Ubuntu system packages (nginx, postfix, mysql, mariadb, postgresql, valkey, suricata, fail2ban, auditd, monit, etc.) | Ubuntu / Ubuntu PPA |
 | PostgreSQL | [apt.postgresql.org](https://apt.postgresql.org) |
 | Grafana | [apt.grafana.com](https://apt.grafana.com) |
-| Lynis | [packages.cisofy.com](https://packages.cisofy.com) |
 | Webmin | Webmin apt repo (configured by `webmin-setup-repo.sh`) |
 | Python 3.14 | deadsnakes PPA (`ppa:deadsnakes/ppa`) |
 
@@ -795,6 +794,20 @@ sudo ./utils/upgrade_wazuh_agent.sh 4.14.7
 ```
 
 The script unholds the package, installs the specified version, re-pins with `apt-mark hold`, restarts the service, and verifies the result.
+
+#### Lynis
+
+Lynis is installed by downloading the `.deb` directly from CISOfy rather than adding their apt repo. The CISOfy repo requires a GPG key that can fail to download or validate, which would cause every subsequent `apt-get update` call in the script — including those triggered internally by Grafana, PostgreSQL, and other package installs — to fail with a signature error and abort the run. Downloading the `.deb` directly avoids registering anything in `sources.list.d` and keeps Lynis completely isolated from the rest of the apt stack. Any leftover CISOfy repo files from earlier runs are removed at the start of section 8 before `apt-get update` runs.
+
+```bash
+# Upgrade to latest
+sudo ./utils/upgrade_lynis.sh
+
+# Or pin to a specific version
+sudo ./utils/upgrade_lynis.sh 3.1.1
+```
+
+The script fetches the latest version from the CISOfy GitHub API, compares it to the installed version, and skips if already current. If the CISOfy download fails, it falls back to `apt-get install lynis` from Ubuntu universe and tells you whether the universe version matches the target or is older.
 
 #### Forgejo
 

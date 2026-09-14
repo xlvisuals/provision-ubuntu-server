@@ -1521,6 +1521,12 @@ fi
 
 echo ""
 echo "--- 8. Update/Upgrade system packages ---"
+# Remove any CISOfy Lynis repo files — Lynis is now installed via direct .deb download
+# so this repo is never needed. Remove unconditionally to clean up any leftovers
+# from previous runs that used the repo-based approach.
+rm -f /etc/apt/sources.list.d/cisofy-lynis.list \
+      /etc/apt/keyrings/cisofy-lynis.gpg 2>/dev/null || true
+
 if [[ "$UPDATE_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     echo "  Updating packages ..."
@@ -1561,40 +1567,67 @@ fi
 
 echo ""
 echo "--- 9b. Install Lynis (security auditing tool) ---"
-# Install from CISOfy repo to get the current release.
-# The Ubuntu universe package lags significantly (e.g. 3.0.9 from 2023 vs 3.1.x current).
-if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
-    LYNIS_KEY="/etc/apt/keyrings/cisofy-lynis.gpg"
-    LYNIS_LIST="/etc/apt/sources.list.d/cisofy-lynis.list"
+# Install by downloading the .deb directly from CISOfy — no repo added to sources.list.d,
+# so subsequent apt-get update calls in this script are never affected.
+# Falls back to the Ubuntu universe package if the download fails.
+# Runs when INSTALL_PACKAGES=y, or when Lynis is already installed (to keep it current).
+LYNIS_ALREADY_INSTALLED=$(command -v lynis &>/dev/null && echo "y" || echo "n")
+LYNIS_INSTALLED=n
 
-    mkdir -p /etc/apt/keyrings
-    rm -f "$LYNIS_KEY" 2>/dev/null || true
+# Clean up any stale CISOfy repo files left by a previous run of this script
+rm -f /etc/apt/sources.list.d/cisofy-lynis.list \
+      /etc/apt/keyrings/cisofy-lynis.gpg 2>/dev/null || true
 
-    curl -fsSL https://packages.cisofy.com/keys/cisofy-software-public.key \
-        | gpg --dearmor -o "$LYNIS_KEY" || true
+if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ || "$LYNIS_ALREADY_INSTALLED" == "y" ]]; then
 
-    if [[ -f "$LYNIS_KEY" && -s "$LYNIS_KEY" ]]; then
-        echo "deb [signed-by=$LYNIS_KEY] https://packages.cisofy.com/community/lynis/deb/ stable main" \
-            > "$LYNIS_LIST"
-        apt-get update -qq
-        if apt_install lynis; then
-            echo "  [V] Lynis installed: $(lynis show version 2>/dev/null || echo 'version unknown')"
-            echo ""
-            echo "  To run a security audit:"
-            echo "    sudo lynis audit system"
-            echo ""
-            echo "  To run in CIS benchmark mode:"
-            echo "    sudo lynis audit system --profile /etc/lynis/default.prf"
-            echo ""
-            echo "  Reports are saved to /var/log/lynis.log and /var/log/lynis-report.dat"
+    # Fetch latest version from CISOfy API
+    LYNIS_LATEST=$(curl -fsSL --max-time 10 \
+        "https://api.github.com/repos/CISOfy/lynis/releases/latest" 2>/dev/null \
+        | grep -oP '(?<="tag_name": ")\d+\.\d+\.\d+' || true)
+
+    if [[ -n "$LYNIS_LATEST" ]]; then
+        echo "  Latest Lynis version: $LYNIS_LATEST"
+        LYNIS_DEB_URL="https://packages.cisofy.com/community/lynis/deb/pool/main/l/lynis/lynis_${LYNIS_LATEST}_all.deb"
+        LYNIS_DEB_TMP=$(mktemp /tmp/lynis-XXXXXX.deb)
+
+        if curl -fsSL --max-time 60 "$LYNIS_DEB_URL" -o "$LYNIS_DEB_TMP" 2>/dev/null \
+            && [[ -s "$LYNIS_DEB_TMP" ]] \
+            && file "$LYNIS_DEB_TMP" | grep -q "Debian binary package"; then
+            echo "  Installing Lynis $LYNIS_LATEST from CISOfy ..."
+            dpkg -i "$LYNIS_DEB_TMP" 2>/dev/null && LYNIS_INSTALLED=y
+            rm -f "$LYNIS_DEB_TMP"
         else
-            echo "  [!] Lynis installation from CISOfy repo failed — skipping"
+            rm -f "$LYNIS_DEB_TMP"
+            echo "  [!] Could not download Lynis .deb from CISOfy — falling back to Ubuntu universe."
         fi
     else
-        echo "  [!] Could not download CISOfy GPG key — skipping Lynis installation"
+        echo "  [!] Could not determine latest Lynis version — falling back to Ubuntu universe."
+    fi
+
+    # Fallback to universe if CISOfy download failed
+    if [[ "$LYNIS_INSTALLED" == "n" ]]; then
+        echo "  Installing Lynis from Ubuntu universe ..."
+        if apt_install lynis; then
+            LYNIS_INSTALLED=y
+            echo "  [!] Note: Ubuntu universe package may be older than the current CISOfy release."
+        else
+            echo "  [!] Lynis installation failed from both CISOfy and Ubuntu universe."
+        fi
+    fi
+
+    if [[ "$LYNIS_INSTALLED" == "y" ]]; then
+        echo "  [V] Lynis installed: $(lynis show version 2>/dev/null || echo 'version unknown')"
+        echo ""
+        echo "  To run a security audit:"
+        echo "    sudo lynis audit system"
+        echo ""
+        echo "  To run in CIS benchmark mode:"
+        echo "    sudo lynis audit system --profile /etc/lynis/default.prf"
+        echo ""
+        echo "  Reports are saved to /var/log/lynis.log and /var/log/lynis-report.dat"
     fi
 else
-    echo "  Skipping Lynis installation."
+    echo "  Skipping Lynis (not requested and not currently installed)."
 fi
 
 
@@ -2288,26 +2321,37 @@ EOF
     else
         wait_for_apt
         if apt_install aide aide-common; then
-            # Initialise the AIDE database (takes a few minutes on first run)
-            echo "  Building AIDE database — this may take a few minutes ..."
-            aideinit --yes 2>/dev/null || aideinit 2>/dev/null || true
-            # Activate the database
-            if [[ -f /var/lib/aide/aide.db.new ]]; then
-                cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-                echo "  [V] AIDE database initialised at /var/lib/aide/aide.db"
-            elif [[ -f /var/lib/aide/aide.db.new.gz ]]; then
-                cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
-                echo "  [V] AIDE database initialised at /var/lib/aide/aide.db.gz"
+            # Only initialise if no database exists yet
+            if [[ -f /var/lib/aide/aide.db || -f /var/lib/aide/aide.db.gz ]]; then
+                echo "  AIDE database already exists — skipping initialisation."
             else
-                echo "  [!] AIDE database file not found — run 'sudo aideinit' manually after provisioning"
+                # Initialise the AIDE database (takes a few minutes on first run)
+                echo "  Building AIDE database — this may take a few minutes ..."
+                # aideinit --yes is not reliable on Ubuntu; pipe yes to handle the overwrite prompt
+                yes | aideinit 2>/dev/null || true
+                # Activate the database
+                if [[ -f /var/lib/aide/aide.db.new ]]; then
+                    cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+                    echo "  [V] AIDE database initialised at /var/lib/aide/aide.db"
+                elif [[ -f /var/lib/aide/aide.db.new.gz ]]; then
+                    cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+                    echo "  [V] AIDE database initialised at /var/lib/aide/aide.db.gz"
+                else
+                    echo "  [!] AIDE database file not found — run 'sudo aideinit' manually after provisioning"
+                fi
             fi
-            # Add a daily cron job to check integrity
-            cat <<'EOF' > /etc/cron.daily/aide-check
+            # Add a daily cron job to check integrity (idempotent)
+            if [[ ! -f /etc/cron.daily/aide-check ]]; then
+                cat <<'EOF' > /etc/cron.daily/aide-check
 #!/bin/bash
 /usr/bin/aide --check 2>&1 | mail -s "AIDE integrity check - $(hostname)" root
 EOF
-            chmod 700 /etc/cron.daily/aide-check
-            chown root:root /etc/cron.daily/aide-check
+                chmod 700 /etc/cron.daily/aide-check
+                chown root:root /etc/cron.daily/aide-check
+                echo "  [+] AIDE daily check cron job installed."
+            else
+                echo "  [=] AIDE daily check cron job already present."
+            fi
 
             echo  "  AIDE installed. To uninstall AIDE, run:"
             echo  "    sudo apt-get purge -y aide aide-common"
@@ -3192,7 +3236,20 @@ if [[ "$INSTALL_IPBLOCK" =~ ^[Yy]$ ]]; then
 
         # Use a temporary directory for the git clone
         TEMP_DIR=$(mktemp -d)
-        git clone https://github.com/poddmo/ufw-blocklist.git "$TEMP_DIR"
+
+        # git may not be installed if INSTALL_PACKAGES was skipped
+        if ! command -v git &>/dev/null; then
+            echo "  git not found — installing ..."
+            apt_install git || { echo "  [!] Could not install git — skipping IP blocklist."; rm -rf "$TEMP_DIR"; }
+        fi
+
+        if command -v git &>/dev/null; then
+            git clone https://github.com/poddmo/ufw-blocklist.git "$TEMP_DIR"
+        else
+            echo "  [!] git unavailable — skipping IP blocklist clone."
+            rm -rf "$TEMP_DIR"
+            TEMP_DIR=""
+        fi
 
         # Install the ufw-blocklist files
         if [ -f "$TEMP_DIR/after.init" ]; then
@@ -3226,10 +3283,12 @@ CRONEOF
         rm -rf "$TEMP_DIR"
 
         # Initialize ipset and reload UFW to apply the blocklist
-        /etc/ufw/after.init start
-
-        # Ensure UFW is reloaded to recognize the new after.init logic
-        ufw reload
+        if command -v ufw &>/dev/null; then
+            /etc/ufw/after.init start
+            ufw reload
+        else
+            echo "  [!] ufw not installed — skipping blocklist activation. Install ufw and run 'sudo /etc/ufw/after.init start && sudo ufw reload' manually."
+        fi
     else
         echo "  [!] IP blocklist installation failed — skipping configuration"
     fi
