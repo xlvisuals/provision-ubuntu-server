@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Axel Busch
-# 15 September 2026
+# 29 September 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -19,8 +19,8 @@
 #   - Management:   Monit, Grafana, Forgejo, Webmin (not recommended; see README)
 #   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
 #   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist
-#   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils,
-#                   nmap, lynis, git, git-lfs, jq, smartmontools (bare metal only)
+#   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils, vnstat, nload,  
+#                   ethtool, nmap, lynis, git, git-lfs, jq, smartmontools (bare metal only)
 #
 # MODIFIES (all optional):
 #   - System:   LVM resize, swap file, file limits, kernel tuning (sysctl)
@@ -1575,9 +1575,14 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     wait_for_apt
     apt_install apt-file apt-show-versions apt-utils arping btop ca-certificates curl debsums dnsutils \
           git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof mc micro mtr nano ncdu ne \
-          needrestart net-tools nethogs nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute tree \
-          unattended-upgrades unzip vim vim-gui-common wget zip
+          needrestart net-tools nethogs nload nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute tree \
+          unattended-upgrades unzip vim vim-gui-common vnstat wget zip ethtool
     apt-file update
+
+    # vnstat: lightweight per-interface traffic accounting (used by the health check)
+    if systemctl list-unit-files vnstat.service 2>/dev/null | grep -q vnstat.service; then
+        systemctl enable --now vnstat.service || echo "  [!] Warning: vnstat service failed to start"
+    fi
 
     if [[ "$(systemd-detect-virt)" == "none" ]]; then
         echo "  Bare metal detected. Installing smartmontools"
@@ -1646,10 +1651,14 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ || "$LYNIS_ALREADY_INSTALLED" == "y" ]]; the
         echo "  To run a security audit:"
         echo "    sudo lynis audit system"
         echo ""
-        echo "  To run in CIS benchmark mode:"
-        echo "    sudo lynis audit system --profile /etc/lynis/default.prf"
+        echo "  Note: Lynis is not a CIS benchmark scanner. For a CIS score see the Ubuntu Pro step."
         echo ""
         echo "  Reports are saved to /var/log/lynis.log and /var/log/lynis-report.dat"
+        echo "  Show the score (hardening index):"
+        echo "    sudo grep hardening_index /var/log/lynis-report.dat"
+        echo "  Show warnings and suggestions:"
+        echo "    sudo grep -E '^(warning|suggestion)\[\]' /var/log/lynis-report.dat"
+        echo "  Details on a finding:  sudo lynis show details TEST-ID"
     fi
 else
     echo "  Skipping Lynis (not requested and not currently installed)."
@@ -1936,6 +1945,7 @@ EOF
             echo "  Enabling ESM-Apps and ESM-Infra ..."
             pro enable esm-apps 2>/dev/null || true
             pro enable esm-infra 2>/dev/null || true
+            UBUNTU_PRO_ATTACHED="y"
         else
             echo "  [!] Ubuntu Pro attach failed — check token and try manually: sudo pro attach <token>"
         fi
@@ -1947,6 +1957,24 @@ EOF
         pro config set apt_news=false 2>/dev/null || true
         systemctl stop ubuntu-advantage ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
         systemctl mask ubuntu-pro-esm-cache.service ubuntu-pro-apt-news.service 2>/dev/null || true
+    fi
+
+    if [[ "$UBUNTU_PRO_ATTACHED" == "y" ]]; then
+        echo ""
+        echo "  To run a CIS audit with Ubuntu Pro (USG):"
+        echo "    sudo pro enable usg && sudo apt install usg"
+        echo "    sudo usg audit cis_level1_server --html-file /root/cis_report.html"
+        echo "  Other profiles: cis_level1_workstation, cis_level2_server (see: usg list)"
+        echo "  Generate a fix script (review before running): sudo usg generate-fix"
+    else
+        echo ""
+        echo "  To run a CIS audit without Ubuntu Pro (OpenSCAP):"
+        echo "    sudo apt install openscap-scanner"
+        SSG_CONTENT="ssg-ubuntu${VERSION_ID//./}-ds.xml"   # 24.04 -> ssg-ubuntu2404-ds.xml, 26.04 -> ssg-ubuntu2604-ds.xml
+        echo "    Download $SSG_CONTENT from the ComplianceAsCode/content releases on GitHub"
+        echo "    (check the release includes Ubuntu $VERSION_ID), then:"
+        echo "    sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_cis_level1_server \\"
+        echo "      --report /root/cis_report.html $SSG_CONTENT"
     fi
 
 
@@ -2365,18 +2393,21 @@ EOF
                     echo "  [!] AIDE database file not found — run 'sudo aideinit' manually after provisioning"
                 fi
             fi
-            # Add a daily cron job to check integrity (idempotent)
-            if [[ ! -f /etc/cron.daily/aide-check ]]; then
-                cat <<'EOF' > /etc/cron.daily/aide-check
+            # Add a daily cron job to check integrity. The job is rewritten on every run so older
+            # installs pick up the logging change; it keeps the last result in /var/log/aide/aide-check.log
+            # so the health check script can summarise it.
+            cat <<'EOF' > /etc/cron.daily/aide-check
 #!/bin/bash
-/usr/bin/aide --check 2>&1 | mail -s "AIDE integrity check - $(hostname)" root
+LOG=/var/log/aide/aide-check.log
+mkdir -p /var/log/aide
+/usr/bin/aide --check > "$LOG" 2>&1
+RC=$?
+chmod 600 "$LOG"
+mail -s "AIDE integrity check - $(hostname) (exit $RC)" root < "$LOG"
 EOF
-                chmod 700 /etc/cron.daily/aide-check
-                chown root:root /etc/cron.daily/aide-check
-                echo "  [+] AIDE daily check cron job installed."
-            else
-                echo "  [=] AIDE daily check cron job already present."
-            fi
+            chmod 700 /etc/cron.daily/aide-check
+            chown root:root /etc/cron.daily/aide-check
+            echo "  [+] AIDE daily check cron job installed."
 
             echo  "  AIDE installed. To uninstall AIDE, run:"
             echo  "    sudo apt-get purge -y aide aide-common"
@@ -4255,6 +4286,50 @@ echo "==========================================="
 free -h | awk '/^Mem:/ {print "Used: " $3 " / " $2}'
 
 echo ""
+echo "Inodes"
+echo "==========================================="
+INODE_PCT=$(df -i / | awk 'NR==2 {gsub("%","",$5); print $5}')
+if [[ "$INODE_PCT" =~ ^[0-9]+$ ]]; then
+    if [ "$INODE_PCT" -ge 90 ]; then
+        echo -e "Root filesystem inodes: ${INODE_PCT}% used -> ${RED}[WARNING]${NC}"
+    else
+        echo -e "Root filesystem inodes: ${INODE_PCT}% used -> ${GREEN}[OK]${NC}"
+    fi
+else
+    echo "Could not determine inode usage."
+fi
+
+echo ""
+echo "Uptime and load"
+echo "==========================================="
+echo "Uptime : $(uptime -p)"
+LOAD1=$(cut -d' ' -f1 /proc/loadavg)
+echo "Load   : $(cut -d' ' -f1-3 /proc/loadavg) ($(nproc) cores)"
+if awk -v l="$LOAD1" -v c="$(nproc)" 'BEGIN {exit !(l > c)}'; then
+    echo -e "  1-min load exceeds core count -> ${YELLOW}[HIGH]${NC}"
+fi
+
+echo ""
+echo "Reboot required"
+echo "==========================================="
+if [ -f /var/run/reboot-required ]; then
+    echo -e "${YELLOW}[REBOOT REQUIRED]${NC}"
+    cat /var/run/reboot-required.pkgs 2>/dev/null | sort -u | sed 's/^/  /'
+else
+    echo -e "${GREEN}[NO REBOOT NEEDED]${NC}"
+fi
+
+echo ""
+echo "Time synchronisation"
+echo "==========================================="
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+    echo -e "Clock synchronised -> ${GREEN}[OK]${NC}"
+else
+    echo -e "Clock NOT synchronised -> ${RED}[WARNING]${NC}"
+fi
+echo "Timezone: $(timedatectl show -p Timezone --value 2>/dev/null)"
+
+echo ""
 echo "TCP Transmit Offloading"
 echo "==========================================="
 PRIMARY_INTERFACE=$(ip -o -4 route show to default | awk '{print $5}')
@@ -4264,6 +4339,29 @@ if systemctl is-active --quiet disable-offload.service; then
         || echo -e "${RED}[UNKNOWN]${NC}"
 else
     echo -e "${NC}[NOT CONFIGURED]${NC}"
+fi
+
+echo ""
+echo "Network traffic (vnstat)"
+echo "==========================================="
+if ! command -v vnstat &>/dev/null; then
+    echo -e "vnstat: ${GREY}[NOT INSTALLED]${NC}"
+elif ! systemctl is-active --quiet vnstat.service 2>/dev/null; then
+    echo -e "vnstat: ${RED}[SERVICE NOT RUNNING]${NC}  (try: sudo systemctl enable --now vnstat)"
+else
+    if vnstat -i "$PRIMARY_INTERFACE" &>/dev/null; then
+        echo "Interface: $PRIMARY_INTERFACE"
+        echo ""
+        echo "Last 3 days:"
+        vnstat -i "$PRIMARY_INTERFACE" -d 3 2>/dev/null | tail -n +4 | sed 's/^/  /'
+        echo ""
+        echo "Last 2 months:"
+        vnstat -i "$PRIMARY_INTERFACE" -m 2 2>/dev/null | tail -n +4 | sed 's/^/  /'
+    else
+        echo -e "No data for $PRIMARY_INTERFACE yet -> ${YELLOW}[COLLECTING]${NC}"
+        echo "  vnstat needs a few minutes after install to start recording."
+        echo "  If the interface is missing: sudo vnstat --add -i $PRIMARY_INTERFACE"
+    fi
 fi
 
 echo ""
@@ -4298,7 +4396,7 @@ echo ""
 echo "Service status"
 echo "==========================================="
 echo -n "UFW Firewall "
-ufw status | grep -q "active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${RED}[INACTIVE]${NC}"
+ufw status | grep -q "^Status: active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${RED}[INACTIVE]${NC}"
 check_service_status "nginx" "NGINX Web Server"
 check_service_status "valkey-server" "Valkey Server"
 check_service_status "mysql" "MySQL Server"
@@ -4314,6 +4412,8 @@ check_service_status "auditd" "Auditd Daemon"
 check_service_status "suricata" "Suricata IDS"
 check_service_status "wazuh-agent" "Wazuh Agent"
 check_service_status "postfix" "Postfix Mail Relay"
+check_service_status "vnstat" "vnStat Traffic Monitor"
+check_service_status "unattended-upgrades" "Unattended Upgrades"
 
 echo ""
 echo "AppArmor"
@@ -4381,13 +4481,112 @@ echo ""
 echo "IP Blocklist"
 echo "==========================================="
 if [[ -n "$(sudo ipset list -n 2>/dev/null | grep ufw-blocklist-ipsum)" ]]; then
-    UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}' | sed 's/T/ /' | cut -d. -f1)
-    # Get last update time from syslog
+    # Number of entries currently loaded in the ipset
+    COUNT=$(sudo ipset list ufw-blocklist-ipsum 2>/dev/null | awk '/^Number of entries:/ {print $4}')
+    # Last update time from syslog
     UPDATED=$(grep "finished updating ufw-blocklist-ipsum" /var/log/syslog 2>/dev/null | tail -1 | awk '{print $1}')
     echo -e "  Blocked IPs  : ${COUNT:-unknown}"
     echo -e "  Last updated : ${UPDATED:-unknown}"
 else
     echo -e "  ${RED}[NOT ACTIVE]${NC}"
+fi
+
+echo ""
+echo "Fail2Ban"
+echo "==========================================="
+if ! command -v fail2ban-client &>/dev/null; then
+    echo -e "  Fail2Ban: ${GREY}[NOT INSTALLED]${NC}"
+elif ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+    echo -e "  Fail2Ban: ${RED}[NOT RUNNING]${NC}"
+else
+    F2B_JAILS=$(fail2ban-client status 2>/dev/null | awk -F'Jail list:' '/Jail list:/ {gsub(/[ \t]/,"",$2); gsub(",", " ", $2); print $2}')
+    if [[ -z "$F2B_JAILS" ]]; then
+        echo -e "  No active jails -> ${YELLOW}[WARNING]${NC}"
+    else
+        for JAIL in $F2B_JAILS; do
+            JSTAT=$(fail2ban-client status "$JAIL" 2>/dev/null)
+            CUR_BANNED=$(echo "$JSTAT" | awk -F':' '/Currently banned/ {gsub(/[ \t]/,"",$2); print $2}')
+            TOT_BANNED=$(echo "$JSTAT" | awk -F':' '/Total banned/ {gsub(/[ \t]/,"",$2); print $2}')
+            CUR_FAILED=$(echo "$JSTAT" | awk -F':' '/Currently failed/ {gsub(/[ \t]/,"",$2); print $2}')
+            echo "  Jail $JAIL: currently banned ${CUR_BANNED:-?}, total banned ${TOT_BANNED:-?}, currently failed ${CUR_FAILED:-?}"
+            if [[ "${CUR_BANNED:-0}" =~ ^[0-9]+$ && "${CUR_BANNED:-0}" -gt 0 ]]; then
+                echo "    Banned IPs: $(echo "$JSTAT" | awk -F':' '/Banned IP list/ {gsub(/^[ \t]+/,"",$2); print $2}')"
+            fi
+        done
+    fi
+fi
+
+echo ""
+echo "AIDE file integrity"
+echo "==========================================="
+if ! command -v aide &>/dev/null; then
+    echo -e "  AIDE: ${GREY}[NOT INSTALLED]${NC}"
+else
+    AIDE_DB=""
+    for f in /var/lib/aide/aide.db /var/lib/aide/aide.db.gz; do
+        [[ -f "$f" ]] && AIDE_DB="$f" && break
+    done
+    if [[ -z "$AIDE_DB" ]]; then
+        echo -e "  Database: ${RED}[MISSING]${NC} (run: sudo aideinit)"
+    else
+        echo "  Database     : $AIDE_DB (built $(date -r "$AIDE_DB" '+%Y-%m-%d %H:%M'))"
+    fi
+    if [[ -x /etc/cron.daily/aide-check ]]; then
+        echo -e "  Daily check  : ${GREEN}[SCHEDULED]${NC}"
+    else
+        echo -e "  Daily check  : ${YELLOW}[NO CRON JOB]${NC}"
+    fi
+    AIDE_LOG=/var/log/aide/aide-check.log
+    if [[ -s "$AIDE_LOG" ]]; then
+        AIDE_AGE_DAYS=$(( ( $(date +%s) - $(stat -c %Y "$AIDE_LOG") ) / 86400 ))
+        echo "  Last check   : $(date -r "$AIDE_LOG" '+%Y-%m-%d %H:%M') (${AIDE_AGE_DAYS}d ago)"
+        if [ "$AIDE_AGE_DAYS" -gt 2 ]; then
+            echo -e "    -> ${YELLOW}[STALE]${NC} the daily check has not run recently"
+        fi
+        if grep -q "found differences between database and filesystem" "$AIDE_LOG"; then
+            AIDE_ADDED=$(awk -F: '/^ *Added entries/   {gsub(/[ \t]/,"",$2); print $2}' "$AIDE_LOG" | head -1)
+            AIDE_REMOVED=$(awk -F: '/^ *Removed entries/ {gsub(/[ \t]/,"",$2); print $2}' "$AIDE_LOG" | head -1)
+            AIDE_CHANGED=$(awk -F: '/^ *Changed entries/ {gsub(/[ \t]/,"",$2); print $2}' "$AIDE_LOG" | head -1)
+            echo -e "  Result       : ${YELLOW}[DIFFERENCES FOUND]${NC} added ${AIDE_ADDED:-?}, removed ${AIDE_REMOVED:-?}, changed ${AIDE_CHANGED:-?}"
+            echo "    Review: sudo less $AIDE_LOG"
+            echo "    After confirming the changes are legitimate: sudo aide --update && sudo cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db"
+        elif grep -q "looks okay" "$AIDE_LOG"; then
+            echo -e "  Result       : ${GREEN}[NO CHANGES]${NC}"
+        else
+            echo -e "  Result       : ${RED}[CHECK FAILED / UNKNOWN]${NC} see $AIDE_LOG"
+        fi
+    else
+        echo "  Last check   : no log yet (written by the daily job to $AIDE_LOG)"
+    fi
+fi
+
+echo ""
+echo "Certificate expiry"
+echo "==========================================="
+CERT_FILES=$(
+    {
+        ls /etc/letsencrypt/live/*/cert.pem 2>/dev/null
+        grep -rhE '^\s*ssl_certificate\s' /etc/nginx/ 2>/dev/null | awk '{gsub(";","",$2); print $2}'
+    } | sort -u
+)
+if [[ -z "$CERT_FILES" ]] || ! command -v openssl &>/dev/null; then
+    echo "  No certificates found (Let's Encrypt or nginx ssl_certificate)."
+else
+    for CERT in $CERT_FILES; do
+        [[ -r "$CERT" ]] || continue
+        END=$(openssl x509 -enddate -noout -in "$CERT" 2>/dev/null | cut -d= -f2)
+        [[ -n "$END" ]] || continue
+        DAYS=$(( ( $(date -d "$END" +%s) - $(date +%s) ) / 86400 ))
+        if [ "$DAYS" -lt 0 ]; then
+            echo -e "  $CERT: ${RED}[EXPIRED $((-DAYS))d ago]${NC}"
+        elif [ "$DAYS" -lt 14 ]; then
+            echo -e "  $CERT: ${RED}[${DAYS}d left]${NC}"
+        elif [ "$DAYS" -lt 30 ]; then
+            echo -e "  $CERT: ${YELLOW}[${DAYS}d left]${NC}"
+        else
+            echo -e "  $CERT: ${GREEN}[${DAYS}d left]${NC}"
+        fi
+    done
 fi
 
 echo ""
@@ -4408,8 +4607,8 @@ echo "Port usage"
 echo "==========================================="
 ufw_status() {
     local port="$1"
-    if [ "$(ufw status)" = "Status: inactive" ]; then
-        echo "${RED}[ALLOWED (UFW inactive)]${NC}"
+    if ufw status | grep -q "^Status: inactive"; then
+        echo -e "${RED}[ALLOWED (UFW inactive)]${NC}"
     elif ufw status | grep -qE "^${port}(/tcp)?\s+ALLOW"; then
         echo -e "${RED}[ALLOWED]${NC}"
     else
