@@ -1,6 +1,7 @@
 #!/bin/bash
 # UBUNTU 24.04 and 26.04 SERVER HEALTH CHECK SCRIPT
-# by Axel Busch
+# by Axel Busch + Claude Sonnet
+# 18 October 2026
 
 # Ensure the script is run as root
 if [ "$EUID" -ne 0 ]; then
@@ -381,7 +382,9 @@ if systemctl is-active --quiet postgresql 2>/dev/null; then
 else smoke_skip "PostgreSQL"; fi
 
 if systemctl is-active --quiet valkey-server 2>/dev/null; then
-    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+    # the password set by ubuntu_provision.sh (file readable by root/valkey only); empty if none is set
+    VALKEY_AUTH=$(sed -n 's/^requirepass "\(.*\)"$/\1/p' /etc/valkey/valkey-auth.conf 2>/dev/null)
+    if REDISCLI_AUTH="$VALKEY_AUTH" VALKEYCLI_AUTH="$VALKEY_AUTH" valkey-cli ping 2>/dev/null | grep -q "PONG"; then
         smoke_ok "Valkey: PONG received"
     else
         smoke_warn "Valkey: no PONG — check service status"

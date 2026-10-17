@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
-# by Axel Busch
-# 29 September 2026
+# by Axel Busch + Claude Sonnet
+# 18 October 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -645,6 +645,19 @@ fi
 #[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
 default_val="n"
 prompt_if_unset INSTALL_VALKEY "Would you like to $PROMPT_VALKEY valkey? (y/n)" n $default_val
+if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
+    # Valkey holds web app sessions: without a password any local process (or an SSRF bug in any service) can read or
+    # forge them. Written to /etc/valkey/valkey-auth.conf (root/valkey only), never to valkey.conf.
+    # Allowed characters keep the value safe in the config file and in a redis:// URL; e.g. use: openssl rand -hex 24
+    while true; do
+        prompt_if_unset VALKEY_PASSWORD "  Valkey password (requirepass, 16+ characters: letters, digits, . _ - ~)" secret
+        if [[ "${#VALKEY_PASSWORD}" -ge 16 && "$VALKEY_PASSWORD" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+            break
+        fi
+        VALKEY_PASSWORD=''
+        echo "  Password must be at least 16 characters of letters, digits, '.', '_', '-' or '~'."
+    done
+fi
 
 #if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
 #    default_val='n'
@@ -1203,6 +1216,9 @@ if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   echo "    nginx worker processes   : $NGINX_WORKER_PROCESSES"
 fi
 echo "Install valkey?              : $INSTALL_VALKEY"
+if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
+  echo "  Valkey password            : (set, ${#VALKEY_PASSWORD} characters)"
+fi
 echo "Install MySQL?               : $INSTALL_MYSQL"
 if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
   echo "  Buffer pool chunk MB       : $MYSQL_BUFFER_POOL_CHUNK_MB"
@@ -3716,6 +3732,14 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
         if [[ -f $CONFIG_DIR/etc/valkey/valkey.conf ]]; then
             cp $CONFIG_DIR/etc/valkey/valkey.conf /etc/valkey/valkey.conf
         fi
+        if [[ -n "${VALKEY_PASSWORD:-}" ]]; then
+            echo "  Setting the Valkey password (/etc/valkey/valkey-auth.conf)"
+            install -m 640 -o root -g valkey /dev/null /etc/valkey/valkey-auth.conf
+            printf 'requirepass "%s"\n' "$VALKEY_PASSWORD" > /etc/valkey/valkey-auth.conf
+            # include it LAST in valkey.conf, so it overrides any requirepass there
+            sed -i '/^include \/etc\/valkey\/valkey-auth\.conf$/d' /etc/valkey/valkey.conf
+            printf '\n# Password (requirepass), written by ubuntu_provision.sh\ninclude /etc/valkey/valkey-auth.conf\n' >> /etc/valkey/valkey.conf
+        fi
     fi
 
     if [[ "$INSTALL_POSTGRESQL" =~ ^[Yy]$ && "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
@@ -4712,7 +4736,8 @@ if systemctl is-active --quiet postgresql 2>/dev/null; then
 else smoke_skip "PostgreSQL"; fi
 
 if systemctl is-active --quiet valkey-server 2>/dev/null; then
-    if valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+    # (authenticated: valkey-cli reads the password from REDISCLI_AUTH / VALKEYCLI_AUTH, so it is not on the command line)
+    if REDISCLI_AUTH="${VALKEY_PASSWORD:-}" VALKEYCLI_AUTH="${VALKEY_PASSWORD:-}" valkey-cli ping 2>/dev/null | grep -q "PONG"; then
         smoke_ok "Valkey: PONG received"
     else
         smoke_warn "Valkey: no PONG — check service status"
@@ -4769,6 +4794,7 @@ fi
 
 
 # Clear password variables
+unset VALKEY_PASSWORD
 unset MYSQL_PASSWORD
 unset MYSQL_PASSWORD_ESCAPED
 unset PG_PASSWORD
