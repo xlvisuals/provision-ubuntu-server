@@ -1,0 +1,7 @@
+# wazuh-dashboard (node). The HTTPS port is not probed here because it is configurable;
+# ubuntu_health_check.sh reads it from opensearch_dashboards.yml and checks it.
+check process wazuh-dashboard matching "wazuh-dashboard/node/bin/node"
+  group wazuh
+  start program = "/usr/bin/systemctl start wazuh-dashboard" with timeout 120 seconds
+  stop program  = "/usr/bin/systemctl stop wazuh-dashboard" with timeout 60 seconds
+  if 3 restarts within 10 cycles then unmonitor

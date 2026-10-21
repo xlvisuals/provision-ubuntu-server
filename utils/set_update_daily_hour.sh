@@ -97,11 +97,12 @@ echo ""
 echo "  Applying ..."
 
 mkdir -p "$(dirname "$UPDATE_OVERRIDE")"
-printf '[Timer]\nOnCalendar=*-*-* %s,%s:00\nRandomizedDelaySec=0\n' \
+# The empty "OnCalendar=" resets the packaged schedule; without it the default timer (~6am) still fires as well.
+printf '[Timer]\nOnCalendar=\nOnCalendar=*-*-* %s,%s:00\nRandomizedDelaySec=60m\n' \
     "$NEW_UPDATE_HOUR" "$NEW_UPDATE_HOUR_2" > "$UPDATE_OVERRIDE"
 
 mkdir -p "$(dirname "$UPGRADE_OVERRIDE")"
-printf '[Timer]\nOnCalendar=*-*-* %s:00\nRandomizedDelaySec=0\n' \
+printf '[Timer]\nOnCalendar=\nOnCalendar=*-*-* %s:00\nRandomizedDelaySec=60m\n' \
     "$NEW_UPGRADE_HOUR" > "$UPGRADE_OVERRIDE"
 
 systemctl daemon-reload

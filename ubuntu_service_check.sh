@@ -63,6 +63,7 @@ process_service() {
             "auditd")          version=$($bin_path -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*') ;;
             "suricata")        version=$($bin_path -V 2>/dev/null | awk '{print $5}') ;;
             "wazuh-agent")     version=$(grep -oP '(?<=<version>)[^<]+' /var/ossec/etc/ossec.conf 2>/dev/null | head -1) ;;
+            "vnstat")          version=$($bin_path --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) ;;
         esac
     fi
 
@@ -101,6 +102,11 @@ services=(
     "Auditd|auditd|auditd|auditd"
     "Suricata|suricata|suricata|suricata"
     "Wazuh Agent|wazuh-agent|wazuh-agent|wazuh-agent"
+    "Wazuh Indexer|wazuh-indexer|wazuh-indexer|wazuh-indexer"
+    "Wazuh Manager|wazuh-manager|wazuh-manager|wazuh-manager"
+    "Wazuh Dashboard|wazuh-dashboard|wazuh-dashboard|wazuh-dashboard"
+    "vnStat|vnstat|vnstat|vnstat"
+    "Unattended Upgr.|unattended-upgrades|unattended-upgrade|unattended-upgrades"
 )
 
 echo -e "\n======================================================================="
@@ -110,5 +116,20 @@ echo -e "=======================================================================
 for item in "${services[@]}"; do
     process_service "$item"
 done
+
+
+# Coraza WAF is an nginx module, not a service: report whether it was built, and whether it still matches nginx
+coraza_helper=/usr/local/sbin/install_coraza_nginx.sh
+if [ -f /var/lib/coraza-nginx/build.stamp ]; then
+    if [ -x "$coraza_helper" ] && "$coraza_helper" check >/dev/null 2>&1; then
+        coraza_state="${GREEN}MODULE OK${NC}"
+    else
+        coraza_state="${RED}MISMATCH OR BROKEN${NC}"
+    fi
+    coraza_mode=$(grep -oP '^SecRuleEngine \K\S+' /etc/nginx/coraza/coraza.conf 2>/dev/null || true)
+    printf "%-18s | %-32s | %b\n" "Coraza WAF" "mode: ${coraza_mode:--}" "$coraza_state"
+else
+    printf "%-18s | %-32s | %b\n" "Coraza WAF" "-" "${RED}NOT INSTALLED${NC}"
+fi
 
 echo -e "\n======================================================================="

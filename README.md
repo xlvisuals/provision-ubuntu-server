@@ -21,6 +21,7 @@ quickly provision a hardened server and install any of the following services if
 - Suricata IDS<sup>*</sup>
 - Valkey
 - Wazuh Agent<sup>*</sup>
+- Wazuh Server (manager, indexer, dashboard; all-in-one)
 - Webmin
 
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
@@ -64,6 +65,7 @@ Would you like to install Python 3.14? (y/n) : y
 Would you like to install Pypy 3.11? (y/n) : n
 Would you like to install nginx? (y/n) : y
   nginx worker processes? : 2
+  Build the Coraza WAF module for nginx? (compiles from source, takes several minutes; NOT activated, see README) (y/n) : n
 Would you like to install valkey? (y/n) : y
 Would you like to install MySQL? (y/n) : n
 Would you like to install MariaDB? (y/n) : y
@@ -119,6 +121,7 @@ Would you like to install Fail2Ban? (y/n) : y
 Would you like to install auditd? (y/n) : y
 Would you like to install IP blocklist? (y/n) : y
 Would you like to install Suricata IDS? (y/n) : y
+Would you like to install Wazuh Server (manager + indexer + dashboard on this host)? (y/n) : n
 Would you like to install Wazuh Agent? (y/n) : y
   Enter IP or Hostname of Wazuh Manager : 172.16.71.2
 Would you like to configure AppArmor? (y/n) : y
@@ -195,6 +198,7 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | Package        | Default Port | Notes                                                                                                    |
 |----------------|---|----------------------------------------------------------------------------------------------------------|
 | Nginx          | 80, 443 |                                                                                                          |
+| Coraza WAF (nginx module) | — | Optional. Compiled from source, installed in detect-only mode and **not active** until enabled per site; see [Coraza WAF for nginx](#coraza-waf-for-nginx) |
 | MySQL Server   | 3306 | Tunable InnoDB parameters; auto-calculated from RAM if left blank                                        |
 | MariaDB Server | 3306 | Alternative to MySQL. Tunable InnoDB parameters; auto-calculated from RAM if left blank |
 | PostgreSQL 18  | 5432 | Tunable memory and parallelism parameters; auto-calculated from RAM/CPU if left blank                    |
@@ -234,6 +238,7 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | auditd | Kernel-level audit logging                                                                                         |
 | Suricata IDS | Network intrusion detection; `community-id` enabled; rules updated via `suricata-update`                           |
 | Wazuh Agent | SIEM agent; requires an existing Wazuh Manager; integrates Suricata and auditd logs                                |
+| Wazuh Server | Optional all-in-one SIEM server (manager, indexer, filebeat, dashboard) via Wazuh's own installer; see [Wazuh Server](#wazuh-server) |
 | UFW IP Blocklist | Daily cron job pulls and applies an IP blocklist via `ipsum`                                                       |
 | modulejail | Shrink kernel-module attack surface by writing a modprobe.d blacklist for every kernel module not currently in use |
 
@@ -262,6 +267,8 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | `ubuntu_provision.sh` | Main provisioning script |
 | `ubuntu_provision.conf` | Configuration file (passwords omitted — prompted at runtime) |
 | `ubuntu_backup_config.sh` | Backs up all service configurations to a timestamped tarball |
+| `usr/local/sbin/held-package-updates`, `usr/local/sbin/upgrade-held-packages` | Mail the admin when a held package has an update; upgrade held packages and restore the hold (installed to `/usr/local/sbin`) |
+| `utils/wazuh_server_tune.sh` | Tunes a Wazuh server (indexer heap, shards, alert retention, read-only health user); called by the provisioning script, also usable on an existing server |
 | `etc/` | Service configuration templates with `%%PLACEHOLDER%%` variables |
 
 All files must sit in the same directory. The script uses its own location as the root for config templates and the backup script.
@@ -286,6 +293,10 @@ All files must sit in the same directory. The script uses its own location as th
 | Forgejo (standalone)   | 3000 | blocked         |
 | Forgejo (with Grafana) | 3030 | blocked         |
 | Webmin                 | 10000 | blocked         |
+| Wazuh agents → manager | 1514, 1515 | blocked unless you answer yes to opening them (optionally restricted to one IP/CIDR) |
+| Wazuh Manager API      | 55000 | blocked         |
+| Wazuh Indexer          | 9200 | blocked (listens on 127.0.0.1 only) |
+| Wazuh Dashboard        | 443 (5601 with nginx) | blocked; reach it through the SSH port forward |
 
 
 ---
@@ -303,8 +314,9 @@ FORCE_APPLY=n
 
 # Package versions
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.22
-FORGEJO_FALLBACK_VERSION=15.0.2
+PYPY_FALLBACK_VERSION=pypy3.11-v8.0.1
+FORGEJO_FALLBACK_VERSION=17.0.0
+MODULEJAIL_FALLBACK_VERSION=1.6.3
 FORGEJO_FALLBACK_PORT=3030
 
 # INSTALL_DEFAULT sets the default for all INSTALL_ and CONFIGURE_ variables
@@ -348,6 +360,7 @@ INSTALL_IMAGEMAGICK=y
 INSTALL_CPYTHON314=y
 INSTALL_PYPY311=y
 INSTALL_NGINX=y
+INSTALL_CORAZA=n
 INSTALL_VALKEY=y
 INSTALL_MYSQL=y
 INSTALL_MARIADB=n
@@ -440,8 +453,19 @@ FORGEJO_SMTP_USER=forgejo@example.com
 # Password intentionally omitted - will always be prompted:
 # FORGEJO_SMTP_PASSWORD=
 
-# Wazuh
+# Wazuh agent
 WAZUH_MANAGER=wazuh.example.com
+
+# Wazuh Server (all optional; see the Wazuh Server section)
+INSTALL_WAZUHMANAGER=n
+# WAZUH_SERVER_VERSION=4.14
+# WAZUH_DASHBOARD_PORT=443
+# WAZUH_SERVER_HOLD_PACKAGES=y
+# WAZUH_OPEN_AGENT_PORTS=n
+# WAZUH_AGENT_ALLOW_FROM=10.0.0.0/24
+# WAZUH_INDEXER_HEAP_MB=auto
+# WAZUH_ALERTS_SHARDS=1
+# WAZUH_ALERTS_RETENTION_DAYS=90
 ```
 
 > **Note:** Keep the conf file out of public repositories — it contains usernames and hostnames. Passwords are always prompted interactively and never stored in the saved conf file. But if you add them manually they will be considered.
@@ -606,11 +630,12 @@ Run it any time (as root) to get a colour-coded status report covering:
 - Failed systemd units
 - Recent failed SSH logins
 - Pending package updates
-- Service status for all installed services
+- Service status for all installed services (including whether the Coraza module still matches nginx, and its mode)
 - AppArmor profile status per service
 - Recent AppArmor denials
 - Port usage with UFW allow/block status
 - **Smoke tests** — HTTP connectivity checks for Nginx, Grafana, Forgejo, Monit, and Webmin; database connection tests for MySQL/MariaDB (via a passwordless `healthcheck` user), PostgreSQL, and Valkey; and a Mosquitto pub/sub test
+- **Wazuh Server** (only shown when a server component is installed) — see [Wazuh Server](#wazuh-server)
 
 ```bash
 sudo ~/ubuntu_health_check.sh
@@ -632,7 +657,7 @@ sudo ~/ubuntu_health_check.sh
 - **Ubuntu Pro:** if the server is not attached to Ubuntu Pro, background Pro services (`ubuntu-pro-esm-cache`, `ubuntu-pro-apt-news`) are disabled to prevent AppArmor noise and unnecessary resource use.
 - **TCP TX offloading:** disabled via a systemd oneshot service on the primary interface. Resolves edge cases where high dashboard load in Grafana causes CPU spikes from software checksumming.
 - **smartmontools:** only installed on bare metal (`systemd-detect-virt` returns `none`). Skipped silently on virtual machines.
-- **Wazuh:** requires an existing Wazuh Manager. The agent is configured to forward Suricata (`eve.json`) and auditd logs to the manager automatically.
+- **Wazuh Agent:** requires a Wazuh Manager, either an existing one or the Wazuh Server installed by this script. The agent is configured to forward Suricata (`eve.json`) and auditd logs to the manager automatically.
 - **Forgejo & Grafana:** if both are installed, Forgejo is shifted to port 3030 to avoid a conflict. On re-runs, the port is read from `/etc/forgejo/app.ini` if not set in the conf file.
 - **PostgreSQL version** is pinned to 18 (configurable via `PG_VERSION` in the conf file or at the top of the script).
 - **MySQL and PostgreSQL tuning** values are auto-calculated from available RAM and CPU at runtime if left blank in the conf file. `work_mem` is calculated as 25% of RAM divided by `max_connections`, floored at 4MB and capped at 16MB, since it is allocated per sort/hash operation and multiplies under concurrent load.
@@ -640,6 +665,70 @@ sudo ~/ubuntu_health_check.sh
 - **Python venvs:** `setuptools` and `wheel` are not installed at the system level. Install them per-project inside a venv: `python3.14 -m venv /path/to/venv && pip install setuptools wheel`.
 - **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy 3.11 release is fetched dynamically at install time, with a hardcoded fallback version if the fetch fails.
 - **Webmin:** installed via the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
+
+## Holding services against automatic upgrades
+
+Servers that run round the clock cannot let the daily timer upgrade a database or web server in the middle of use. The script asks, for each of Nginx, Valkey, MySQL/MariaDB, PostgreSQL and Grafana that is installed or selected, whether to hold it (`HOLD_NGINX`, `HOLD_VALKEY`, `HOLD_MYSQL`, `HOLD_MARIADB`, `HOLD_POSTGRESQL`, `HOLD_GRAFANA`). Pressing Enter keeps the current state, so a re-run does not silently lift a hold; answering `n` for a held service lifts it and says so.
+
+- All packages that make up the service are held with `apt-mark hold` (server, client, nginx modules, PostgreSQL extensions), because a held server with an upgraded module breaks. Shared infrastructure such as `postgresql-common` is not held.
+- **Held packages also miss security fixes.** To make sure that is never overlooked, `/usr/local/sbin/held-package-updates` runs after every `apt-get update` (a drop-in on `apt-daily.service`) and mails `HELD_UPDATE_MAIL_TO` when a held package has a newer version. Updates from a `-security` pocket are marked `[SECURITY]` and put in the subject. The mail is repeated every `HELD_UPDATE_REMINDER_DAYS` days (default 7; 0 = only for new versions) until the package is upgraded. It also covers the Wazuh packages the script holds. If sending fails it is retried on the next run; without a valid address nothing is sent and the log says so.
+- To upgrade: warn the users, then `sudo upgrade-held-packages` (everything with an update, after a confirmation) or `sudo upgrade-held-packages nginx` (packages whose name contains `nginx`, with their companions). It lifts the hold, upgrades, and puts the hold back even when the upgrade fails.
+- Preview the mail with `sudo held-package-updates --dry-run`. The health check lists every held package with its update status and whether the notice mail is configured.
+- Re-running the provisioning script on a server where a held package has an update available may print an apt error for that package: apt will not upgrade it while it is held. This is expected and does not stop the script.
+- Configuration is in `/etc/held-package-updates.conf`; the notifier needs the `mail` command (installed with Postfix).
+
+---
+
+## Wazuh Server
+
+Optional (`INSTALL_WAZUHMANAGER`). Installs the all-in-one Wazuh server on this host — manager, indexer, filebeat and dashboard — using Wazuh's own installation assistant (`wazuh-install.sh -a` for the chosen release stream, e.g. `4.14`), then applies the lessons that matter on a small server.
+
+**Safeguards**
+
+- Refuses to install on a host with less than 7 GB RAM (Wazuh recommends 8 GB) or on Ubuntu 26.04 (Wazuh supports up to 24.04) unless you explicitly confirm (`WAZUH_SERVER_ALLOW_LOW_RAM=y`, `WAZUH_SERVER_ALLOW_UNSUPPORTED_OS=y`). An unattended run without that setting does not install.
+- If the server is already installed, the installer is **not** run and nothing is purged — only the tuning below is offered.
+- If nginx is on the same host, nginx is stopped while the installer starts the dashboard, the dashboard is moved to `WAZUH_DASHBOARD_PORT` (default 5601 in that case) and nginx is started again.
+- The installer prints the generated `admin` password. It is masked in the provisioning log. The passwords stay in `/root/wazuh-install/wazuh-install-files.tar` (root only, mode 600); `/var/log/wazuh-install.log` is also set to 600.
+- The server packages (`wazuh-indexer`, `wazuh-manager`, `filebeat`, `wazuh-dashboard`) are pinned with `apt-mark hold` (`WAZUH_SERVER_HOLD_PACKAGES`). Without this, Ubuntu's unattended upgrades can upgrade one component out of step with the others and take the dashboard down.
+- UFW: ports 1514/1515 for remote agents are only opened if you ask, optionally restricted to one IP/CIDR. The API (55000), the indexer (9200, loopback only) and the dashboard stay closed; use the SSH port forward printed at the end of the run.
+- A Wazuh Agent installed in the same run is pointed at 127.0.0.1 and pinned to the installed manager's version.
+
+**Tuning** (`utils/wazuh_server_tune.sh`, every item opt-in)
+
+| Setting | What it does |
+|---|---|
+| `WAZUH_INDEXER_HEAP_MB` | `auto` = half of RAM rounded to 512 MB (max 31744), or a number of MB. Edits `/etc/wazuh-indexer/jvm.options` (backup kept) and restarts the indexer. Refuses more than 60% of RAM. The package default of 2 GB is what causes `circuit_breaking_exception` and the dashboard error "[API version] Error: An internal server error occurred" on busy servers. |
+| `WAZUH_ALERTS_SHARDS` | Primary shards for **new** daily `wazuh-alerts` indices (default template: 3). One shard per day is plenty for small servers; hundreds of tiny shards eat heap. Existing indices keep their shard count. |
+| `WAZUH_ALERTS_RETENTION_DAYS` | Creates an ISM policy `wazuh-alerts-retention` that deletes `wazuh-alerts-*` indices after N days. It attaches to new indices only. Attaching it to existing indices (`WAZUH_RETENTION_APPLY_EXISTING=y`, or answering the question when run on a terminal) **deletes every index older than N days within minutes**; the script tells you how many that is first. |
+| Health user | Creates the read-only indexer user `wazuh_health` (cluster/index monitoring only) and writes its credentials to `/etc/wazuh-health.conf` (root:root, mode 600) for the health check. |
+
+The admin password for these API calls comes from the installer's archive on a fresh install. If it is not available (existing server, or you changed it with `wazuh-passwords-tool.sh`) the script asks for it on the terminal; pressing Enter skips the steps that need it. It is never defaulted, never put on a command line, and a failed login stops the API steps rather than trying anything else.
+
+Run it by hand on an existing server:
+
+```bash
+sudo WAZUH_INDEXER_HEAP_MB=auto WAZUH_ALERTS_SHARDS=1 WAZUH_ALERTS_RETENTION_DAYS=90 \
+     WAZUH_CREATE_HEALTH_USER=y ./utils/wazuh_server_tune.sh
+```
+
+**Health check**
+
+`ubuntu_health_check.sh` gets a "Wazuh Server" section when any server component is installed:
+
+- package versions and whether each is held against auto-upgrade
+- indexer heap vs RAM, swap used by the indexer, `vm.max_map_count`
+- `circuit_breaking_exception` count in the last 24 hours (the failure behind the dashboard "internal server error")
+- indexer listening on loopback only, UFW state of the agent ports
+- manager core daemons, enrolled/active/disconnected agents, age of the last written alert, filebeat → indexer login
+- HTTP checks of the dashboard, indexer and manager API
+- indexer data disk usage
+- with the `wazuh_health` credentials: cluster status, shards against the per-node limit, JVM heap in use, breaker trips, alert index count/size/age, average shard size, whether retention is applied, and the shard count of the template for new indices
+
+Without `/etc/wazuh-health.conf` the cluster checks are skipped (with a message), and a credentials file that is not `root:root` mode 600 is ignored.
+
+**Upgrading** the server is manual because of the hold: `apt-mark unhold` the four packages, upgrade in the order indexer → manager and filebeat → dashboard (see Wazuh's upgrade guide), `apt-mark hold` them again, and only then upgrade agents (`utils/upgrade_wazuh_agent.sh`). Backups: `ubuntu_backup_config.sh` already includes the Wazuh configuration and certificates, not the indexed data.
+
+---
 
 ## CIS Level 1 Hardening
 
@@ -836,6 +925,30 @@ sudo ./utils/upgrade_pypy.sh
 # Or pin to a specific version
 sudo ./utils/upgrade_pypy.sh pypy3.11-v7.3.23
 ```
+
+#### Coraza WAF for nginx
+
+`utils/install_coraza_nginx.sh` compiles [Coraza](https://github.com/corazawaf/coraza-nginx) (libcoraza + the coraza-nginx connector) as a dynamic module for the nginx package installed by this script, and installs the [OWASP Core Rule Set](https://coreruleset.org/) into `/etc/nginx/coraza/`. No Docker. It can also be run by the provisioning script: answer `y` to the Coraza prompt (or set `INSTALL_CORAZA=y` in the config file, which requires `INSTALL_NGINX=y`). This only builds and installs the module; **it does not activate the WAF**, so follow the steps below afterwards. It needs Go 1.25 or later to build; if the system Go is older it downloads the official (checksum-verified) release into a temporary directory and removes it afterwards.
+
+```bash
+sudo ./utils/install_coraza_nginx.sh          # install (or rebuild)
+sudo ./utils/install_coraza_nginx.sh check    # does the module still match the installed nginx?
+sudo ./utils/install_coraza_nginx.sh enforce  # start blocking (default after install is detect-only)
+sudo ./utils/install_coraza_nginx.sh detect   # back to log-only
+```
+
+The module is loaded but inactive until a site enables it inside its `server { }` block:
+
+```nginx
+coraza on;
+coraza_rules_file /etc/nginx/coraza/coraza-nginx.conf;
+```
+
+Recommended rollout: leave it in detect-only mode for a couple of weeks, review `/var/log/nginx/coraza_audit.json` (also monitored by the Wazuh agent), add exclusions for false positives to `/etc/nginx/coraza/before-crs.conf`, then run `enforce`. Files under `/etc/nginx/coraza/` other than `crs/rules/` are never overwritten on re-run. Use `coraza off;` in locations that serve static files.
+
+**nginx on hold:** if nginx is held (see held packages), `sudo upgrade-held-packages nginx` rebuilds the Coraza module straight after the upgrade, so nginx is not left stopped until the delayed apt-hook rebuild.
+
+**Upgrades:** a dynamic module only loads into the exact nginx version it was built for. An apt hook (`/etc/apt/apt.conf.d/99-coraza-nginx`) notices when nginx changes upstream version, or when nginx reports the module as "not binary compatible", and rebuilds the module a couple of minutes later (log: `/var/log/coraza-nginx-build.log`). If the rebuild fails, the running nginx keeps working but the next restart will fail, so include `install_coraza_nginx.sh check` in your monitoring. To update libcoraza, coraza-nginx or the CRS, change the `*_TAG` variables (or pass them as environment variables) and re-run the script.
 
 #### Modulejail
 

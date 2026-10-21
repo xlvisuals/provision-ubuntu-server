@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-PYPY_FALLBACK_VERSION="pypy3.11-v7.3.23"
+PYPY_FALLBACK_VERSION="pypy3.11-v8.0.1"
 PYPY_BASE_URL="https://downloads.python.org/pypy"
 
 # --- Require root ---

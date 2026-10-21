@@ -1,0 +1,7 @@
+# wazuh-indexer (OpenSearch). Alert-only on load: a slow indexer must not be killed mid-recovery.
+check process wazuh-indexer matching "wazuh-indexer/jdk/bin/java"
+  group wazuh
+  start program = "/usr/bin/systemctl start wazuh-indexer" with timeout 300 seconds
+  stop program  = "/usr/bin/systemctl stop wazuh-indexer" with timeout 120 seconds
+  if failed host 127.0.0.1 port 9200 type tcp for 3 cycles then alert
+  if 3 restarts within 10 cycles then unmonitor

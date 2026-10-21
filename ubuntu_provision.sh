@@ -18,7 +18,8 @@
 #   - Mail:         Postfix (relay-only; Monit, Grafana, Forgejo can route through it)
 #   - Management:   Monit, Grafana, Forgejo, Webmin (not recommended; see README)
 #   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
-#   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist
+#   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist,
+#					Wazuh Server (manager+indexer+dashboard), Coraza
 #   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils, vnstat, nload,  
 #                   ethtool, nmap, lynis, git, git-lfs, jq, smartmontools (bare metal only)
 #
@@ -35,9 +36,9 @@
 ## --------------------------------------------
 
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v7.3.23
-FORGEJO_FALLBACK_VERSION=16.0.4
-MODULEJAIL_FALLBACK_VERSION=1.6.1
+PYPY_FALLBACK_VERSION=pypy3.11-v8.0.1
+FORGEJO_FALLBACK_VERSION=17.0.0
+MODULEJAIL_FALLBACK_VERSION=1.6.3
 FORGEJO_FALLBACK_PORT=3030
 
 
@@ -90,7 +91,7 @@ fi
 # Unconditional fallbacks for variables that are only prompted conditionally
 # and may never be set if their parent option is skipped.
 # These must be set before set -Eeuo pipefail to avoid unbound variable errors.
-: "${INSTALL_WAZUHMANAGER:=n}"
+: "${WZ_INSTALLED_SERVER_VERSION:=}"
 : "${INSTALL_MS_FONTS:=n}"
 : "${INSTALL_LIBERATION_FONTS:=y}"
 : "${INSTALL_FREEFONT_FONTS:=y}"
@@ -170,7 +171,7 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|CURRENT_TIMEZONE)" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE)" \
         | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
@@ -640,6 +641,7 @@ default_val="n"
 prompt_if_unset INSTALL_NGINX "Would you like to $PROMPT_NGINX nginx? (y/n)" n $default_val
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   prompt_if_unset NGINX_WORKER_PROCESSES "  nginx worker processes?" n "$PROCESSOR_COUNT"
+  prompt_if_unset INSTALL_CORAZA "  Build the Coraza WAF module for nginx? (compiles from source, takes several minutes; NOT activated, see README) (y/n)" n "n"
 fi
 
 #[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
@@ -1098,6 +1100,75 @@ prompt_if_unset INSTALL_IPBLOCK "Would you like to $PROMPT_IPBLOCK IP blocklist?
 default_val="n"
 prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata IDS? (y/n)" n  $default_val
 
+# --- Wazuh Server: manager + indexer + filebeat + dashboard on this host (all-in-one) ---
+# Asked before the agent so the agent can default to this host as its manager.
+WZ_RAM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+if [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+    WZ_SERVER_QUESTION="Wazuh Server is already installed. Apply the provisioning tuning to it (heap, shards, retention, health user)? (y/n)"
+else
+    WZ_SERVER_QUESTION="Would you like to install Wazuh Server (manager + indexer + dashboard on this host)? (y/n)"
+fi
+default_val='n'
+prompt_if_unset INSTALL_WAZUHMANAGER "$WZ_SERVER_QUESTION" n  $default_val
+if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+    # Guards: a wrong guess here costs a broken SIEM, so anything not explicitly allowed means "do not install".
+    if [[ "$ISINSTALLED_WAZUHMANAGER" != "y" ]]; then
+        if (( WZ_RAM_MB < 7000 )); then
+            echo "  [!] This host has ${WZ_RAM_MB} MB RAM. Wazuh recommends 8 GB for an all-in-one server;"
+            echo "      with less, the indexer runs out of heap (circuit_breaking_exception) and the dashboard fails."
+            prompt_if_unset WAZUH_SERVER_ALLOW_LOW_RAM "  Install anyway? (y/n)" n n
+            if ! [[ "$WAZUH_SERVER_ALLOW_LOW_RAM" =~ ^[Yy]$ ]]; then
+                echo "  Skipping Wazuh Server."
+                INSTALL_WAZUHMANAGER=n
+            fi
+        fi
+    fi
+    if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ && "$ISINSTALLED_WAZUHMANAGER" != "y" && "$VERSION_ID" == "26.04" ]]; then
+        echo "  [!] Wazuh officially supports Ubuntu up to 24.04; this is Ubuntu $VERSION_ID (unsupported by Wazuh)."
+        prompt_if_unset WAZUH_SERVER_ALLOW_UNSUPPORTED_OS "  Install anyway? (y/n)" n n
+        if ! [[ "$WAZUH_SERVER_ALLOW_UNSUPPORTED_OS" =~ ^[Yy]$ ]]; then
+            echo "  Skipping Wazuh Server."
+            INSTALL_WAZUHMANAGER=n
+        fi
+    fi
+fi
+if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+    if [[ "$ISINSTALLED_WAZUHMANAGER" != "y" ]]; then
+        # Latest release as a suggestion only; if the lookup fails the user has to type a version (no silent guess).
+        WZ_SERVER_LATEST=$(curl -sSL --max-time 10 \
+            "https://api.github.com/repos/wazuh/wazuh/releases/latest" 2>/dev/null \
+            | grep '"tag_name"' | grep -oP '[\d.]+' | head -1) || true
+        prompt_if_unset WAZUH_SERVER_VERSION \
+            "  Wazuh version to install (4.x, e.g. 4.14 or 4.14.9; the installer for that release stream is used)" \
+            n "${WZ_SERVER_LATEST:-}"
+        # Port: 443 is taken by nginx if it is (going to be) on this host
+        if [[ "$INSTALL_NGINX" =~ ^[Yy]$ || "$ISINSTALLED_NGINX" == "y" ]]; then
+            WZ_DASHBOARD_PORT_DEFAULT=5601
+            echo "  nginx is (going to be) on this host and uses 443, so the dashboard needs another port."
+        else
+            WZ_DASHBOARD_PORT_DEFAULT=443
+        fi
+        prompt_if_unset WAZUH_DASHBOARD_PORT "  Wazuh dashboard HTTPS port" n "$WZ_DASHBOARD_PORT_DEFAULT"
+        prompt_if_unset WAZUH_SERVER_HOLD_PACKAGES \
+            "  Pin the Wazuh server packages with apt-mark hold so unattended upgrades cannot break them? (y/n)" n y
+        prompt_if_unset WAZUH_OPEN_AGENT_PORTS "  Open UFW ports 1514/1515 (tcp) for remote Wazuh agents? (y/n)" n n
+        if [[ "$WAZUH_OPEN_AGENT_PORTS" =~ ^[Yy]$ && -z "${WAZUH_AGENT_ALLOW_FROM+x}" ]]; then
+            read -rp "  Restrict to this source IP/CIDR (Enter = from anywhere) : " WAZUH_AGENT_ALLOW_FROM
+        fi
+    fi
+    prompt_if_unset WAZUH_INDEXER_HEAP_MB "  Indexer heap in MB ('auto' = half of RAM, max 31744; use a number to override)" n auto
+    prompt_if_unset WAZUH_ALERTS_SHARDS "  Primary shards per new daily wazuh-alerts index (1 suits small servers)" n 1
+    prompt_if_unset WAZUH_ALERTS_RETENTION_DAYS "  Delete wazuh-alerts indices after how many days? (7-3650, 0 = keep forever)" n 90
+fi
+: "${WAZUH_SERVER_VERSION:=}"
+: "${WAZUH_DASHBOARD_PORT:=}"
+: "${WAZUH_SERVER_HOLD_PACKAGES:=n}"
+: "${WAZUH_OPEN_AGENT_PORTS:=n}"
+: "${WAZUH_AGENT_ALLOW_FROM:=}"
+: "${WAZUH_INDEXER_HEAP_MB:=}"
+: "${WAZUH_ALERTS_SHARDS:=}"
+: "${WAZUH_ALERTS_RETENTION_DAYS:=}"
+
 #if [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]]; then
 #    default_val='n'
 #else
@@ -1106,9 +1177,11 @@ prompt_if_unset INSTALL_SURICATA "Would you like to $PROMPT_SURICATA Suricata ID
 default_val='n'
 prompt_if_unset INSTALL_WAZUHAGENT "Would you like to $PROMPT_WAZUHAGENT Wazuh Agent? (y/n)" n  $default_val
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
-    # Interactive Manager host prompt
+    # Interactive Manager host prompt (defaults to this host when a Wazuh Server is being set up here)
+    WZ_MANAGER_DEFAULT=""
+    [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]] && WZ_MANAGER_DEFAULT="127.0.0.1"
     while true; do
-        prompt_if_unset WAZUH_MANAGER "  Enter IP or Hostname of Wazuh Manager" n
+        prompt_if_unset WAZUH_MANAGER "  Enter IP or Hostname of Wazuh Manager" n "$WZ_MANAGER_DEFAULT"
         if [[ ${#WAZUH_MANAGER} -ge 4 ]]; then
             break
         fi
@@ -1127,6 +1200,47 @@ else
     WAZUH_MANAGER=''
     WAZUH_AGENT_VERSION=''
 fi
+
+# --- Hold services against automatic upgrades ---
+# unattended-upgrades skips held packages, also for security fixes. For services that run round the clock the admin
+# upgrades them by hand after warning the users; a mail (held-package-updates) reminds the admin that an update waits.
+pkg_is_held() { apt-mark showhold 2>/dev/null | grep -qE "^$1"; }
+HLD_ANY=n
+for HLD_KEY in NGINX VALKEY MYSQL MARIADB POSTGRESQL GRAFANA; do
+    case "$HLD_KEY" in
+        NGINX)      HLD_LABEL="Nginx";      HLD_PKGRE="nginx" ;;
+        VALKEY)     HLD_LABEL="Valkey";     HLD_PKGRE="valkey" ;;
+        MYSQL)      HLD_LABEL="MySQL";      HLD_PKGRE="mysql-(server|client)" ;;
+        MARIADB)    HLD_LABEL="MariaDB";    HLD_PKGRE="mariadb-(server|client)" ;;
+        POSTGRESQL) HLD_LABEL="PostgreSQL"; HLD_PKGRE="postgresql-($PG_VERSION|client-$PG_VERSION)" ;;
+        GRAFANA)    HLD_LABEL="Grafana";    HLD_PKGRE="grafana" ;;
+    esac
+    HLD_INSTALL_VAR="INSTALL_$HLD_KEY"; HLD_ISIN_VAR="ISINSTALLED_$HLD_KEY"
+    if [[ "${!HLD_INSTALL_VAR:-n}" =~ ^[Yy]$ || "${!HLD_ISIN_VAR:-n}" == "y" ]]; then
+        pkg_is_held "$HLD_PKGRE" && default_val=y || default_val=n   # keep today's state when just pressing Enter
+        prompt_if_unset "HOLD_$HLD_KEY" "Hold $HLD_LABEL against automatic upgrades (you upgrade it manually, you get a mail when an update is available)? (y/n)" n $default_val
+    else
+        printf -v "HOLD_$HLD_KEY" 'n'   # not installed here, nothing to hold
+    fi
+    HLD_VAR="HOLD_$HLD_KEY"
+    [[ "${!HLD_VAR}" =~ ^[Yy]$ ]] && HLD_ANY=y
+done
+# Wazuh packages are held as well (agent always, server if chosen), so the same mail covers them.
+if [[ "$HLD_ANY" == "y" || "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+    echo "  Held packages are skipped by unattended-upgrades, including security fixes - so an admin mail is important."
+    if ! [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
+        echo "  [!] Postfix is not installed/selected: without a working 'mail' command the notice only goes to the journal."
+    fi
+    prompt_if_unset HELD_UPDATE_MAIL_TO "  Mail address for held-package update notices" n "${POSTFIX_ROOT_ALIAS:-${MONIT_ALERT_RECIPIENT:-root}}"
+    prompt_if_unset HELD_UPDATE_REMINDER_DAYS "  Repeat the notice every N days while an update is pending (0 = only for new versions)" n 7
+    if ! [[ "$HELD_UPDATE_MAIL_TO" =~ ^[A-Za-z0-9._%+-]+(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?$ ]]; then
+        echo "  [!] '$HELD_UPDATE_MAIL_TO' is not a valid mail address - no held-package notices will be configured."
+        HELD_UPDATE_MAIL_TO=''
+    fi
+    [[ "$HELD_UPDATE_REMINDER_DAYS" =~ ^[0-9]{1,3}$ ]] || HELD_UPDATE_REMINDER_DAYS=7
+fi
+: "${HELD_UPDATE_MAIL_TO:=}"
+: "${HELD_UPDATE_REMINDER_DAYS:=7}"
 
 prompt_if_unset CONFIGURE_APPARMOR "Would you like to configure AppArmor? (y/n)" n "n"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
@@ -1214,6 +1328,7 @@ echo "Install Pypy 3.11?           : $INSTALL_PYPY311"
 echo "Install nginx?               : $INSTALL_NGINX"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   echo "    nginx worker processes   : $NGINX_WORKER_PROCESSES"
+  echo "    Build Coraza WAF module  : ${INSTALL_CORAZA:-n}"
 fi
 echo "Install valkey?              : $INSTALL_VALKEY"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
@@ -1343,10 +1458,28 @@ echo "Install Fail2Ban?            : $INSTALL_FAIL2BAN"
 echo "Install auditd?              : $INSTALL_AUDITD"
 echo "Install IP blocklist?        : $INSTALL_IPBLOCK"
 echo "Install Suricata IDS?        : $INSTALL_SURICATA"
+echo "Install Wazuh Server?        : $INSTALL_WAZUHMANAGER"
+if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+  if [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+    echo "  Already installed          : tuning only, installer is not run"
+  else
+    echo "  Wazuh version              : $WAZUH_SERVER_VERSION"
+    echo "  Dashboard HTTPS port       : $WAZUH_DASHBOARD_PORT"
+    echo "  Pin packages (apt hold)    : $WAZUH_SERVER_HOLD_PACKAGES"
+    echo "  Open agent ports 1514/1515 : $WAZUH_OPEN_AGENT_PORTS${WAZUH_AGENT_ALLOW_FROM:+ (from $WAZUH_AGENT_ALLOW_FROM)}"
+  fi
+  echo "  Indexer heap (MB)          : $WAZUH_INDEXER_HEAP_MB"
+  echo "  Shards per new alert index : $WAZUH_ALERTS_SHARDS"
+  echo "  Alert retention (days)     : $WAZUH_ALERTS_RETENTION_DAYS"
+fi
 echo "Install Wazuh Agent?         : $INSTALL_WAZUHAGENT"
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
   echo "  Wazuh Manager              : $WAZUH_MANAGER"
   echo "  Wazuh Agent version        : $WAZUH_AGENT_VERSION"
+fi
+echo "Hold from auto-upgrade?       : nginx=$HOLD_NGINX valkey=$HOLD_VALKEY mysql=$HOLD_MYSQL mariadb=$HOLD_MARIADB postgresql=$HOLD_POSTGRESQL grafana=$HOLD_GRAFANA"
+if [[ -n "$HELD_UPDATE_MAIL_TO" ]]; then
+  echo "  Notify about updates       : $HELD_UPDATE_MAIL_TO (reminder every $HELD_UPDATE_REMINDER_DAYS days, 0 = new versions only)"
 fi
 echo "Configure AppArmor?          : $CONFIGURE_APPARMOR"
 if [[ "$CONFIGURE_APPARMOR" =~ ^[Yy]$ ]]; then
@@ -1835,9 +1968,10 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
     echo ""
     echo "--- 15. Override update timer settings ---"
     mkdir -p /etc/systemd/system/apt-daily.timer.d/
-    echo -e "[Timer]\nOnCalendar=*-*-* ${AUTO_UPDATE_DAILY_HOUR},${AUTO_UPDATE_DAILY_HOUR_2}:00" > /etc/systemd/system/apt-daily.timer.d/override.conf
+    # The empty "OnCalendar=" resets the packaged schedule; without it the default timer (~6am) still fires as well.
+    echo -e "[Timer]\nOnCalendar=\nOnCalendar=*-*-* ${AUTO_UPDATE_DAILY_HOUR},${AUTO_UPDATE_DAILY_HOUR_2}:00\nRandomizedDelaySec=60m" > /etc/systemd/system/apt-daily.timer.d/override.conf
     mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d/
-    echo -e "[Timer]\nOnCalendar=*-*-* ${AUTO_UPGRADE_DAILY_HOUR}:00" > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
+    echo -e "[Timer]\nOnCalendar=\nOnCalendar=*-*-* ${AUTO_UPGRADE_DAILY_HOUR}:00\nRandomizedDelaySec=60m" > /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
     systemctl daemon-reload
 
     echo ""
@@ -2639,6 +2773,26 @@ fi
 
 
 echo ""
+echo "--- 29b. Build Coraza WAF module for nginx ---"
+if [[ "$INSTALL_NGINX" =~ ^[Yy]$ && "${INSTALL_CORAZA:-n}" =~ ^[Yy]$ ]]; then
+    if [[ -f "$SCRIPT_DIR/utils/install_coraza_nginx.sh" ]]; then
+        # Builds and installs the module in detect-only mode. It stays inactive until a site enables it
+        # (coraza on; coraza_rules_file ...): see README, "Coraza WAF for nginx".
+        if bash "$SCRIPT_DIR/utils/install_coraza_nginx.sh"; then
+            echo "  Coraza module built. It is NOT active yet - see README, 'Coraza WAF for nginx'."
+        else
+            echo "  [!] Coraza build failed (see output above). Provisioning continues;"
+            echo "      fix the cause and re-run: sudo $SCRIPT_DIR/utils/install_coraza_nginx.sh"
+        fi
+    else
+        echo "  [!] $SCRIPT_DIR/utils/install_coraza_nginx.sh not found - skipping Coraza."
+    fi
+else
+    echo "  Skipping Coraza WAF build."
+fi
+
+
+echo ""
 echo "--- 30. Install Valkey ---"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
     if [[ "$PROMPT_VALKEY" == 'reinstall' ]]; then
@@ -3436,8 +3590,165 @@ fi
 
 
 echo ""
+echo "--- 44b. Install and configure Wazuh Server (manager, indexer, filebeat, dashboard) ---"
+if [[ "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+
+    WZ_INSTALL_DIR=/root/wazuh-install
+    WZ_TUNE_SCRIPT="$SCRIPT_DIR/utils/wazuh_server_tune.sh"
+    WZ_SERVER_READY=n
+
+    if [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+        # Never re-run the installer over an existing server and never purge: that would destroy the indexer data.
+        echo "  Wazuh Server is already installed — installer not run, tuning only."
+        WZ_SERVER_READY=y
+    else
+        WZ_STREAM=""
+        if [[ "$WAZUH_SERVER_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+            WZ_STREAM="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        else
+            echo "  [!] Wazuh version '$WAZUH_SERVER_VERSION' is not of the form 4.14 or 4.14.9 — skipping Wazuh Server."
+        fi
+
+        if [[ -n "$WZ_STREAM" ]]; then
+            install -d -m 700 "$WZ_INSTALL_DIR"
+            WZ_INSTALLER="$WZ_INSTALL_DIR/wazuh-install.sh"
+            wait_for_apt
+
+            # Port 443 must be free while the installer starts the dashboard
+            WZ_NGINX_STOPPED=n
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                echo "  Stopping nginx while the Wazuh dashboard claims its port ..."
+                systemctl stop nginx && WZ_NGINX_STOPPED=y
+            fi
+
+            echo "  Downloading https://packages.wazuh.com/${WZ_STREAM}/wazuh-install.sh"
+            if curl -fsSL --max-time 120 -o "$WZ_INSTALLER" "https://packages.wazuh.com/${WZ_STREAM}/wazuh-install.sh" \
+               && [[ -s "$WZ_INSTALLER" ]] && head -c 2 "$WZ_INSTALLER" | grep -q '^#!'; then
+                echo "  Running the Wazuh installation assistant (all-in-one, takes 10-20 minutes) ..."
+                # The installer prints the generated admin password at the end. Mask it so it never reaches the log file.
+                if (cd "$WZ_INSTALL_DIR" && bash ./wazuh-install.sh -a 2>&1 \
+                        | sed -u -E 's/(Password:[[:space:]]*).*/\1********/I'); then
+                    echo "  [V] Wazuh installation assistant finished"
+                else
+                    echo "  [!] Wazuh installation assistant failed — see /var/log/wazuh-install.log"
+                fi
+            else
+                echo "  [!] Could not download a valid installer for ${WZ_STREAM} — skipping Wazuh Server."
+            fi
+
+            # Credentials end up in these files: root only
+            chmod 600 /var/log/wazuh-install.log "$WZ_INSTALL_DIR/wazuh-install-files.tar" 2>/dev/null || true
+
+            check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
+            if [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]]; then
+                WZ_SERVER_READY=y
+
+                # Pin the server packages: Ubuntu's unattended upgrades must not move manager/indexer/dashboard
+                # out of step (indexer first, then manager+filebeat, then dashboard is the supported upgrade order).
+                if [[ "$WAZUH_SERVER_HOLD_PACKAGES" =~ ^[Yy]$ ]]; then
+                    for WZ_PKG in wazuh-indexer wazuh-manager filebeat wazuh-dashboard; do
+                        if dpkg -s "$WZ_PKG" >/dev/null 2>&1; then
+                            apt-mark hold "$WZ_PKG" >/dev/null && echo "  [V] $WZ_PKG pinned (apt-mark hold)"
+                        fi
+                    done
+                    echo "  To upgrade later: apt-mark unhold the four packages, upgrade in the order above, hold again."
+                fi
+
+                # Dashboard on another port if requested (default 443 stays untouched)
+                DASH_CFG=/etc/wazuh-dashboard/opensearch_dashboards.yml
+                if [[ "$WAZUH_DASHBOARD_PORT" =~ ^[0-9]+$ ]] && (( WAZUH_DASHBOARD_PORT >= 1 && WAZUH_DASHBOARD_PORT <= 65535 )); then
+                    if [[ "$WAZUH_DASHBOARD_PORT" != "443" && -f "$DASH_CFG" ]]; then
+                        sed -i -E "s/^server\.port:.*/server.port: ${WAZUH_DASHBOARD_PORT}/" "$DASH_CFG"
+                        if grep -q "^server.port: ${WAZUH_DASHBOARD_PORT}$" "$DASH_CFG"; then
+                            systemctl restart wazuh-dashboard && echo "  [V] Wazuh dashboard now on port $WAZUH_DASHBOARD_PORT"
+                        else
+                            echo "  [!] Could not set server.port in $DASH_CFG — dashboard stays on 443"
+                        fi
+                    fi
+                else
+                    echo "  [!] Dashboard port '$WAZUH_DASHBOARD_PORT' is not 1-65535 — dashboard port left unchanged"
+                fi
+            fi
+
+            if [[ "$WZ_NGINX_STOPPED" == "y" ]]; then
+                systemctl start nginx && echo "  nginx started again" || echo "  [!] nginx failed to start — check: systemctl status nginx"
+            fi
+        fi
+    fi
+
+    if [[ "$WZ_SERVER_READY" == "y" ]]; then
+        # Agents on other hosts: UFW 1514 (events) and 1515 (enrolment). API (55000), indexer (9200) and dashboard stay closed.
+        if [[ "$WAZUH_OPEN_AGENT_PORTS" =~ ^[Yy]$ ]]; then
+            if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
+                if [[ -z "$WAZUH_AGENT_ALLOW_FROM" ]]; then
+                    ufw allow 1514/tcp && ufw allow 1515/tcp && echo "  [V] UFW: 1514/tcp and 1515/tcp open to anywhere"
+                elif [[ "$WAZUH_AGENT_ALLOW_FROM" =~ ^[0-9a-fA-F:.]+(/[0-9]{1,3})?$ ]] \
+                     && command -v python3 >/dev/null 2>&1 \
+                     && python3 -I -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$WAZUH_AGENT_ALLOW_FROM" 2>/dev/null; then
+                    ufw allow from "$WAZUH_AGENT_ALLOW_FROM" to any port 1514 proto tcp \
+                        && ufw allow from "$WAZUH_AGENT_ALLOW_FROM" to any port 1515 proto tcp \
+                        && echo "  [V] UFW: 1514/tcp and 1515/tcp open to $WAZUH_AGENT_ALLOW_FROM"
+                else
+                    echo "  [!] '$WAZUH_AGENT_ALLOW_FROM' is not a valid IP/CIDR — no UFW rule added for agents"
+                fi
+            else
+                echo "  [!] UFW is not active — agent ports not opened by this script"
+            fi
+        else
+            echo "  Agent ports 1514/1515 not opened in UFW (remote agents cannot connect until you open them)."
+        fi
+
+        if [[ "$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)" -lt 262144 ]]; then
+            echo "  [!] vm.max_map_count is below 262144 — the indexer may fail to start. Fix: sysctl -w vm.max_map_count=262144"
+        fi
+
+        WZ_INSTALLED_SERVER_VERSION=$(/var/ossec/bin/wazuh-control info 2>/dev/null | sed -n 's/^WAZUH_VERSION="v\{0,1\}\(.*\)"$/\1/p' | head -1) || true
+        [[ -n "$WZ_INSTALLED_SERVER_VERSION" ]] && echo "  Wazuh Server version: $WZ_INSTALLED_SERVER_VERSION"
+
+        # Tuning: heap, shards of new alert indices, retention policy, read-only health user.
+        # The admin password is read from the installer's credentials archive and handed to the child via its
+        # environment only; if it is not available (existing server) the script asks, and Enter skips those steps.
+        if [[ -f "$WZ_TUNE_SCRIPT" ]]; then
+            WZ_TMP_PASSWORD=""
+            if [[ -f "$WZ_INSTALL_DIR/wazuh-install-files.tar" ]]; then
+                WZ_TMP_PASSWORD=$(tar -O -xf "$WZ_INSTALL_DIR/wazuh-install-files.tar" wazuh-install-files/wazuh-passwords.txt 2>/dev/null \
+                    | awk '/indexer_username: \047admin\047/ {f=1; next} f && /indexer_password:/ {sub(/^[^\047]*\047/, ""); sub(/\047[^\047]*$/, ""); print; exit}') || true
+            fi
+            echo "  Tuning the Wazuh Server ..."
+            WAZUH_ADMIN_PASSWORD="$WZ_TMP_PASSWORD" \
+            WAZUH_INDEXER_HEAP_MB="$WAZUH_INDEXER_HEAP_MB" \
+            WAZUH_ALERTS_SHARDS="$WAZUH_ALERTS_SHARDS" \
+            WAZUH_ALERTS_RETENTION_DAYS="$WAZUH_ALERTS_RETENTION_DAYS" \
+            WAZUH_CREATE_HEALTH_USER=y \
+                bash "$WZ_TUNE_SCRIPT" || echo "  [!] Wazuh tuning reported errors — re-run later: sudo $WZ_TUNE_SCRIPT"
+            WZ_TMP_PASSWORD=""
+        else
+            echo "  [!] $WZ_TUNE_SCRIPT not found — skipping tuning"
+        fi
+
+        echo ""
+        echo "  Wazuh dashboard: https://localhost:${WAZUH_DASHBOARD_PORT:-443} (use the SSH port forward printed at the end; user 'admin')"
+        if [[ -f "$WZ_INSTALL_DIR/wazuh-install-files.tar" ]]; then
+            echo "  Generated passwords (root only): sudo tar -O -xf $WZ_INSTALL_DIR/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
+            echo "  Store them in your password manager. If you change them (wazuh-passwords-tool.sh), the archive becomes outdated."
+        fi
+    fi
+else
+    echo "  Skipping Wazuh Server installation."
+fi
+
+
+echo ""
 echo "--- 45. Install and configure Wazuh Agent ---"
 if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
+
+    # A manager installed in this run decides the agent version: the agent must never be newer than the manager.
+    if [[ -n "$WZ_INSTALLED_SERVER_VERSION" && "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+        if [[ "$WAZUH_AGENT_VERSION" != "$WZ_INSTALLED_SERVER_VERSION" ]]; then
+            echo "  Agent version set to the installed manager version: $WZ_INSTALLED_SERVER_VERSION (was: ${WAZUH_AGENT_VERSION:-unset})"
+        fi
+        WAZUH_AGENT_VERSION="$WZ_INSTALLED_SERVER_VERSION"
+    fi
 
     if [[ "$PROMPT_WAZUHAGENT" == 'reinstall' ]]; then
         echo "  Uninstall wazuh-agent"
@@ -3942,6 +4253,9 @@ EOF
             "$( [[ "$ISINSTALLED_WEBMIN"     == "y" ]] && echo webmin )" \
             "$( [[ "$ISINSTALLED_GRAFANA"    == "y" ]] && echo grafana-server )" \
             "$( [[ "$ISINSTALLED_FORGEJO"    == "y" ]] && echo forgejo )" \
+            "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-indexer )" \
+            "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-manager )" \
+            "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-dashboard )" \
             "openssh-server"; do
             [[ -z "$SERVICE" ]] && continue
             SRC="$CONFIG_DIR/etc/monit/conf-available/$SERVICE"
@@ -3983,6 +4297,9 @@ EOF
             ["webmin"]="ISINSTALLED_WEBMIN"
             ["grafana-server"]="ISINSTALLED_GRAFANA"
             ["forgejo"]="ISINSTALLED_FORGEJO"
+            ["wazuh-indexer"]="ISINSTALLED_WAZUHMANAGER"
+            ["wazuh-manager"]="ISINSTALLED_WAZUHMANAGER"
+            ["wazuh-dashboard"]="ISINSTALLED_WAZUHMANAGER"
         )
         for LINK in /etc/monit/conf-enabled/*; do
             [[ -L "$LINK" ]] || continue
@@ -4037,6 +4354,14 @@ EOF
         <log_format>apache</log_format>
         <location>/var/log/nginx/error.log</location>
       </localfile>'
+
+            if [[ -f /var/lib/coraza-nginx/build.stamp ]]; then
+                append_localfile_to_ossec "/var/log/nginx/coraza_audit.json" \
+    '  <localfile>
+        <log_format>json</log_format>
+        <location>/var/log/nginx/coraza_audit.json</location>
+      </localfile>'
+            fi
         fi
 
         if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" ]]; then
@@ -4173,6 +4498,66 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     restart_autoupdate
 else
     echo "  Skipping finalising"
+fi
+
+
+echo ""
+echo "--- 49b. Hold packages against automatic upgrades, notify about pending updates ---"
+# Packages that really make up each service (globs are matched against what is installed, so modules,
+# clients and extensions that must stay in step with the server are held with it).
+declare -A HLD_GLOBS=(
+    [NGINX]="nginx nginx-common nginx-core nginx-full nginx-light nginx-extras libnginx-mod-*"
+    [VALKEY]="valkey valkey-server valkey-tools"
+    [MYSQL]="mysql-server mysql-server-* mysql-client mysql-client-*"
+    [MARIADB]="mariadb-server mariadb-server-* mariadb-client mariadb-client-*"
+    [POSTGRESQL]="postgresql postgresql-$PG_VERSION postgresql-client-$PG_VERSION postgresql-$PG_VERSION-*"
+    [GRAFANA]="grafana"
+)
+hld_installed_pkgs() {   # print installed packages matching the globs given as arguments
+    local g
+    for g in "$@"; do
+        # dpkg-query exits 1 for a glob that matches nothing; that must not end the loop under set -e / pipefail
+        dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' "$g" 2>/dev/null | awk '$1 == "ii" {print $2}' || true
+    done | sort -u
+}
+for HLD_KEY in NGINX VALKEY MYSQL MARIADB POSTGRESQL GRAFANA; do
+    HLD_VAR="HOLD_$HLD_KEY"
+    # shellcheck disable=SC2086   # the globs are meant to be split into separate arguments
+    mapfile -t HLD_PKGS < <(hld_installed_pkgs ${HLD_GLOBS[$HLD_KEY]})
+    [[ ${#HLD_PKGS[@]} -gt 0 ]] || continue
+    if [[ "${!HLD_VAR}" =~ ^[Yy]$ ]]; then
+        apt-mark hold "${HLD_PKGS[@]}" >/dev/null && echo "  [V] $HLD_KEY held: ${HLD_PKGS[*]}"
+    else
+        mapfile -t HLD_HELD_NOW < <(apt-mark showhold | grep -Fx -f <(printf '%s\n' "${HLD_PKGS[@]}") || true)
+        if [[ ${#HLD_HELD_NOW[@]} -gt 0 ]]; then
+            apt-mark unhold "${HLD_HELD_NOW[@]}" >/dev/null && echo "  [!] $HLD_KEY hold lifted as requested: ${HLD_HELD_NOW[*]}"
+        fi
+    fi
+done
+
+if [[ -n "$(apt-mark showhold)" && -n "$HELD_UPDATE_MAIL_TO" ]]; then
+    for HLD_FILE in held-package-updates upgrade-held-packages; do
+        if [[ -f "$CONFIG_DIR/usr/local/sbin/$HLD_FILE" ]]; then
+            install -m 750 -o root -g root "$CONFIG_DIR/usr/local/sbin/$HLD_FILE" "/usr/local/sbin/$HLD_FILE"
+        else
+            echo "  [!] $CONFIG_DIR/usr/local/sbin/$HLD_FILE not found"
+        fi
+    done
+    printf 'MAIL_TO=%s\nREMINDER_DAYS=%s\n' "$HELD_UPDATE_MAIL_TO" "$HELD_UPDATE_REMINDER_DAYS" > /etc/held-package-updates.conf
+    chmod 644 /etc/held-package-updates.conf
+    # Run right after every apt-daily (= apt-get update) so the check sees fresh package lists
+    mkdir -p /etc/systemd/system/apt-daily.service.d
+    printf '[Service]\nExecStartPost=-/usr/local/sbin/held-package-updates\n' > /etc/systemd/system/apt-daily.service.d/held-package-updates.conf
+    systemctl daemon-reload
+    echo "  [V] Held-package notices go to $HELD_UPDATE_MAIL_TO after each apt update (reminder every $HELD_UPDATE_REMINDER_DAYS days)"
+    echo "      Upgrade held packages with: sudo upgrade-held-packages   (lifts the hold, upgrades, restores the hold)"
+    echo "      Preview the mail:           sudo held-package-updates --dry-run"
+elif [[ -z "$(apt-mark showhold)" ]]; then
+    rm -f /etc/systemd/system/apt-daily.service.d/held-package-updates.conf
+    systemctl daemon-reload
+    echo "  Nothing is held - no held-package notices needed."
+else
+    echo "  [!] Packages are held but no valid notice address was given - NO mail will be sent about pending updates."
 fi
 
 
@@ -4417,11 +4802,48 @@ echo "==========================================="
 apt-get -s upgrade 2>/dev/null | grep -P "^\d+ upgraded" || echo "Could not check."
 
 echo ""
+echo "Held packages (skipped by automatic upgrades)"
+echo "==========================================="
+HELD_LIST=$(apt-mark showhold 2>/dev/null)
+if [[ -z "$HELD_LIST" ]]; then
+    echo "  None"
+else
+    HELD_WAITING=0
+    while read -r hp; do
+        [[ -n "$hp" ]] || continue
+        hp_inst=$(dpkg-query -W -f='${Version}' "$hp" 2>/dev/null) || continue
+        hp_cand=$(apt-cache policy "$hp" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
+        if [[ -n "$hp_cand" && "$hp_cand" != "(none)" ]] && dpkg --compare-versions "$hp_cand" gt "$hp_inst"; then
+            echo -e "  $hp $hp_inst: ${YELLOW}[UPDATE AVAILABLE: $hp_cand]${NC}"
+            HELD_WAITING=$((HELD_WAITING + 1))
+        else
+            echo -e "  $hp $hp_inst: ${GREEN}[up to date]${NC}"
+        fi
+    done <<<"$HELD_LIST"
+    (( HELD_WAITING > 0 )) && echo -e "  ${YELLOW}$HELD_WAITING held package(s) have updates: sudo upgrade-held-packages${NC}"
+    if [[ -x /usr/local/sbin/held-package-updates && -f /etc/systemd/system/apt-daily.service.d/held-package-updates.conf ]]; then
+        HELD_MAIL=$(sed -n 's/^MAIL_TO=//p' /etc/held-package-updates.conf 2>/dev/null | head -1)
+        echo -e "  Update notice mail: ${GREEN}[to ${HELD_MAIL:-?}]${NC}"
+    else
+        echo -e "  Update notice mail: ${RED}[NOT CONFIGURED - you will not be told when an update is waiting]${NC}"
+    fi
+fi
+
+echo ""
 echo "Service status"
 echo "==========================================="
 echo -n "UFW Firewall "
 ufw status | grep -q "^Status: active" && echo -e "${GREEN}[ACTIVE]${NC}" || echo -e "${RED}[INACTIVE]${NC}"
 check_service_status "nginx" "NGINX Web Server"
+# Coraza WAF module: only reported if it was built by utils/install_coraza_nginx.sh
+echo -n "Coraza WAF module "
+if [[ ! -f /var/lib/coraza-nginx/build.stamp ]]; then
+    echo -e "${GREY}[NOT INSTALLED]${NC}"
+elif /usr/local/sbin/install_coraza_nginx.sh check >/dev/null 2>&1; then
+    echo -e "${GREEN}[OK]${NC} mode: $(grep -oP '^SecRuleEngine \K\S+' /etc/nginx/coraza/coraza.conf 2>/dev/null || echo unknown)"
+else
+    echo -e "${RED}[MISMATCH OR BROKEN]${NC} - run: sudo /usr/local/sbin/install_coraza_nginx.sh"
+fi
 check_service_status "valkey-server" "Valkey Server"
 check_service_status "mysql" "MySQL Server"
 check_service_status "mariadb" "MariaDB Server"
@@ -4435,6 +4857,10 @@ check_service_status "fail2ban" "Fail2Ban IDS"
 check_service_status "auditd" "Auditd Daemon"
 check_service_status "suricata" "Suricata IDS"
 check_service_status "wazuh-agent" "Wazuh Agent"
+check_service_status "wazuh-indexer" "Wazuh Indexer"
+check_service_status "wazuh-manager" "Wazuh Manager"
+check_service_status "filebeat" "Filebeat (Wazuh)"
+check_service_status "wazuh-dashboard" "Wazuh Dashboard"
 check_service_status "postfix" "Postfix Mail Relay"
 check_service_status "vnstat" "vnStat Traffic Monitor"
 check_service_status "unattended-upgrades" "Unattended Upgrades"
@@ -4660,6 +5086,10 @@ check_port "monit"          "2812"
 check_port "grafana-server" "3000"
 check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
 check_port "webmin"         "10000"
+check_port "wazuh-indexer"   "9200"
+check_port "wazuh-manager"   "55000"
+WZ_PORT_DASH=$(sed -n 's/^server\.port:[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' /etc/wazuh-dashboard/opensearch_dashboards.yml 2>/dev/null | head -1)
+[[ -n "$WZ_PORT_DASH" ]] && check_port "wazuh-dashboard" "$WZ_PORT_DASH"
 
 echo ""
 echo "Smoke Tests"
@@ -4736,8 +5166,10 @@ if systemctl is-active --quiet postgresql 2>/dev/null; then
 else smoke_skip "PostgreSQL"; fi
 
 if systemctl is-active --quiet valkey-server 2>/dev/null; then
-    # (authenticated: valkey-cli reads the password from REDISCLI_AUTH / VALKEYCLI_AUTH, so it is not on the command line)
-    if REDISCLI_AUTH="${VALKEY_PASSWORD:-}" VALKEYCLI_AUTH="${VALKEY_PASSWORD:-}" valkey-cli ping 2>/dev/null | grep -q "PONG"; then
+    # the password set by ubuntu_provision.sh (file readable by root/valkey only); empty if none is set.
+    # valkey-cli reads it from REDISCLI_AUTH / VALKEYCLI_AUTH, so it is not on the command line
+    VALKEY_AUTH=$(sed -n 's/^requirepass "\(.*\)"$/\1/p' /etc/valkey/valkey-auth.conf 2>/dev/null)
+    if REDISCLI_AUTH="$VALKEY_AUTH" VALKEYCLI_AUTH="$VALKEY_AUTH" valkey-cli ping 2>/dev/null | grep -q "PONG"; then
         smoke_ok "Valkey: PONG received"
     else
         smoke_warn "Valkey: no PONG — check service status"
@@ -4759,6 +5191,253 @@ if systemctl is-active --quiet mosquitto 2>/dev/null; then
         smoke_warn "Mosquitto: pub/sub failed — check service status"
     fi
 else smoke_skip "Mosquitto"; fi
+
+# --- Wazuh Server (shown only when a server component is installed) ---
+WAZUH_SERVER_PRESENT=n
+for wz_unit in wazuh-manager wazuh-indexer wazuh-dashboard; do
+    systemctl list-unit-files "${wz_unit}.service" 2>/dev/null | grep -q "${wz_unit}.service" && WAZUH_SERVER_PRESENT=y
+done
+
+if [[ "$WAZUH_SERVER_PRESENT" == "y" ]]; then
+echo ""
+echo "Wazuh Server"
+echo "==========================================="
+
+wz() {   # wz ok|warn|bad "label" "message"
+    local c
+    case "$1" in ok) c="$GREEN" ;; warn) c="$YELLOW" ;; *) c="$RED" ;; esac
+    echo -e "  $2: ${c}$3${NC}"
+}
+
+# Versions and upgrade protection (an unplanned apt upgrade of one component breaks the others)
+WZ_VER=$(/var/ossec/bin/wazuh-control info 2>/dev/null | sed -n 's/^WAZUH_VERSION="v\{0,1\}\(.*\)"$/\1/p' | head -1)
+echo "  Version: ${WZ_VER:-unknown}"
+WZ_HELD=$(apt-mark showhold 2>/dev/null)
+for wz_pkg in wazuh-indexer wazuh-manager filebeat wazuh-dashboard; do
+    dpkg -s "$wz_pkg" >/dev/null 2>&1 || continue
+    wz_pv=$(dpkg-query -W -f='${Version}' "$wz_pkg" 2>/dev/null)
+    if grep -qx "$wz_pkg" <<<"$WZ_HELD"; then
+        wz ok "$wz_pkg $wz_pv" "[HELD]"
+    else
+        wz warn "$wz_pkg $wz_pv" "[NOT HELD — unattended-upgrades can upgrade it on its own]"
+    fi
+done
+
+# Memory: heap vs RAM, swap use of the indexer, kernel map count
+WZ_RAM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+WZ_XMX=$(sed -n 's/^-Xmx\([0-9]\+[mMgG]\)$/\1/p' /etc/wazuh-indexer/jvm.options 2>/dev/null | head -1)
+if [[ -n "$WZ_XMX" ]]; then
+    case "${WZ_XMX: -1}" in g|G) WZ_HEAP_MB=$(( ${WZ_XMX%?} * 1024 )) ;; *) WZ_HEAP_MB=${WZ_XMX%?} ;; esac
+    WZ_HEAP_PCT=$(( WZ_HEAP_MB * 100 / WZ_RAM_MB ))
+    if (( WZ_HEAP_PCT > 55 )); then
+        wz bad  "Indexer heap" "[${WZ_HEAP_MB} MB = ${WZ_HEAP_PCT}% of ${WZ_RAM_MB} MB RAM — above half of RAM]"
+    elif (( WZ_HEAP_PCT < 25 )); then
+        wz warn "Indexer heap" "[${WZ_HEAP_MB} MB = ${WZ_HEAP_PCT}% of ${WZ_RAM_MB} MB RAM — small; circuit_breaking_exception risk]"
+    else
+        wz ok   "Indexer heap" "[${WZ_HEAP_MB} MB = ${WZ_HEAP_PCT}% of ${WZ_RAM_MB} MB RAM]"
+    fi
+else
+    wz warn "Indexer heap" "[could not read -Xmx from /etc/wazuh-indexer/jvm.options]"
+fi
+WZ_PID=$(systemctl show -p MainPID --value wazuh-indexer 2>/dev/null)
+if [[ -n "$WZ_PID" && "$WZ_PID" != "0" && -r "/proc/$WZ_PID/status" ]]; then
+    WZ_SWAP_KB=$(awk '/^VmSwap:/ {print $2}' "/proc/$WZ_PID/status")
+    if (( ${WZ_SWAP_KB:-0} > 262144 )); then
+        wz warn "Indexer swap use" "[$(( WZ_SWAP_KB / 1024 )) MB swapped out — memory pressure]"
+    else
+        wz ok   "Indexer swap use" "[$(( ${WZ_SWAP_KB:-0} / 1024 )) MB]"
+    fi
+fi
+WZ_MAPS=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
+if (( WZ_MAPS >= 262144 )); then wz ok "vm.max_map_count" "[$WZ_MAPS]"; else wz bad "vm.max_map_count" "[$WZ_MAPS — indexer needs >= 262144]"; fi
+
+# Circuit breaker trips in the last 24 hours (the failure that makes the dashboard say "internal server error")
+WZ_CB=$(journalctl -u wazuh-indexer -u wazuh-dashboard --since "24 hours ago" --no-pager -q 2>/dev/null | grep -c 'circuit_breaking_exception')
+if (( ${WZ_CB:-0} > 0 )); then
+    wz bad "circuit_breaking_exception, last 24h" "[${WZ_CB} — indexer heap exhausted: raise heap/RAM or reduce shards]"
+else
+    wz ok  "circuit_breaking_exception, last 24h" "[none]"
+fi
+
+# Exposure: the indexer must listen on loopback only
+WZ_LISTEN=$(ss -H -ltn 'sport = :9200' 2>/dev/null | awk '{print $4}' | paste -sd' ' -)
+if [[ -z "$WZ_LISTEN" ]]; then
+    wz bad "Indexer listening (9200)" "[not listening]"
+elif grep -qE '(^| )(0\.0\.0\.0|\*|\[::\]):9200' <<<"$WZ_LISTEN"; then
+    wz bad "Indexer listening (9200)" "[$WZ_LISTEN — reachable beyond localhost]"
+else
+    wz ok  "Indexer listening (9200)" "[$WZ_LISTEN]"
+fi
+
+# Agent ports in UFW (informational: they are meant to be open for remote agents)
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
+    for wz_port in 1514 1515; do
+        wz_rule=$(ufw status | grep -E "^${wz_port}(/tcp)?[[:space:]]+ALLOW" | awk '{print $NF}' | paste -sd',' -)
+        if [[ -z "$wz_rule" ]]; then
+            wz warn "Agent port ${wz_port}/tcp" "[not open in UFW — remote agents cannot connect]"
+        elif [[ "$wz_rule" == *Anywhere* ]]; then
+            wz warn "Agent port ${wz_port}/tcp" "[open to Anywhere]"
+        else
+            wz ok   "Agent port ${wz_port}/tcp" "[open to ${wz_rule}]"
+        fi
+    done
+fi
+
+# Manager daemons
+if [[ -x /var/ossec/bin/wazuh-control ]]; then
+    WZ_STATUS=$(/var/ossec/bin/wazuh-control status 2>/dev/null)
+    WZ_DOWN=""
+    for wz_d in wazuh-analysisd wazuh-remoted wazuh-db wazuh-modulesd wazuh-monitord wazuh-authd wazuh-apid; do
+        grep -q "^${wz_d} is running" <<<"$WZ_STATUS" || WZ_DOWN="$WZ_DOWN $wz_d"
+    done
+    if [[ -z "$WZ_DOWN" ]]; then wz ok "Manager daemons" "[all core daemons running]"; else wz bad "Manager daemons" "[not running:${WZ_DOWN}]"; fi
+fi
+
+# Agents (local query, no API credentials needed)
+if [[ -x /var/ossec/bin/agent_control ]]; then
+    WZ_AGENTS=$(/var/ossec/bin/agent_control -l 2>/dev/null | grep -E '^[[:space:]]*ID:' | grep -vE '^[[:space:]]*ID: 000,')
+    WZ_A_TOTAL=$(grep -c . <<<"$WZ_AGENTS"); [[ -z "$WZ_AGENTS" ]] && WZ_A_TOTAL=0
+    WZ_A_ACTIVE=$(grep -c ', Active$' <<<"$WZ_AGENTS")
+    WZ_A_DISC=$(grep -c ', Disconnected$' <<<"$WZ_AGENTS")
+    WZ_A_NEVER=$(grep -c ', Never connected$' <<<"$WZ_AGENTS")
+    if (( WZ_A_TOTAL == 0 )); then
+        wz warn "Agents" "[none enrolled]"
+    elif (( WZ_A_DISC + WZ_A_NEVER > 0 )); then
+        wz warn "Agents" "[${WZ_A_TOTAL} enrolled: ${WZ_A_ACTIVE} active, ${WZ_A_DISC} disconnected, ${WZ_A_NEVER} never connected]"
+        grep -E ', (Disconnected|Never connected)$' <<<"$WZ_AGENTS" | sed 's/^[[:space:]]*/      /'
+    else
+        wz ok "Agents" "[${WZ_A_TOTAL} enrolled, all active]"
+    fi
+fi
+
+# Alert pipeline: alerts written by the manager, shipped by filebeat
+WZ_ALERTS=/var/ossec/logs/alerts/alerts.json
+if [[ -f "$WZ_ALERTS" ]]; then
+    WZ_AGE_MIN=$(( ( $(date +%s) - $(stat -c %Y "$WZ_ALERTS") ) / 60 ))
+    if (( WZ_AGE_MIN > 120 )); then wz warn "Last alert written" "[${WZ_AGE_MIN} min ago]"; else wz ok "Last alert written" "[${WZ_AGE_MIN} min ago]"; fi
+fi
+if command -v filebeat >/dev/null 2>&1 && systemctl is-active --quiet filebeat 2>/dev/null; then
+    if timeout 30 filebeat test output 2>&1 | grep -q 'talk to server... OK'; then
+        wz ok  "Filebeat -> indexer" "[connection and login OK]"
+    else
+        wz bad "Filebeat -> indexer" "[cannot talk to the indexer — keystore password or indexer down; alerts are not being indexed]"
+    fi
+fi
+
+# Endpoints
+WZ_DASH_PORT=$(sed -n 's/^server\.port:[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' /etc/wazuh-dashboard/opensearch_dashboards.yml 2>/dev/null | head -1)
+if systemctl is-active --quiet wazuh-dashboard 2>/dev/null; then
+    if [[ -n "$WZ_DASH_PORT" ]]; then
+        smoke_http "Wazuh Dashboard (port $WZ_DASH_PORT)" "https://127.0.0.1:${WZ_DASH_PORT}" "ok" "-k"
+    else
+        smoke_warn "Wazuh Dashboard: server.port not found in /etc/wazuh-dashboard/opensearch_dashboards.yml"
+    fi
+fi
+systemctl is-active --quiet wazuh-indexer 2>/dev/null && smoke_http "Wazuh Indexer API" "https://127.0.0.1:9200" "401" "-k"
+systemctl is-active --quiet wazuh-manager 2>/dev/null && smoke_http "Wazuh Manager API" "https://127.0.0.1:55000" "401" "-k"
+
+# Cluster, shards, disk: need the read-only health user from utils/wazuh_server_tune.sh
+WZ_CRED=/etc/wazuh-health.conf
+WZ_USER=""; WZ_PASS=""; WZ_RET=""
+if [[ -e "$WZ_CRED" ]]; then
+    if [[ "$(stat -c '%U:%G %a' "$WZ_CRED")" == "root:root 600" ]]; then
+        WZ_USER=$(sed -n 's/^WAZUH_HEALTH_USER=//p' "$WZ_CRED" | head -1)
+        WZ_PASS=$(sed -n 's/^WAZUH_HEALTH_PASSWORD=//p' "$WZ_CRED" | head -1)
+        WZ_RET=$(sed -n 's/^WAZUH_ALERTS_RETENTION_DAYS=//p' "$WZ_CRED" | head -1)
+        [[ "$WZ_USER" =~ ^[A-Za-z0-9_.-]+$ && "$WZ_PASS" =~ ^[A-Za-z0-9]+$ ]] || { WZ_USER=""; WZ_PASS=""; wz bad "Health credentials" "[$WZ_CRED has an unusable user/password — ignored]"; }
+        [[ "$WZ_RET" =~ ^[0-9]+$ ]] || WZ_RET=""
+    else
+        wz bad "Health credentials" "[$WZ_CRED must be owned by root with mode 600 — ignored]"
+    fi
+else
+    wz warn "Cluster checks" "[skipped — no $WZ_CRED; create it: sudo WAZUH_CREATE_HEALTH_USER=y utils/wazuh_server_tune.sh]"
+fi
+
+if [[ -n "$WZ_USER" && -n "$WZ_PASS" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
+        wz warn "Cluster checks" "[skipped — jq is not installed]"
+    else
+        WZ_CFG=$(mktemp); chmod 600 "$WZ_CFG"
+        printf 'user = "%s:%s"\n' "$WZ_USER" "$WZ_PASS" > "$WZ_CFG"
+        wz_api() { curl -sk --max-time 30 -K "$WZ_CFG" "https://127.0.0.1:9200$1" 2>/dev/null; }
+
+        WZ_H=$(wz_api "/_cluster/health")
+        if ! jq -e '.status' >/dev/null 2>&1 <<<"$WZ_H"; then
+            wz bad "Cluster health" "[indexer unreachable or login rejected for $WZ_USER]"
+        else
+            WZ_ST=$(jq -r '.status' <<<"$WZ_H"); WZ_ACT=$(jq -r '.active_shards' <<<"$WZ_H")
+            WZ_UNA=$(jq -r '.unassigned_shards' <<<"$WZ_H"); WZ_DN=$(jq -r '.number_of_data_nodes' <<<"$WZ_H")
+            case "$WZ_ST" in
+                green)  wz ok   "Cluster health" "[green — ${WZ_ACT} active shards]" ;;
+                yellow) wz warn "Cluster health" "[yellow — ${WZ_UNA} unassigned shards (replicas on a single node are normal)]" ;;
+                *)      wz bad  "Cluster health" "[${WZ_ST} — ${WZ_UNA} unassigned shards, some data is unavailable]" ;;
+            esac
+
+            # Shards against the per-node limit (new daily indices cannot be created once it is reached)
+            WZ_LIMIT=$(wz_api "/_cluster/settings?include_defaults=true&flat_settings=true" \
+                | jq -r '[.transient, .persistent, .defaults] | map(select(. != null) | ."cluster.max_shards_per_node") | map(select(. != null)) | .[0] // empty' 2>/dev/null)
+            if [[ "$WZ_LIMIT" =~ ^[0-9]+$ && "$WZ_DN" =~ ^[0-9]+$ && "$WZ_DN" -gt 0 ]]; then
+                WZ_MAX=$(( WZ_LIMIT * WZ_DN )); WZ_SH_PCT=$(( WZ_ACT * 100 / WZ_MAX ))
+                if   (( WZ_SH_PCT >= 90 )); then wz bad  "Shards vs limit" "[${WZ_ACT} of ${WZ_MAX} (${WZ_SH_PCT}%) — new indices will fail soon]"
+                elif (( WZ_SH_PCT >= 70 )); then wz warn "Shards vs limit" "[${WZ_ACT} of ${WZ_MAX} (${WZ_SH_PCT}%)]"
+                else                             wz ok   "Shards vs limit" "[${WZ_ACT} of ${WZ_MAX} (${WZ_SH_PCT}%)]"; fi
+            else
+                wz warn "Shards vs limit" "[limit not readable — ${WZ_ACT} active shards]"
+            fi
+
+            # JVM heap and parent circuit breaker
+            WZ_N=$(wz_api "/_nodes/stats/jvm,breaker?filter_path=nodes.*.jvm.mem.heap_used_percent,nodes.*.breakers.parent")
+            WZ_HEAP_USED=$(jq -r '[.nodes[].jvm.mem.heap_used_percent] | max // empty' <<<"$WZ_N" 2>/dev/null)
+            if [[ "$WZ_HEAP_USED" =~ ^[0-9]+$ ]]; then
+                if   (( WZ_HEAP_USED >= 85 )); then wz bad  "JVM heap in use" "[${WZ_HEAP_USED}%]"
+                elif (( WZ_HEAP_USED >= 75 )); then wz warn "JVM heap in use" "[${WZ_HEAP_USED}%]"
+                else                                wz ok   "JVM heap in use" "[${WZ_HEAP_USED}%]"; fi
+            fi
+            WZ_TRIPPED=$(jq -r '[.nodes[].breakers.parent.tripped] | add // empty' <<<"$WZ_N" 2>/dev/null)
+            if [[ "$WZ_TRIPPED" =~ ^[0-9]+$ ]]; then
+                if (( WZ_TRIPPED > 0 )); then wz warn "Parent breaker trips since start" "[${WZ_TRIPPED}]"; else wz ok "Parent breaker trips since start" "[0]"; fi
+            fi
+
+            # Alert indices: size, shard sizing, age against retention
+            WZ_I=$(wz_api "/_cat/indices/wazuh-alerts-*?h=index,pri,store.size,creation.date&bytes=b&format=json")
+            if jq -e 'length > 0' >/dev/null 2>&1 <<<"$WZ_I"; then
+                WZ_IDX_N=$(jq 'length' <<<"$WZ_I")
+                WZ_IDX_PRI=$(jq '[.[] | .pri | tonumber] | add' <<<"$WZ_I")
+                WZ_IDX_BYTES=$(jq '[.[] | ."store.size" | tonumber] | add' <<<"$WZ_I")
+                WZ_OLDEST_MS=$(jq '[.[] | ."creation.date" | tonumber] | min' <<<"$WZ_I")
+                WZ_OLDEST_DAYS=$(( ( $(date +%s) - WZ_OLDEST_MS / 1000 ) / 86400 ))
+                WZ_AVG_SHARD_MB=$(( WZ_IDX_BYTES / WZ_IDX_PRI / 1048576 ))
+                echo "  Alert indices: ${WZ_IDX_N} (${WZ_IDX_PRI} primary shards, $(( WZ_IDX_BYTES / 1073741824 )) GB), oldest ${WZ_OLDEST_DAYS} days"
+                if (( WZ_IDX_PRI > 300 && WZ_AVG_SHARD_MB < 1024 )); then
+                    wz warn "Shard sizing" "[average shard ${WZ_AVG_SHARD_MB} MB — many tiny shards cost heap; use fewer shards per index]"
+                else
+                    wz ok   "Shard sizing" "[average shard ${WZ_AVG_SHARD_MB} MB]"
+                fi
+                if [[ -n "$WZ_RET" && "$WZ_RET" != "0" ]]; then
+                    if (( WZ_OLDEST_DAYS > WZ_RET + 2 )); then
+                        wz warn "Alert retention ${WZ_RET} days" "[oldest index is ${WZ_OLDEST_DAYS} days — policy not attached to older indices]"
+                    else
+                        wz ok   "Alert retention ${WZ_RET} days" "[oldest index ${WZ_OLDEST_DAYS} days]"
+                    fi
+                else
+                    wz warn "Alert retention" "[none configured — indices grow until the disk is full]"
+                fi
+            fi
+            WZ_TPL=$(wz_api "/_template/wazuh?filter_path=wazuh.settings.index.number_of_shards" | jq -r '.wazuh.settings.index.number_of_shards // empty' 2>/dev/null)
+            [[ -n "$WZ_TPL" ]] && echo "  New alert indices get ${WZ_TPL} primary shard(s)"
+        fi
+        rm -f "$WZ_CFG"
+    fi
+fi
+
+# Indexer data disk (no credentials needed). OpenSearch stops allocating at 85%, goes read-only at 95%.
+WZ_DISK_PCT=$(df --output=pcent /var/lib/wazuh-indexer 2>/dev/null | tail -n1 | tr -dc '0-9')
+if [[ -n "$WZ_DISK_PCT" ]]; then
+    if   (( WZ_DISK_PCT >= 90 )); then wz bad  "Indexer data disk" "[${WZ_DISK_PCT}% full — allocation watermarks reached]"
+    elif (( WZ_DISK_PCT >= 80 )); then wz warn "Indexer data disk" "[${WZ_DISK_PCT}% full]"
+    else                               wz ok   "Indexer data disk" "[${WZ_DISK_PCT}% full]"; fi
+fi
+fi
 
 echo ""
 EOF
@@ -4834,6 +5513,10 @@ SSH_CMD="  ssh"
 [[ "$ISINSTALLED_POSTGRESQL" =~ ^[Yy]$ ]] && SSH_CMD="$SSH_CMD -L 15432:localhost:5432"
 [[ "$ISINSTALLED_VALKEY" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 16379:localhost:6379"
 [[ "$ISINSTALLED_WEBMIN" =~ ^[Yy]$ ]]     && SSH_CMD="$SSH_CMD -L 20000:localhost:10000"
+if [[ "$ISINSTALLED_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
+    WZ_DASH_PORT_NOW=$(sed -n 's/^server\.port:[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' /etc/wazuh-dashboard/opensearch_dashboards.yml 2>/dev/null | head -1) || true
+    [[ -n "$WZ_DASH_PORT_NOW" ]] && SSH_CMD="$SSH_CMD -L 1${WZ_DASH_PORT_NOW}:localhost:${WZ_DASH_PORT_NOW}"
+fi
 SSH_CMD="$SSH_CMD $USER_SUDO_USER_USERNAME@$LOCAL_IP"
 echo "$SSH_CMD"
 

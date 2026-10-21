@@ -14,7 +14,7 @@
 #
 set -euo pipefail
 
-MODULEJAIL_FALLBACK_VERSION="1.6.1"
+MODULEJAIL_FALLBACK_VERSION="1.6.3"
 WHITELIST="/etc/modulejail/whitelist.conf"
 BLACKLIST="/etc/modprobe.d/modulejail-blacklist.conf"
 

@@ -1,0 +1,90 @@
+#!/bin/bash
+# upgrade-held-packages — upgrade packages that are on hold, then put the hold back.
+#
+# Usage: sudo upgrade-held-packages [-y] [name ...]
+#   no name   every held package that has a newer version available
+#   name      held packages whose name contains NAME (so 'nginx' also covers nginx-common and nginx modules,
+#             'postgresql' the server, client and extensions). Companions are needed: apt refuses to upgrade
+#             a package whose held dependency would have to change as well.
+#   -y        do not ask for confirmation
+#
+# The hold is restored on exit, whether the upgrade worked or not.
+set -u
+
+[[ $EUID -eq 0 ]] || { echo "Run as root (sudo)." >&2; exit 1; }
+
+YES=n; NAMES=()
+for a in "$@"; do
+    case "$a" in
+        -y) YES=y ;;
+        -*) echo "Usage: $0 [-y] [name ...]" >&2; exit 2 ;;
+        *)  [[ "$a" =~ ^[a-z0-9][a-z0-9+.-]*$ ]] || { echo "Invalid package name: $a" >&2; exit 2; }
+            NAMES+=("$a") ;;
+    esac
+done
+
+echo "Refreshing package lists ..."
+apt-get update -qq || { echo "apt-get update failed — nothing changed." >&2; exit 1; }
+
+CANDIDATES=()
+while read -r pkg; do
+    [[ -n "$pkg" ]] || continue
+    inst=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) || continue
+    cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
+    [[ -n "$cand" && "$cand" != "(none)" ]] || continue
+    dpkg --compare-versions "$cand" gt "$inst" || continue
+    if [[ ${#NAMES[@]} -gt 0 ]]; then
+        match=n; for n in "${NAMES[@]}"; do [[ "$pkg" == *"$n"* ]] && match=y; done
+        [[ "$match" == "y" ]] || continue
+    fi
+    CANDIDATES+=("$pkg|$inst|$cand")
+done < <(apt-mark showhold 2>/dev/null)
+
+if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
+    echo "No held package${NAMES[*]:+ matching: ${NAMES[*]}} has a newer version available."
+    exit 0
+fi
+
+PKGS=()
+echo
+echo "These held packages will be upgraded:"
+for item in "${CANDIDATES[@]}"; do
+    IFS='|' read -r pkg inst cand <<<"$item"
+    printf '  %-34s %s -> %s\n' "$pkg" "$inst" "$cand"
+    PKGS+=("$pkg")
+done
+echo
+echo "Services using them are restarted by the package scripts and may be unavailable for a few minutes."
+if [[ "$YES" != "y" ]]; then
+    read -rp "Have the users been told, and do you want to continue? (y/N) " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 0; }
+fi
+
+# From here on the hold is always put back.
+restore_hold() {
+    apt-mark hold "${PKGS[@]}" >/dev/null && echo "Hold restored on ${#PKGS[@]} package(s)."
+}
+trap restore_hold EXIT
+trap 'exit 130' INT TERM
+
+apt-mark unhold "${PKGS[@]}" >/dev/null || { echo "Could not lift the hold — nothing changed." >&2; exit 1; }
+apt-get install --only-upgrade -y -o Dpkg::Options::=--force-confold "${PKGS[@]}"
+rc=$?
+
+echo
+if [[ $rc -eq 0 ]]; then
+    echo "Upgraded. Installed versions now:"
+    for pkg in "${PKGS[@]}"; do printf '  %-34s %s\n' "$pkg" "$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"; done
+    # A Coraza module only loads into the nginx version it was built for: rebuild it now (only if it no longer
+    # fits), instead of leaving nginx down until the apt hook's delayed rebuild
+    if [[ -x /usr/local/sbin/install_coraza_nginx.sh && -f /var/lib/coraza-nginx/build.stamp ]]; then
+        echo
+        echo "Checking the Coraza WAF module against the upgraded nginx ..."
+        /usr/local/sbin/install_coraza_nginx.sh --auto || echo "WARNING: Coraza rebuild failed - see /var/log/coraza-nginx-build.log; nginx may not start."
+    fi
+    systemctl --failed --no-legend | grep -q . && { echo; echo "WARNING: failed units:"; systemctl --failed --no-legend; }
+    [[ -f /var/run/reboot-required ]] && echo "A reboot is required."
+else
+    echo "apt-get failed (exit $rc). If it names a held package that is not in the list above, run again with a name that covers it." >&2
+fi
+exit $rc

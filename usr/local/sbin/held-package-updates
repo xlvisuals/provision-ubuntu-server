@@ -1,0 +1,147 @@
+#!/bin/bash
+# held-package-updates — mail the admin when a package that is on hold has a newer version available.
+#
+# Held packages (apt-mark hold) are skipped by unattended-upgrades, including for security fixes, so an
+# update for them must never go unnoticed. This runs after every apt-daily run (apt-get update) through
+# /etc/systemd/system/apt-daily.service.d/held-package-updates.conf.
+#
+# Usage: held-package-updates [--dry-run] [--force]
+#   --dry-run  print what would be mailed; send nothing and do not touch the state file
+#   --force    ignore the state file (mail everything pending now)
+#
+# Config: /etc/held-package-updates.conf (not sourced, parsed key by key)
+#   MAIL_TO=admin@example.com    required; without a valid address nothing is sent (no fallback recipient)
+#   REMINDER_DAYS=7             repeat the mail every N days while updates stay pending; 0 = only for new versions
+#
+set -u
+
+CONF=/etc/held-package-updates.conf
+STATE_DIR=/var/lib/held-package-updates
+STATE="$STATE_DIR/notified"      # pkg <TAB> candidate version <TAB> epoch of last mail
+DRY=n; FORCE=n
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY=y ;;
+        --force)   FORCE=y ;;
+        *) echo "Usage: $0 [--dry-run] [--force]" >&2; exit 2 ;;
+    esac
+done
+
+log() { echo "held-package-updates: $*"; logger -t held-package-updates -- "$*" 2>/dev/null || true; }
+
+[[ $EUID -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+exec 9>/run/lock/held-package-updates.lock
+flock -n 9 || exit 0
+
+# ---- config (fail closed: no valid recipient means no mail) ----
+MAIL_TO=""; REMINDER_DAYS=0
+if [[ -f "$CONF" ]]; then
+    MAIL_TO=$(sed -n 's/^MAIL_TO=//p' "$CONF" | head -1)
+    rd=$(sed -n 's/^REMINDER_DAYS=//p' "$CONF" | head -1)
+    [[ "$rd" =~ ^[0-9]{1,3}$ ]] && REMINDER_DAYS="$rd"
+fi
+if ! [[ "$MAIL_TO" =~ ^[A-Za-z0-9._%+-]+(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?$ ]]; then
+    log "no valid MAIL_TO in $CONF — not sending anything"
+    exit 1
+fi
+
+# ---- collect held packages that have a newer candidate ----
+is_security() {   # is_security PACKAGE CANDIDATE -> exit 0 if the candidate is offered by a *-security pocket
+    apt-cache policy "$1" 2>/dev/null | awk -v cand="$2" '
+        /^ +(\*\*\* )?[^ ]+ [0-9]+$/ && !/^        / { v = $0; sub(/^ +(\*\*\* )?/, "", v); split(v, a, " "); cur = a[1]; next }
+        /^        / && cur == cand && /-security/ { sec = 1 }
+        END { exit sec ? 0 : 1 }'
+}
+
+PENDING=()   # "pkg|installed|candidate|security(y/n)"
+while read -r pkg; do
+    [[ -n "$pkg" ]] || continue
+    inst=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) || continue
+    [[ -n "$inst" ]] || continue
+    cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
+    [[ -n "$cand" && "$cand" != "(none)" ]] || continue
+    dpkg --compare-versions "$cand" gt "$inst" || continue
+    sec=n; is_security "$pkg" "$cand" && sec=y
+    PENDING+=("$pkg|$inst|$cand|$sec")
+done < <(apt-mark showhold 2>/dev/null)
+
+mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+touch "$STATE"; chmod 600 "$STATE"
+
+if [[ ${#PENDING[@]} -eq 0 ]]; then
+    [[ "$DRY" == "y" ]] && echo "No held package has a newer version available." || : > "$STATE"
+    exit 0
+fi
+
+# ---- decide whether a mail is due: new version for any package, or reminder interval reached ----
+NOW=$(date +%s); DUE=n
+for item in "${PENDING[@]}"; do
+    IFS='|' read -r pkg inst cand sec <<<"$item"
+    last=$(awk -F'\t' -v p="$pkg" -v c="$cand" '$1 == p && $2 == c {print $3; exit}' "$STATE")
+    if [[ -z "$last" ]]; then DUE=y
+    elif (( REMINDER_DAYS > 0 && NOW - last >= REMINDER_DAYS * 86400 )); then DUE=y
+    fi
+done
+[[ "$FORCE" == "y" ]] && DUE=y
+if [[ "$DUE" != "y" ]]; then
+    exit 0
+fi
+
+# ---- compose ----
+HOST=$(hostname -f 2>/dev/null || hostname)
+NAMES=(); ANYSEC=n
+BODY="Held packages on ${HOST} have newer versions available:
+
+"
+for item in "${PENDING[@]}"; do
+    IFS='|' read -r pkg inst cand sec <<<"$item"
+    NAMES+=("$pkg")
+    flag=""; [[ "$sec" == "y" ]] && { flag="   [SECURITY]"; ANYSEC=y; }
+    BODY+=$(printf '  %-34s %s -> %s%s' "$pkg" "$inst" "$cand" "$flag")$'\n'
+done
+BODY+="
+These packages are on hold, so unattended-upgrades does NOT install them - not even security fixes.
+Upgrade them when the users have been told that the service will be unavailable for a few minutes:
+
+  sudo upgrade-held-packages              # everything listed above, asks for confirmation first
+  sudo upgrade-held-packages nginx        # only packages whose name contains 'nginx' (with their companions)
+
+That command lifts the hold, upgrades, and puts the hold back, even if the upgrade fails.
+"
+if (( REMINDER_DAYS > 0 )); then
+    BODY+="
+You will get this reminder every ${REMINDER_DAYS} days until the packages are upgraded.
+"
+fi
+BODY+="
+(Sent by /usr/local/sbin/held-package-updates on ${HOST}; settings in ${CONF})
+"
+
+SHOWN="${NAMES[*]:0:5}"; SHOWN="${SHOWN// /, }"
+(( ${#NAMES[@]} > 5 )) && SHOWN+=", ..."
+SUBJECT="[${HOST}] Updates available for held packages: ${SHOWN}"
+[[ "$ANYSEC" == "y" ]] && SUBJECT="[SECURITY] ${SUBJECT}"
+
+if [[ "$DRY" == "y" ]]; then
+    echo "To: $MAIL_TO"; echo "Subject: $SUBJECT"; echo; printf '%s\n' "$BODY"
+    exit 0
+fi
+
+# ---- send; only record the notification when sending worked, so a failure is retried on the next run ----
+if ! command -v mail >/dev/null 2>&1; then
+    log "mail command not found — cannot notify $MAIL_TO. Pending: ${NAMES[*]}"
+    exit 1
+fi
+if printf '%s\n' "$BODY" | mail -s "$SUBJECT" "$MAIL_TO"; then
+    log "notified $MAIL_TO about: ${NAMES[*]}"
+    TMP=$(mktemp "$STATE_DIR/.state.XXXXXX")
+    for item in "${PENDING[@]}"; do
+        IFS='|' read -r pkg inst cand sec <<<"$item"
+        printf '%s\t%s\t%s\n' "$pkg" "$cand" "$NOW" >> "$TMP"
+    done
+    chmod 600 "$TMP"; mv -f "$TMP" "$STATE"
+else
+    log "sending mail to $MAIL_TO failed — will retry on the next run"
+    exit 1
+fi

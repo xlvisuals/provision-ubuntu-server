@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-FORGEJO_FALLBACK_VERSION="16.0.4"
+FORGEJO_FALLBACK_VERSION="17.0.0"
 BACKUP_DIR="/var/backups/forgejo"
 FORGEJO_BIN="/usr/local/bin/forgejo"
 APP_INI="/etc/forgejo/app.ini"

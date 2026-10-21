@@ -1,0 +1,6 @@
+# wazuh-manager: analysisd is the core daemon; wazuh-control starts/stops all of them via systemd.
+check process wazuh-manager matching "/var/ossec/bin/wazuh-analysisd"
+  group wazuh
+  start program = "/usr/bin/systemctl start wazuh-manager" with timeout 180 seconds
+  stop program  = "/usr/bin/systemctl stop wazuh-manager" with timeout 120 seconds
+  if 3 restarts within 10 cycles then unmonitor

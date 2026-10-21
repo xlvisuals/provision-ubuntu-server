@@ -17,6 +17,7 @@ It provides a colour-coded status report covering:
 - Failed systemd units
 - Recent failed SSH logins
 - Pending package updates
+- Held packages and whether an update is waiting for them
 - Service status (running/stopped/failed/not installed) for all installed services
 - AppArmor profile status per service
 - Recent AppArmor denials
@@ -25,6 +26,10 @@ It provides a colour-coded status report covering:
 - Smoke tests — HTTP checks for Nginx, Grafana, Forgejo, Monit, Webmin;
   database connection tests for MySQL/MariaDB, PostgreSQL, Valkey;
   Mosquitto pub/sub test
+- Wazuh Server (when installed) — package holds, indexer heap/swap, circuit breaker
+  trips, daemons, agents, filebeat, endpoints, and (with `/etc/wazuh-health.conf`)
+  cluster health, shards vs limit, JVM heap, alert index size/age and retention.
+  Create the credentials with `utils/wazuh_server_tune.sh` (`WAZUH_CREATE_HEALTH_USER=y`).
 
 The script is regenerated from scratch on each provisioning run, so it always
 reflects the currently installed services.
