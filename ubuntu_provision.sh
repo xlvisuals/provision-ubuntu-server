@@ -2039,6 +2039,14 @@ EOF
     echo "  Applying sysctl changes"
     sysctl --system
 
+    echo "  Disabling MPTCP to mitigate CVE-2026-98432 (no fix yet for Ubuntu LTS kernels)"
+    # Leading '-' makes sysctl ignore the key if the kernel has no MPTCP support, so a missing
+    # key cannot abort the run under 'set -e'; with no MPTCP there is nothing to disable.
+    echo "-net.mptcp.enabled = 0" > /etc/sysctl.d/99-MPTCP-off.conf
+    sysctl --system
+    echo "  MPTCP status (0 = disabled, or not present on this kernel):"
+    sysctl -n net.mptcp.enabled 2>/dev/null || echo "  net.mptcp.enabled not present"
+
     echo "  Writing modprobe parameters to mitigate CVE-2026-31431 and Dirty Frag to /etc/modprobe.d/dirty-frag.conf"
     rm -f /etc/modprobe.d/dirty-frag.conf
     cat <<'EOF' > /etc/modprobe.d/dirty-frag.conf
