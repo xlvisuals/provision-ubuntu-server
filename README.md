@@ -381,6 +381,13 @@ INSTALL_WAZUH=y
 # Fonts tuning
 INSTALL_MS_FONTS=y
 
+# Let's Encrypt certificate + placeholder site (needs nginx)
+#INSTALL_LETSENCRYPT=y
+#LETSENCRYPT_DOMAIN=www.example.com
+#LETSENCRYPT_EMAIL=admin@example.com
+#LETSENCRYPT_STAGING=n
+#LETSENCRYPT_DNS_OVERRIDE=n
+
 # MySQL/MariaDB tuning - leave blank to use auto-calculated defaults based on available memory
 MYSQL_BUFFER_POOL_MB=
 MYSQL_BUFFER_POOL_INSTANCES=
@@ -692,6 +699,7 @@ sudo ~/ubuntu_health_check.sh
 ## Notes
 
 - **CIS Level 1 hardening:** applies a broad set of CIS benchmark controls in a single optional step (`CONFIGURE_CIS_HARDENING`). Controls are applied idempotently — safe to re-run. File integrity monitoring uses AIDE unless Wazuh is installed or selected, in which case Wazuh FIM is used instead (real-time via inotify, feeding into the Wazuh dashboard). A Monit check for sudo user password expiry is added when both Monit and a sudo user are configured — alerts are sent at 30, 20, 10, and 5 days remaining. Postfix is set to `inet_interfaces = loopback-only` regardless of the value in `main.cf` to satisfy the CIS "Disable Postfix Network Listening" control.
+- **Let's Encrypt certificate and placeholder site (nginx):** if nginx is installed or being installed, the script can get a certificate for a domain you give (and a contact email). The domain must already resolve to this server; if it does not, you are asked whether to try anyway (behind NAT or a proxy), otherwise the step is skipped. The script writes a temporary HTTP-only site, runs `certbot certonly --nginx`, then replaces it with `/etc/nginx/sites-available/<domain>`: port 80 only redirects (301) to https, port 443 serves a placeholder page from `/var/www/<domain>`. It also opens 80/443 in UFW if UFW is active, enables `certbot.timer` and runs `certbot renew --dry-run`. An existing site file of that name that this script did not write is never overwritten, and if the certificate request fails the temporary site is removed again. `LETSENCRYPT_STAGING=y` uses the Let's Encrypt test server (browsers will not trust it). HSTS is not set.
 - **mysql_native_password (Ubuntu 26.04 only):** MySQL 8.4 disables the `mysql_native_password` plugin. On 26.04 the script asks whether to enable it; if yes it writes `/etc/mysql/mysql.conf.d/zz-mysql-native-password.cnf` (`[mysqld]` / `mysql_native_password=ON`), restarts MySQL and checks the variable is `ON`; if the server does not come back the file is removed again. It is only applied to MySQL 8.4 (an unknown option stops MySQL 8.0 from starting; the plugin is gone in 9.0) and never to MariaDB. When active, the extra users below are created `IDENTIFIED WITH mysql_native_password`.
 - **Additional databases and users (MySQL and MariaDB):** the script can create any number of schema/user pairs (schema, user, host - default `%`, character set - default `utf8mb4`, password - min. 8 characters, never saved to the `.conf`). For each pair it creates the user and schema, grants the user table/view/routine privileges on that schema plus the global `RELOAD`, and gives `root@localhost` `ALL PRIVILEGES ... WITH GRANT OPTION` on it. Existing schemas and users are kept unchanged unless you answer `y` to the drop question (default `n`, not saved to the `.conf`), in which case they are dropped and recreated. Reserved names (`mysql`, `sys`, `information_schema`, `performance_schema`, `test`, `root`, `healthcheck`, `debian-sys-maint`, `mysql.*`, `mariadb.sys`) are rejected, as are duplicate schemas or `user@host` pairs. An entry with a missing or invalid value is skipped, not guessed. With `bind-address = 127.0.0.1` a host of `%` is still only reachable from this machine (including SSH tunnels).
 - **MySQL / MariaDB root logins:** root gets the same password for `localhost` and for `127.0.0.1`. `skip-name-resolve` is set in the shipped config, so a TCP login from `127.0.0.1` (an SSH tunnel to port 3306, MySQL Workbench) does not match `root@localhost`. Both accounts are loopback-only; every other `root@<host>` is removed. The `127.0.0.1` account is not changed if you later change root's password, so change both (`ALTER USER ... @'localhost'` and `@'127.0.0.1'`). IPv6 loopback (`::1`) is not added.

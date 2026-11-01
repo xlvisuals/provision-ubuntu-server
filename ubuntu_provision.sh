@@ -2,7 +2,7 @@
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
 # by Axel Busch + Claude Sonnet
-# 18 October 2026
+# 01 November 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -171,7 +171,7 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_)" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_)" \
         | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
@@ -434,6 +434,32 @@ valid_db_charset() {
         echo "  Character set must be lowercase letters, digits or '_' (e.g. utf8mb4)."; return 1
     fi
     return 0
+}
+
+valid_le_domain() {
+    local v="${1:-}"
+    if (( ${#v} > 253 )) || [[ ! "$v" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]{1,62}$ ]]; then
+        echo "  Enter a fully qualified domain name such as www.example.com (no wildcard, no IP address)."; return 1
+    fi
+    return 0
+}
+valid_le_email() {
+    if [[ ! "${1:-}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        echo "  Not a valid email address."; return 1
+    fi
+    return 0
+}
+# Does the domain resolve to an address of this server? (prints what it found)
+le_dns_matches() {
+    local d="$1" resolved ips a
+    resolved="$(getent ahosts "$d" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
+    ips=" $(hostname -I 2>/dev/null || true) "
+    echo "  $d resolves to: ${resolved:-nothing}"
+    echo "  This server's addresses: ${ips# }"
+    for a in $resolved; do
+        if [[ "$ips" == *" $a "* ]]; then return 0; fi
+    done
+    return 1
 }
 
 # prompt_validated VAR "prompt" VALIDATOR [default]
@@ -892,6 +918,31 @@ prompt_if_unset INSTALL_NGINX "Would you like to $PROMPT_NGINX nginx? (y/n)" n $
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   prompt_if_unset NGINX_WORKER_PROCESSES "  nginx worker processes?" n "$PROCESSOR_COUNT"
   prompt_if_unset INSTALL_CORAZA "  Build the Coraza WAF module for nginx? (compiles from source, takes several minutes; NOT activated, see README) (y/n)" n "n"
+fi
+
+# Let's Encrypt certificate + placeholder site with forced http -> https (needs nginx)
+INSTALL_LETSENCRYPT="${INSTALL_LETSENCRYPT:-}"
+if [[ "$INSTALL_NGINX" =~ ^[Yy]$ || "$ISINSTALLED_NGINX" == "y" ]]; then
+    prompt_if_unset INSTALL_LETSENCRYPT "Would you like a Let's Encrypt certificate with a placeholder nginx site and forced http->https? (y/n)" n "n"
+else
+    INSTALL_LETSENCRYPT=n
+fi
+if [[ "$INSTALL_LETSENCRYPT" =~ ^[Yy]$ ]]; then
+    prompt_validated LETSENCRYPT_DOMAIN "  Domain name (must already point to this server)" valid_le_domain
+    LETSENCRYPT_DOMAIN="${LETSENCRYPT_DOMAIN,,}"
+    prompt_validated LETSENCRYPT_EMAIL  "  Contact email for Let's Encrypt" valid_le_email
+    prompt_if_unset LETSENCRYPT_STAGING "  Use the Let's Encrypt STAGING server (test run, browsers will not trust the certificate)? (y/n)" n "n"
+    if ! le_dns_matches "$LETSENCRYPT_DOMAIN"; then
+        echo "  [!] The domain does not resolve to an address on this server (fine behind NAT or a proxy, fatal otherwise)."
+        prompt_if_unset LETSENCRYPT_DNS_OVERRIDE "  Request the certificate anyway? (y/n)" n "n"
+        if [[ ! "$LETSENCRYPT_DNS_OVERRIDE" =~ ^[Yy]$ ]]; then
+            echo "  Skipping the Let's Encrypt certificate. Point the DNS record here and re-run."
+            INSTALL_LETSENCRYPT=n
+        fi
+    fi
+    if [[ "$INSTALL_LETSENCRYPT" =~ ^[Yy]$ ]]; then
+        echo "  Continuing means you accept the Let's Encrypt subscriber agreement (certbot --agree-tos)."
+    fi
 fi
 
 #[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
@@ -1661,6 +1712,12 @@ echo "Install nginx?               : $INSTALL_NGINX"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   echo "    nginx worker processes   : $NGINX_WORKER_PROCESSES"
   echo "    Build Coraza WAF module  : ${INSTALL_CORAZA:-n}"
+fi
+echo "Let's Encrypt certificate?   : ${INSTALL_LETSENCRYPT:-n}"
+if [[ "${INSTALL_LETSENCRYPT:-n}" =~ ^[Yy]$ ]]; then
+  echo "    Domain                   : $LETSENCRYPT_DOMAIN"
+  echo "    Contact email            : $LETSENCRYPT_EMAIL"
+  echo "    Staging server           : $LETSENCRYPT_STAGING"
 fi
 echo "Install valkey?              : $INSTALL_VALKEY"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
@@ -4875,6 +4932,113 @@ EOF
 
 else
     echo "  Skipping configuration files"
+fi
+
+echo ""
+echo "--- 48b. Let's Encrypt certificate and placeholder site ---"
+
+# Creates the placeholder nginx site for LETSENCRYPT_DOMAIN, gets the certificate and turns on the forced
+# http -> https redirect. Returns 1 on any failure (set -e is off inside, so every step is checked).
+# Nothing that already exists is overwritten: a site file of that name that this script did not write stops it.
+setup_letsencrypt_site() {
+    local d="$LETSENCRYPT_DOMAIN" site link mark webroot v6=""
+    site="/etc/nginx/sites-available/$d"
+    link="/etc/nginx/sites-enabled/$d"
+    webroot="/var/www/$d"
+    mark="# Managed by ubuntu_provision.sh (Let's Encrypt placeholder site)"
+
+    valid_le_domain "$d" >/dev/null || { echo "  [!] Invalid domain '$d' - skipped"; return 1; }
+    valid_le_email "${LETSENCRYPT_EMAIL:-}" >/dev/null || { echo "  [!] Missing or invalid contact email - skipped"; return 1; }
+    command -v nginx >/dev/null 2>&1 || { echo "  [!] nginx is not installed - skipped"; return 1; }
+    if [[ -e "$site" || -L "$link" ]] && ! grep -qF "$mark" "$site" 2>/dev/null; then
+        echo "  [!] $site or $link already exists and was not written by this script - not touching it"
+        return 1
+    fi
+    if [[ -d /proc/sys/net/ipv6 && "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" == "0" ]]; then
+        v6="y"
+    fi
+
+    apt_install certbot python3-certbot-nginx || { echo "  [!] certbot could not be installed - skipped"; return 1; }
+    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow 80/tcp && ufw allow 443/tcp
+    fi
+
+    # 1. Temporary HTTP-only site for the challenge (no certificate exists yet)
+    if [[ ! -f "/etc/letsencrypt/live/$d/fullchain.pem" ]]; then
+        {
+            echo "$mark"
+            echo "server {"
+            echo "    listen 80;"
+            [[ -n "$v6" ]] && echo "    listen [::]:80;"
+            echo "    server_name $d;"
+            echo "    location / { return 404; }"
+            echo "}"
+        } > "$site"
+        ln -sfn "$site" "$link"
+        if ! nginx -t || ! systemctl reload nginx; then
+            echo "  [!] nginx rejects even the temporary site - fix the nginx config first"
+            rm -f -- "$link" "$site"
+            return 1
+        fi
+        local args=(certonly --nginx -d "$d" --non-interactive --agree-tos --no-eff-email -m "$LETSENCRYPT_EMAIL")
+        [[ "${LETSENCRYPT_STAGING:-n}" =~ ^[Yy]$ ]] && args+=(--staging)
+        echo "  Requesting the certificate for $d ..."
+        if ! certbot "${args[@]}" || [[ ! -f "/etc/letsencrypt/live/$d/fullchain.pem" ]]; then
+            echo "  [!] Certificate request failed. Check that $d points to this server and that ports 80/443 are reachable."
+            echo "      Retry later with: certbot ${args[*]}"
+            rm -f -- "$link" "$site"
+            systemctl reload nginx || true
+            return 1
+        fi
+    else
+        echo "  A certificate for $d already exists - reusing it."
+    fi
+
+    # 2. The real site: port 80 only redirects to https, port 443 serves a placeholder page
+    mkdir -p "$webroot" || return 1
+    printf '<!doctype html>\n<html><head><meta charset="utf-8"><title>%s</title></head>\n<body><p>%s</p></body></html>\n' "$d" "$d" > "$webroot/index.html"
+    chmod 755 "$webroot"; chmod 644 "$webroot/index.html"
+    {
+        echo "$mark"
+        echo "server {"
+        echo "    listen 80;"
+        [[ -n "$v6" ]] && echo "    listen [::]:80;"
+        echo "    server_name $d;"
+        echo "    return 301 https://\$host\$request_uri;"
+        echo "}"
+        echo ""
+        echo "server {"
+        echo "    listen 443 ssl;"
+        [[ -n "$v6" ]] && echo "    listen [::]:443 ssl;"
+        echo "    server_name $d;"
+        echo "    ssl_certificate     /etc/letsencrypt/live/$d/fullchain.pem;"
+        echo "    ssl_certificate_key /etc/letsencrypt/live/$d/privkey.pem;"
+        echo "    root $webroot;"
+        echo "    index index.html;"
+        echo "    location / { try_files \$uri \$uri/ =404; }"
+        echo "}"
+    } > "$site"
+    ln -sfn "$site" "$link"
+    if ! nginx -t || ! systemctl reload nginx; then
+        echo "  [!] nginx rejects the final site config - disabling it again (certificate kept)"
+        rm -f -- "$link"
+        systemctl reload nginx || true
+        return 1
+    fi
+
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || echo "  [!] Could not enable certbot.timer - renewals will not run automatically"
+    echo "  [V] $d: certificate installed, http -> https redirect active, placeholder page in $webroot"
+    echo "  Renewal test (certbot renew --dry-run):"
+    certbot renew --dry-run >/dev/null 2>&1 && echo "  [V] Renewal dry-run succeeded" || echo "  [!] Renewal dry-run failed - run 'certbot renew --dry-run' to see why"
+    echo "  Local check: https -> $(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$d:443:127.0.0.1" "https://$d/" 2>/dev/null || true)," \
+         "http -> $(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$d:80:127.0.0.1" "http://$d/" 2>/dev/null || true) (expected 200 and 301)"
+    return 0
+}
+
+if [[ "${INSTALL_LETSENCRYPT:-n}" =~ ^[Yy]$ ]]; then
+    setup_letsencrypt_site || echo "  [!] Let's Encrypt setup did not complete (see above); provisioning continues"
+else
+    echo "  Skipping Let's Encrypt."
 fi
 
 echo ""

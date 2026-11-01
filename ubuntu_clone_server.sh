@@ -1,8 +1,10 @@
 #!/bin/bash
 #
-# UBUNTU SERVER CLONE SCRIPT
+# UBUNTU NGINX+GUNICORN+MYSQL SERVER CLONE SCRIPT
 # Clones a gunicorn/nginx web app, its MySQL schema and its cron jobs from another server.
 # by Axel Busch + Claude Sonnet
+# 01 November 2026
+#
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_clone_server.sh [--python 3.14] [ubuntu_clone_server.conf]
