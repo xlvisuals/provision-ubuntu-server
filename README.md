@@ -267,6 +267,7 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | `ubuntu_provision.sh` | Main provisioning script |
 | `ubuntu_provision.conf` | Configuration file (passwords omitted — prompted at runtime) |
 | `ubuntu_backup_config.sh` | Backs up all service configurations to a timestamped tarball |
+| `ubuntu_clone_server.sh`, `ubuntu_clone_server.conf` | Clones a gunicorn/nginx web app, its MySQL schema and its cron jobs from another server over SSH; the `.conf` is a sample of its saved answers |
 | `usr/local/sbin/held-package-updates`, `usr/local/sbin/upgrade-held-packages` | Mail the admin when a held package has an update; upgrade held packages and restore the hold (installed to `/usr/local/sbin`) |
 | `utils/wazuh_server_tune.sh` | Tunes a Wazuh server (indexer heap, shards, alert retention, read-only health user); called by the provisioning script, also usable on an existing server |
 | `etc/` | Service configuration templates with `%%PLACEHOLDER%%` variables |
@@ -391,6 +392,15 @@ MYSQL_JOIN_BUFFER_KB=512
 MYSQL_SORT_BUFFER_KB=512
 MYSQL_READ_BUFFER_KB=128
 MYSQL_READ_RND_BUFFER_KB=1024
+# Ubuntu 26.04 / MySQL 8.4 only: add mysql_native_password=ON
+#MYSQL_NATIVE_AUTH=n
+# Additional schemas and users (passwords are always prompted, DB_DROP_EXISTING is never saved)
+#CREATE_DB_USERS=y
+#DB_EXTRA_COUNT=1
+#DB_EXTRA_SCHEMA_1=myapp
+#DB_EXTRA_USER_1=myapp
+#DB_EXTRA_HOST_1=%
+#DB_EXTRA_CHARSET_1=utf8mb4
 # Passwords intentionally omitted - will always be prompted:
 # MYSQL_PASSWORD=
 
@@ -592,6 +602,42 @@ Called by Monit to alert when the sudo user's password is approaching expiry. Al
 
 ---
 
+## Clone Script
+
+`ubuntu_clone_server.sh` runs on the **target** server and copies a web app from a **source** server over SSH (key login only, no passwords). Every part is optional. All questions and read-only checks come first, a summary is printed, and nothing changes until you confirm.
+
+```bash
+sudo ./ubuntu_clone_server.sh [ubuntu_clone_server.conf]
+```
+
+**Config files.** Like the provisioning script, it reads answers from a `.conf` file and writes them back:
+
+| File | Written when |
+|------|--------------|
+| `clone_<timestamp>.conf` | You confirm the printed summary, before anything is changed |
+| `clone_debug.conf` | The script stops for any reason other than Ctrl-C: a failed check (for example "Cannot connect to MySQL", "Target path in use", a login that does not work), a failed command, `kill` or a closed terminal. Run `sudo bash ubuntu_clone_server.sh clone_debug.conf` to continue with the same answers once the problem is fixed |
+| `clone_aborted.conf` | You press Ctrl-C |
+
+`ubuntu_clone_server.conf` is a documented sample with every variable. Anything missing from the file is asked interactively; passwords, the cron lines and the "overwrite existing files" confirmations are never saved and are always asked. Saved files are mode 600 and handed to the user who ran `sudo`. A config file is run as root, so the script refuses one that is not owned by root or the `sudo` user, or that is writable by group or others.
+
+| Part | What it asks | What it does |
+|------|--------------|--------------|
+| SSH | Source IP, port, username, key file | Under `sudo` the script runs as root, so the key of the user who ran `sudo` (`~/.ssh/id_ed25519`, `id_ecdsa` or `id_rsa`) is offered as the default; `none` uses root's own keys. Passphrase-protected keys only work through an ssh-agent (`sudo --preserve-env=SSH_AUTH_SOCK`). An unknown host key is shown as a fingerprint and must be confirmed before it is trusted (kept in root's `known_hosts`) |
+| Web app | Source domain, app path, gunicorn service file, nginx config (all prefilled from the domain), workers, target domain (default: the source domain), target path, then **each top-level subdirectory of the app path** (copy yes/no, default no, with its size) and whether the others are created empty | `rsync` of only the chosen subdirectories plus files directly in the app path (no `--delete`; `log/` contents, `*.sock`, `*.pid` never copied; a subdirectory that appears on the source later is not copied), virtualenv paths and symlinks rewritten, the source path, domain (`datatest.ternary.energy`) and name (`datatest_ternary_energy`) replaced by the target's in the text files of the copied directories (skipped for venv, `.git`, `node_modules`, `__pycache__`, `log`, binary files and files over 50 MB; skipped entirely when the target domain equals the source domain), files named after the old service renamed, converted service installed and enabled, converted nginx site installed |
+| Let's Encrypt | Contact email, staging yes/no | The copied nginx config references a certificate that does not exist yet, so a temporary HTTP-only site is enabled first, `certbot certonly --nginx` issues the certificate, then the converted config replaces it. If nginx rejects the converted config the temporary site is restored |
+| MySQL | The local MySQL root password if root cannot log in over the socket (the provisioning script sets one; asked up to 3 times, kept only in a mode-600 temp file, never saved), source schema/user/password, target schema/user/password | Dumps over SSH (password sent through a temporary option file, never on a command line), creates the schema with the source charset and a user with privileges on that schema only, imports. An existing target user's password is never changed |
+| Cron | Source cron user, target cron user | Each line of the source crontab is shown with its converted version and needs a `y`; accepted lines are appended to the target user's crontab (existing crontab backed up, duplicates skipped) |
+
+If nginx or MySQL/MariaDB is installed but not running, the script asks whether to enable it at boot and start it now (default yes) instead of aborting; answering no, or a service that will not start, still aborts before anything is cloned. A server that is running but refuses root's socket login, or one that is not installed, aborts with a message.
+
+Replacements in service, nginx and cron text are literal and applied in one pass: source path, source domain, source service name (dots and dashes become `_`), and the `<first label>_gunicorn_app` upstream name.
+
+If the service starts a program inside a directory you chose not to copy (typically `venv/`), that program must already exist on the target: the script checks this before changing anything and, if it is missing, stops and prints the commands to create the virtualenv (`python3 -m venv`, `pip install gunicorn gevent ...`). Such a pre-made directory is left untouched and does not trigger the "target path already contains files" confirmation.
+
+Not done automatically: database settings inside the copied app (the script lists files that mention the source schema, user or password), DNS, firewall rules, and credentials embedded in cron jobs. Replaced files are backed up to `/root/clone_backup_<timestamp>/`.
+
+---
+
 ## Backup Script
 
 `ubuntu_backup_config.sh` captures a full snapshot of service configs, users, SSH keys, cron jobs, systemd overrides, APT sources and GPG keys, Let's Encrypt certificates, and the Grafana and Forgejo databases.
@@ -646,6 +692,9 @@ sudo ~/ubuntu_health_check.sh
 ## Notes
 
 - **CIS Level 1 hardening:** applies a broad set of CIS benchmark controls in a single optional step (`CONFIGURE_CIS_HARDENING`). Controls are applied idempotently — safe to re-run. File integrity monitoring uses AIDE unless Wazuh is installed or selected, in which case Wazuh FIM is used instead (real-time via inotify, feeding into the Wazuh dashboard). A Monit check for sudo user password expiry is added when both Monit and a sudo user are configured — alerts are sent at 30, 20, 10, and 5 days remaining. Postfix is set to `inet_interfaces = loopback-only` regardless of the value in `main.cf` to satisfy the CIS "Disable Postfix Network Listening" control.
+- **mysql_native_password (Ubuntu 26.04 only):** MySQL 8.4 disables the `mysql_native_password` plugin. On 26.04 the script asks whether to enable it; if yes it writes `/etc/mysql/mysql.conf.d/zz-mysql-native-password.cnf` (`[mysqld]` / `mysql_native_password=ON`), restarts MySQL and checks the variable is `ON`; if the server does not come back the file is removed again. It is only applied to MySQL 8.4 (an unknown option stops MySQL 8.0 from starting; the plugin is gone in 9.0) and never to MariaDB. When active, the extra users below are created `IDENTIFIED WITH mysql_native_password`.
+- **Additional databases and users (MySQL and MariaDB):** the script can create any number of schema/user pairs (schema, user, host - default `%`, character set - default `utf8mb4`, password - min. 8 characters, never saved to the `.conf`). For each pair it creates the user and schema, grants the user table/view/routine privileges on that schema plus the global `RELOAD`, and gives `root@localhost` `ALL PRIVILEGES ... WITH GRANT OPTION` on it. Existing schemas and users are kept unchanged unless you answer `y` to the drop question (default `n`, not saved to the `.conf`), in which case they are dropped and recreated. Reserved names (`mysql`, `sys`, `information_schema`, `performance_schema`, `test`, `root`, `healthcheck`, `debian-sys-maint`, `mysql.*`, `mariadb.sys`) are rejected, as are duplicate schemas or `user@host` pairs. An entry with a missing or invalid value is skipped, not guessed. With `bind-address = 127.0.0.1` a host of `%` is still only reachable from this machine (including SSH tunnels).
+- **MySQL / MariaDB root logins:** root gets the same password for `localhost` and for `127.0.0.1`. `skip-name-resolve` is set in the shipped config, so a TCP login from `127.0.0.1` (an SSH tunnel to port 3306, MySQL Workbench) does not match `root@localhost`. Both accounts are loopback-only; every other `root@<host>` is removed. The `127.0.0.1` account is not changed if you later change root's password, so change both (`ALTER USER ... @'localhost'` and `@'127.0.0.1'`). IPv6 loopback (`::1`) is not added.
 - **MySQL / MariaDB health check user:** a passwordless `healthcheck@localhost` user with SELECT-only access is created during installation. The health check script uses this user for connection tests — no root credentials are stored anywhere in the health check script.
 - **curl and IPv6:** on Ubuntu 26.04, curl prefers IPv6 when connecting to `localhost`. The health check smoke tests use `curl -4` to force IPv4, ensuring consistent behaviour regardless of how `localhost` resolves on the system.
 - **Idempotent-friendly:** the script detects already-installed services and prompts to `reinstall` rather than blindly overwriting. On re-runs, services that were skipped are still detected as installed and their configs updated.

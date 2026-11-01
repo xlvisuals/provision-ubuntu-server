@@ -92,9 +92,7 @@ fi
 # and may never be set if their parent option is skipped.
 # These must be set before set -Eeuo pipefail to avoid unbound variable errors.
 : "${WZ_INSTALLED_SERVER_VERSION:=}"
-: "${INSTALL_MS_FONTS:=n}"
-: "${INSTALL_LIBERATION_FONTS:=y}"
-: "${INSTALL_FREEFONT_FONTS:=y}"
+: "${MONIT_PASSWORD_EXPIRY_PENDING:=n}"
 : "${GRAFANA_USE_POSTFIX:=n}"
 : "${GRAFANA_SMTP_ENABLED:=false}"
 : "${GRAFANA_SMTP_HOST:=}"
@@ -138,6 +136,8 @@ REAL_USER=${SUDO_USER:-$(logname 2>/dev/null)}
 USER_SUDO_USER_USERNAME=""
 CURRENT_TIMEZONE=$(timedatectl | awk '/Time zone:/ {print $3}')
 NEW_TIMEZONE=${NEW_TIMEZONE:-}
+NEW_HOSTNAME=${NEW_HOSTNAME:-}
+ORIGINAL_HOSTNAME="$LOCAL_HOSTNAME"
 ZONEINFO_DIR="/usr/share/zoneinfo"
 
 # Exit when any command fails silently
@@ -171,7 +171,7 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE)" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_)" \
         | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
@@ -238,6 +238,20 @@ on_ctrl_c() {
         echo ""
     fi
     exit 0
+}
+
+# Deliberate abort: like on_error, but for failures the script detects itself (exit 1 would not fire the ERR trap).
+# Saves the settings entered so far so the run can be resumed.
+die() {
+    set +e
+    trap - ERR EXIT
+    restart_autoupdate
+    config_debug_file="provision_debug.conf"
+    echo ""
+    save_config "$config_debug_file"
+    echo "  Fix the problem above, then run 'sudo bash ubuntu_provision.sh $config_debug_file' to continue with these settings."
+    echo ""
+    exit 1
 }
 
 check_service_installed() {
@@ -342,6 +356,33 @@ prompt_if_unset() {
     fi
 }
 
+# Installs the Monit password-expiry check for the sudo user (script + monit config + enabled link).
+# Needs Monit's /etc/monit/conf-available and conf-enabled, i.e. Monit must already be installed.
+setup_monit_password_expiry() {
+    local script_src="$CONFIG_DIR/usr/local/bin/check-password-expiry.sh"
+    local conf_src="$CONFIG_DIR/etc/monit/conf-available/password-expiry"
+    [[ -n "${USER_SUDO_USER_USERNAME:-}" ]] || { echo "  No sudo user set — skipping Monit password expiry check"; return 0; }
+    if [[ ! -d /etc/monit/conf-available || ! -d /etc/monit/conf-enabled ]]; then
+        echo "  [!] Monit directories not found under /etc/monit — password expiry check NOT configured"
+        return 1
+    fi
+    if [[ ! -f "$script_src" || ! -f "$conf_src" ]]; then
+        echo "  [!] $script_src or $conf_src missing — password expiry check NOT configured"
+        return 1
+    fi
+
+    # Copy and configure the companion check script
+    cp "$script_src" /usr/local/bin/check-password-expiry.sh
+    sed -i "s|%%USER_SUDO_USER_USERNAME%%|$USER_SUDO_USER_USERNAME|g" /usr/local/bin/check-password-expiry.sh
+    chmod 750 /usr/local/bin/check-password-expiry.sh
+    chown root:root /usr/local/bin/check-password-expiry.sh
+
+    # Copy the Monit check config and enable it
+    cp "$conf_src" /etc/monit/conf-available/password-expiry
+    ln -sf /etc/monit/conf-available/password-expiry /etc/monit/conf-enabled/password-expiry
+    echo "  [V] Monit password expiry check configured for user: $USER_SUDO_USER_USERNAME"
+}
+
 mysql_root() {
     local defaults_file=$(mktemp)
     chmod 600 "$defaults_file"
@@ -355,6 +396,194 @@ mysql_root() {
         rm -f "$defaults_file"
         return $exit_code
     fi
+}
+
+## --- Extra MySQL/MariaDB schemas and users, mysql_native_password -------------------------------------------------
+
+# Validators: print a message and return 1 when the value is not acceptable. Anything not matching is denied.
+valid_db_schema() {
+    local v="${1:-}"
+    if [[ ! "$v" =~ ^[A-Za-z0-9_]{1,64}$ ]]; then
+        echo "  Schema name must be 1-64 characters of letters, digits or '_'."; return 1
+    fi
+    case "${v,,}" in
+        mysql|sys|information_schema|performance_schema|test)
+            echo "  '$v' is a reserved system schema and cannot be used."; return 1 ;;
+    esac
+    return 0
+}
+valid_db_user() {
+    local v="${1:-}"
+    if [[ ! "$v" =~ ^[A-Za-z0-9_.-]{1,32}$ ]]; then
+        echo "  User name must be 1-32 characters of letters, digits, '_', '.' or '-'."; return 1
+    fi
+    case "${v,,}" in
+        root|healthcheck|debian-sys-maint|mysql.sys|mysql.session|mysql.infoschema|mariadb.sys|mysql)
+            echo "  '$v' is a reserved account name and cannot be used."; return 1 ;;
+    esac
+    return 0
+}
+valid_db_host() {
+    if [[ ! "${1:-}" =~ ^[A-Za-z0-9_.%:-]{1,60}$ ]]; then
+        echo "  Host must be 1-60 characters of letters, digits, '_', '.', '%', ':' or '-'."; return 1
+    fi
+    return 0
+}
+valid_db_charset() {
+    if [[ ! "${1:-}" =~ ^[a-z0-9_]{2,32}$ ]]; then
+        echo "  Character set must be lowercase letters, digits or '_' (e.g. utf8mb4)."; return 1
+    fi
+    return 0
+}
+
+# prompt_validated VAR "prompt" VALIDATOR [default]
+# Uses the value already in VAR (e.g. from the .conf file) if it passes VALIDATOR, otherwise asks until it does.
+prompt_validated() {
+    local varname="$1" prompt="$2" validator="$3" default="${4:-}"
+    while true; do
+        prompt_if_unset "$varname" "$prompt" n "$default"
+        if "$validator" "${!varname}"; then
+            return 0
+        fi
+        printf -v "$varname" '%s' ''
+    done
+}
+
+# Escape a value for use inside a single-quoted SQL string (MySQL/MariaDB default sql_mode: backslash is an escape character)
+sql_escape() {
+    local s="${1-}"
+    s="${s//\\/\\\\}"
+    s="${s//\'/\\\'}"
+    printf '%s' "$s"
+}
+
+# Run SQL (stdin or -e) as root over the socket with the root password. The password goes through a 0600 defaults
+# file, never the command line. Returns the mysql exit code and, unlike mysql_root(), never retries without a password.
+mysql_root_sql() {
+    [[ -n "${MYSQL_PASSWORD:-}" ]] || { echo "  [!] No root password available — refusing to run SQL"; return 1; }
+    local f rc=0 p
+    f=$(mktemp) || return 1
+    chmod 600 "$f"
+    p="${MYSQL_PASSWORD//\\/\\\\}"
+    p="${p//\"/\\\"}"
+    printf '[client]\npassword="%s"\n' "$p" > "$f"
+    mysql --defaults-extra-file="$f" -u root "$@" || rc=$?
+    rm -f "$f"
+    return "$rc"
+}
+
+# Wait until the server accepts root logins again (after a restart)
+wait_for_mysql_login() {
+    local i
+    for i in {1..30}; do
+        if echo "SELECT 1" | mysql_root_sql -N >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Re-enable the mysql_native_password plugin, which is disabled by default since MySQL 8.4 (removed in 9.0).
+# Only applied to MySQL 8.4.x: on 8.0 the unknown option would stop the server from starting.
+MYSQL_NATIVE_AUTH_ACTIVE=n
+enable_mysql_native_password() {
+    local ver cnf=/etc/mysql/mysql.conf.d/zz-mysql-native-password.cnf
+    ver=$(mysqld --version 2>/dev/null | sed -n 's/.*Ver \([0-9]*\.[0-9]*\).*/\1/p' | head -n1)
+    if [[ ! "$ver" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+        echo "  [!] Could not determine the MySQL version — mysql_native_password NOT enabled"
+        return 1
+    fi
+    if (( BASH_REMATCH[1] != 8 || BASH_REMATCH[2] != 4 )); then
+        echo "  [!] MySQL $ver: mysql_native_password=ON is only valid for 8.4 — NOT enabled"
+        return 1
+    fi
+
+    printf '# Written by ubuntu_provision.sh\n[mysqld]\nmysql_native_password=ON\n' > "$cnf"
+    chmod 644 "$cnf"
+    systemctl restart mysql.service || true
+    if wait_for_mysql_login \
+       && [[ "$(echo "SHOW VARIABLES LIKE 'mysql_native_password'" | mysql_root_sql -N | awk '{print toupper($2)}')" == "ON" ]]; then
+        MYSQL_NATIVE_AUTH_ACTIVE=y
+        echo "  [V] mysql_native_password=ON enabled ($cnf)"
+        return 0
+    fi
+
+    echo "  [!] MySQL did not come back with mysql_native_password=ON — reverting"
+    rm -f "$cnf"
+    systemctl restart mysql.service || true
+    wait_for_mysql_login || echo "  [!] MySQL is not accepting logins after the revert — check 'journalctl -u mysql'"
+    return 1
+}
+
+# Create the extra schemas and users collected by the prompts (DB_EXTRA_*_n). $1 = mysql | mariadb
+# Existing schemas and users are only dropped when DB_DROP_EXISTING=y; otherwise they are kept untouched.
+create_extra_db_users() {
+    local flavour="$1" i failed=0
+    local schema user host charset pw eu eh epw auth grant_db sql v
+    local schema_exists user_exists charset_ok
+
+    for (( i = 1; i <= ${DB_EXTRA_COUNT:-0}; i++ )); do
+        v="DB_EXTRA_SCHEMA_$i";   schema="${!v:-}"
+        v="DB_EXTRA_USER_$i";     user="${!v:-}"
+        v="DB_EXTRA_HOST_$i";     host="${!v:-}"
+        v="DB_EXTRA_CHARSET_$i";  charset="${!v:-}"
+        v="DB_EXTRA_PASSWORD_$i"; pw="${!v:-}"
+
+        # Fail closed: a missing or invalid value skips this entry; nothing is guessed or defaulted here.
+        if ! valid_db_schema "$schema" >/dev/null || ! valid_db_user "$user" >/dev/null \
+           || ! valid_db_host "$host" >/dev/null || ! valid_db_charset "$charset" >/dev/null \
+           || [[ ${#pw} -lt 8 ]]; then
+            echo "  [!] Extra database entry $i has a missing or invalid value — skipped"
+            failed=1; continue
+        fi
+
+        charset_ok=$(printf "SELECT COUNT(*) FROM information_schema.CHARACTER_SETS WHERE CHARACTER_SET_NAME='%s'" "$charset" | mysql_root_sql -N) || charset_ok=0
+        if [[ "$charset_ok" != "1" ]]; then
+            echo "  [!] Character set '$charset' is unknown to this server — schema '$schema' skipped"
+            failed=1; continue
+        fi
+
+        eu=$(sql_escape "$user"); eh=$(sql_escape "$host"); epw=$(sql_escape "$pw")
+        # GRANT ... ON db.* treats '_' as a wildcard unless escaped
+        grant_db="${schema//_/\\_}"
+
+        schema_exists=$(printf "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='%s'" "$schema" | mysql_root_sql -N) || { failed=1; continue; }
+        user_exists=$(printf "SELECT COUNT(*) FROM mysql.user WHERE User='%s' AND Host='%s'" "$eu" "$eh" | mysql_root_sql -N) || { failed=1; continue; }
+
+        sql=""
+        if [[ "${DB_DROP_EXISTING:-n}" =~ ^[Yy]$ ]]; then
+            [[ "$schema_exists" != "0" ]] && echo "  [!] Dropping existing schema '$schema' (DB_DROP_EXISTING=y)"
+            [[ "$user_exists" != "0" ]]   && echo "  [!] Dropping existing user '$user'@'$host' (DB_DROP_EXISTING=y)"
+            sql+="DROP DATABASE IF EXISTS \`${schema}\`;"$'\n'
+            sql+="DROP USER IF EXISTS '${eu}'@'${eh}';"$'\n'
+        else
+            [[ "$schema_exists" != "0" ]] && echo "  Schema '$schema' already exists — kept, data untouched"
+            [[ "$user_exists" != "0" ]]   && echo "  User '$user'@'$host' already exists — kept, password NOT changed"
+        fi
+
+        if [[ "$flavour" == "mysql" && "$MYSQL_NATIVE_AUTH_ACTIVE" == "y" ]]; then
+            auth="IDENTIFIED WITH mysql_native_password BY '${epw}'"
+        else
+            auth="IDENTIFIED BY '${epw}'"
+        fi
+
+        sql+="CREATE USER IF NOT EXISTS '${eu}'@'${eh}' ${auth};"$'\n'
+        sql+="CREATE DATABASE IF NOT EXISTS \`${schema}\` DEFAULT CHARACTER SET ${charset};"$'\n'
+        sql+="GRANT CREATE, ALTER, DROP, INSERT, UPDATE, INDEX, DELETE, SELECT, LOCK TABLES, REFERENCES, CREATE VIEW, CREATE TEMPORARY TABLES ON \`${grant_db}\`.* TO '${eu}'@'${eh}';"$'\n'
+        sql+="GRANT CREATE VIEW, ALTER ROUTINE, CREATE ROUTINE, EXECUTE ON \`${grant_db}\`.* TO '${eu}'@'${eh}';"$'\n'
+        sql+="GRANT RELOAD ON *.* TO '${eu}'@'${eh}';"$'\n'
+        sql+="GRANT ALL PRIVILEGES ON \`${grant_db}\`.* TO 'root'@'localhost' WITH GRANT OPTION;"$'\n'
+        sql+="FLUSH PRIVILEGES;"$'\n'
+
+        if printf '%s' "$sql" | mysql_root_sql; then
+            echo "  [V] Schema '$schema' (${charset}) and user '$user'@'$host' ready"
+        else
+            echo "  [!] Creating schema '$schema' / user '$user'@'$host' FAILED"
+            failed=1
+        fi
+    done
+    return "$failed"
 }
 
 # Write config on error and abort
@@ -384,7 +613,7 @@ echo "--- 1. Detecting network parameters  ---"
 PRIMARY_INTERFACE=$(ip -o -4 route show to default | awk '{print $5}')
 if [ -z "$PRIMARY_INTERFACE" ]; then
     echo "  [!] Error: Could not detect network interface"
-    exit 1
+    die
 fi
 echo "  Detected network interface: $PRIMARY_INTERFACE"
 
@@ -402,7 +631,7 @@ else
 fi
 if [[ "$NETWORK_OK" == "n" ]]; then
     echo "  [!] Error: No internet connection"
-    exit 1
+    die
 fi
 
 echo ""
@@ -468,6 +697,27 @@ fi
 echo ""
 echo "Configure installation options:"
 
+## hostname
+prompt_if_unset CHANGE_HOSTNAME "Would you like to change the hostname? (y/n)" n "n"
+if [[ "$CHANGE_HOSTNAME" =~ ^[Yy]$ ]]; then
+    while true; do
+        prompt_if_unset NEW_HOSTNAME "  Enter the new hostname (current: $ORIGINAL_HOSTNAME)" n "${ORIGINAL_HOSTNAME}"
+        NEW_HOSTNAME="${NEW_HOSTNAME,,}"
+        # RFC 1123: dot-separated labels of a-z 0-9 and '-', each 1-63 chars, not starting/ending with '-', max 253 chars
+        if [[ ${#NEW_HOSTNAME} -le 253 && "$NEW_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]; then
+            break
+        fi
+        NEW_HOSTNAME=''
+        echo "  Invalid hostname. Use letters, digits and hyphens (dots separate domain labels)."
+    done
+    if [[ "$NEW_HOSTNAME" == "$ORIGINAL_HOSTNAME" ]]; then
+        echo "  Hostname unchanged."
+    else
+        # Later prompts and generated config (Postfix, Monit, ...) must use the new name
+        LOCAL_HOSTNAME="$NEW_HOSTNAME"
+    fi
+fi
+
 ## user
 prompt_if_unset USER_CREATE_SUDO_USER "Would you like to add a new sudo user? (y/n)" n "n"
 if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
@@ -505,7 +755,7 @@ fi
 if [[ -z "$USER_SUDO_USER_USERNAME" ]]; then
     # Final Check
     echo "  [!] Error: We need a sudo user to complete the setup."
-    exit 1
+    die
 fi
 
 ## LVM
@@ -785,6 +1035,83 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
     fi
 fi
 
+# mysql_native_password is disabled by default since MySQL 8.4 (the version Ubuntu 26.04 ships). Only offered there.
+if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$VERSION_ID" == "26.04" ]]; then
+    prompt_if_unset MYSQL_NATIVE_AUTH "  Add mysql_native_password=ON to the MySQL config (needed by clients that cannot use caching_sha2_password)? (y/n)" n "n"
+else
+    MYSQL_NATIVE_AUTH=n
+fi
+
+# Additional schemas and users (MySQL or MariaDB)
+CREATE_DB_USERS="${CREATE_DB_USERS:-}"
+if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ || "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
+    prompt_if_unset CREATE_DB_USERS "Would you like to create additional database users and schemas? (y/n)" n "n"
+else
+    CREATE_DB_USERS=n
+fi
+DB_EXTRA_COUNT="${DB_EXTRA_COUNT:-0}"
+if [[ ! "$DB_EXTRA_COUNT" =~ ^[0-9]{1,2}$ ]]; then
+    echo "  [!] DB_EXTRA_COUNT='$DB_EXTRA_COUNT' is not a number (0-99) — aborting"; die
+fi
+if [[ "$CREATE_DB_USERS" =~ ^[Yy]$ ]]; then
+    if (( DB_EXTRA_COUNT == 0 )); then
+        # Nothing in the .conf file: ask for the entries
+        while true; do
+            if (( DB_EXTRA_COUNT > 0 )); then
+                read -rp "  Create another schema and user? (y/n) [n]: " DB_MORE
+                [[ "$DB_MORE" =~ ^[Yy]$ ]] || break
+            fi
+            DB_EXTRA_COUNT=$(( DB_EXTRA_COUNT + 1 ))
+            prompt_validated "DB_EXTRA_SCHEMA_$DB_EXTRA_COUNT"  "  Schema name"                                     valid_db_schema
+            prompt_validated "DB_EXTRA_USER_$DB_EXTRA_COUNT"    "  User name"                                       valid_db_user
+            prompt_validated "DB_EXTRA_HOST_$DB_EXTRA_COUNT"    "  Host the user may connect from ('%' = any host)" valid_db_host "%"
+            prompt_validated "DB_EXTRA_CHARSET_$DB_EXTRA_COUNT" "  Schema character set"                            valid_db_charset "utf8mb4"
+        done
+    fi
+
+    for (( dbi = 1; dbi <= DB_EXTRA_COUNT; dbi++ )); do
+        # Entries that came from a .conf file are validated like typed ones; invalid values are asked again
+        for dbf in SCHEMA USER HOST CHARSET; do
+            dbv="DB_EXTRA_${dbf}_$dbi"
+            if ! "valid_db_${dbf,,}" "${!dbv:-}" >/dev/null 2>&1; then
+                printf -v "$dbv" '%s' ''
+                prompt_validated "$dbv" "  ${dbf,,} of extra entry $dbi" "valid_db_${dbf,,}"
+            fi
+        done
+        # Passwords are never written to the .conf file, so they are always asked for
+        dbv="DB_EXTRA_USER_$dbi"; dbu="${!dbv}"
+        dbv="DB_EXTRA_PASSWORD_$dbi"
+        while true; do
+            prompt_if_unset "$dbv" "  Password for database user '$dbu' (min. 8 characters)" secret
+            dbpw="${!dbv}"
+            (( ${#dbpw} >= 8 )) && break
+            printf -v "$dbv" '%s' ''
+            echo "  Password is too short. Must be at least 8 characters."
+        done
+    done
+    unset dbpw
+
+    # Reject duplicate schemas or duplicate user@host: with DROP they would wipe an earlier entry
+    for (( dbi = 1; dbi <= DB_EXTRA_COUNT; dbi++ )); do
+        for (( dbj = dbi + 1; dbj <= DB_EXTRA_COUNT; dbj++ )); do
+            dba="DB_EXTRA_SCHEMA_$dbi"; dbb="DB_EXTRA_SCHEMA_$dbj"
+            if [[ "${!dba,,}" == "${!dbb,,}" ]]; then
+                echo "  [!] Schema '${!dba}' is listed twice (entries $dbi and $dbj) — aborting"; die
+            fi
+            dba="DB_EXTRA_USER_$dbi"; dbb="DB_EXTRA_USER_$dbj"; dbc="DB_EXTRA_HOST_$dbi"; dbd="DB_EXTRA_HOST_$dbj"
+            if [[ "${!dba}" == "${!dbb}" && "${!dbc,,}" == "${!dbd,,}" ]]; then
+                echo "  [!] User '${!dba}'@'${!dbc}' is listed twice (entries $dbi and $dbj) — aborting"; die
+            fi
+        done
+    done
+
+    # Never drop anything unless explicitly confirmed (not stored in the .conf file)
+    echo "  Existing schemas/users with these names are kept unless you allow dropping them."
+    prompt_if_unset DB_DROP_EXISTING "  DROP existing schemas and users with the same names first? THIS DELETES THEIR DATA (y/n)" n "n"
+else
+    CREATE_DB_USERS=n
+    DB_EXTRA_COUNT=0
+fi
 
 #if [[ "$ISINSTALLED_MYSQL" == "y" || "$ISINSTALLED_MARIADB" == "y" || "$ISINSTALLED_POSTGRESQL" == "y" ]]; then
 #    default_val='n'
@@ -1063,7 +1390,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
 
     # Admin user configuration
     while true; do
-        prompt_if_unset FORGEJO_ADMIN_USERNAME "  Forgejo admin username" n "$(hostname -s)"
+        prompt_if_unset FORGEJO_ADMIN_USERNAME "  Forgejo admin username" n "${LOCAL_HOSTNAME%%.*}"
         if [[ "$FORGEJO_ADMIN_USERNAME" == "admin" ]]; then
             echo "  'admin' is reserved by Forgejo. Please choose a different username."
             FORGEJO_ADMIN_USERNAME=""
@@ -1289,6 +1616,11 @@ if [[ "$USER_CREATE_SUDO_USER" =~ ^[Yy]$ ]]; then
 else
   echo "  existing username          : $USER_SUDO_USER_USERNAME"
 fi
+echo "Change hostname?             : $CHANGE_HOSTNAME"
+if [[ "$CHANGE_HOSTNAME" =~ ^[Yy]$ ]]; then
+  echo "  Current hostname           : $ORIGINAL_HOSTNAME"
+  echo "  New hostname               : $NEW_HOSTNAME"
+fi
 echo "Configure LVM disks?         : $CONFIGURE_LVM"
 if [[ "$CONFIGURE_LVM" =~ ^[Yy]$ ]]; then
   echo "  Resize LVM?                : ${LVM_RESIZE_VOLUME:-n}"
@@ -1346,6 +1678,17 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
   echo "  Sort buffer KB             : $MYSQL_SORT_BUFFER_KB"
   echo "  Read buffer KB             : $MYSQL_READ_BUFFER_KB"
   echo "  Read rnd buffer KB         : $MYSQL_READ_RND_BUFFER_KB"
+fi
+if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$VERSION_ID" == "26.04" ]]; then
+  echo "  mysql_native_password=ON   : $MYSQL_NATIVE_AUTH"
+fi
+echo "Create extra DB users/schemas: $CREATE_DB_USERS"
+if [[ "$CREATE_DB_USERS" =~ ^[Yy]$ ]]; then
+  for (( dbi = 1; dbi <= DB_EXTRA_COUNT; dbi++ )); do
+    dba="DB_EXTRA_SCHEMA_$dbi"; dbb="DB_EXTRA_USER_$dbi"; dbc="DB_EXTRA_HOST_$dbi"; dbd="DB_EXTRA_CHARSET_$dbi"
+    echo "  Schema ${!dba} (${!dbd}), user '${!dbb}'@'${!dbc}'"
+  done
+  echo "  Drop existing first        : ${DB_DROP_EXISTING:-n}"
 fi
 echo "Install MariaDB?             : $INSTALL_MARIADB"
 if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
@@ -1548,7 +1891,7 @@ if [[ "$ANY_INSTALL_OR_CONFIGURE_SET" =~ ^[Yy]$ ]]; then
     echo "--- Backup current configuration ---"
     BACKUP_SCRIPT="$(dirname "$(readlink -f "$0")")/ubuntu_backup_config.sh"
     if [[ -f "$BACKUP_SCRIPT" ]]; then
-        bash "$BACKUP_SCRIPT" "${LOCAL_HOSTNAME}_pre-apply"
+        bash "$BACKUP_SCRIPT" "${ORIGINAL_HOSTNAME}_pre-apply"
         echo "  Pre-apply configuration backup complete."
     else
         echo "  Warning: ubuntu_backup_config.sh not found alongside this script, skipping backup."
@@ -1557,6 +1900,28 @@ fi
 
 ## Apply settings
 ## --------------------------------------------
+
+echo ""
+echo "--- 3b. Change hostname ---"
+if [[ "$CHANGE_HOSTNAME" =~ ^[Yy]$ && -n "$NEW_HOSTNAME" && "$NEW_HOSTNAME" != "$ORIGINAL_HOSTNAME" ]]; then
+    hostnamectl set-hostname "$NEW_HOSTNAME"
+    # Keep the local 127.0.1.1 entry in /etc/hosts in step so sudo and local lookups still resolve
+    if [[ "$NEW_HOSTNAME" == *.* ]]; then
+        HOSTS_LINE="127.0.1.1 $NEW_HOSTNAME ${NEW_HOSTNAME%%.*}"
+    else
+        HOSTS_LINE="127.0.1.1 $NEW_HOSTNAME"
+    fi
+    if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+        sed -i -E "s/^127\.0\.1\.1[[:space:]].*/$HOSTS_LINE/" /etc/hosts
+    else
+        echo "$HOSTS_LINE" >> /etc/hosts
+    fi
+    LOCAL_HOSTNAME="$NEW_HOSTNAME"
+    echo "  Hostname changed from $ORIGINAL_HOSTNAME to $NEW_HOSTNAME."
+    echo "  /etc/hosts entry: $HOSTS_LINE"
+else
+    echo "  Skipping hostname change."
+fi
 
 echo ""
 echo "--- 4. Create/update user ---"
@@ -1866,7 +2231,7 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
                 echo "  SSH key installed for $USER_SUDO_USER_USERNAME."
             else
                 echo "  [!] ERROR: No SSH key installed. Aborting to prevent lockout."
-                exit 1
+                die
             fi
         else
             echo "  SSH keys already present in $AUTH_KEYS. Skipping prompt."
@@ -1962,7 +2327,7 @@ if [[ "$TUNE_SYSTEM" =~ ^[Yy]$ ]]; then
         echo "  Sudoers file is valid."
     else
         echo "  [!] Error: Sudoers file has errors."
-        exit 1
+        die
     fi
 
     echo ""
@@ -2586,17 +2951,16 @@ EOF
 
     echo ""
     echo "  [CIS] Setting up Monit password expiry alert for sudo user ..."
+    MONIT_PASSWORD_EXPIRY_PENDING=n
     if [[ "$INSTALL_MONIT" =~ ^[Yy]$ || "$ISINSTALLED_MONIT" == "y" ]] && [[ -n "$USER_SUDO_USER_USERNAME" ]]; then
-        # Copy and configure the companion check script
-        cp "$CONFIG_DIR/usr/local/bin/check-password-expiry.sh" /usr/local/bin/check-password-expiry.sh
-        sed -i "s|%%USER_SUDO_USER_USERNAME%%|$USER_SUDO_USER_USERNAME|g" /usr/local/bin/check-password-expiry.sh
-        chmod 750 /usr/local/bin/check-password-expiry.sh
-        chown root:root /usr/local/bin/check-password-expiry.sh
-
-        # Copy the Monit check config and enable it
-        cp "$CONFIG_DIR/etc/monit/conf-available/password-expiry" /etc/monit/conf-available/password-expiry
-        ln -sf /etc/monit/conf-available/password-expiry /etc/monit/conf-enabled/password-expiry
-        echo "  [V] Monit password expiry check configured for user: $USER_SUDO_USER_USERNAME"
+        if [[ -d /etc/monit/conf-available && -d /etc/monit/conf-enabled ]] && [[ ! "$INSTALL_MONIT" =~ ^[Yy]$ ]]; then
+            # Monit is already installed and is not being (re)installed: configure now
+            setup_monit_password_expiry || echo "  [!] Monit password expiry check could not be configured"
+        else
+            # Monit is installed later in this run (and a reinstall wipes /etc/monit): configure it there
+            MONIT_PASSWORD_EXPIRY_PENDING=y
+            echo "  Monit is installed later in this run — the password expiry check will be configured then"
+        fi
     else
         echo "  Monit not installed/selected or no sudo user set — skipping password expiry check"
     fi
@@ -2842,12 +3206,17 @@ if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ ]]; then
 
         if [ "$MYSQL_READY" -ne 1 ]; then
             echo "  [!] Error: MySQL failed to start"
-            exit 1
+            die
         fi
 
-        # Secure MySQL using the provided password. Does the same as mysql_secure_installation
+        # Secure MySQL using the provided password. Does the same as mysql_secure_installation.
+        # root also gets the same password for 127.0.0.1: with skip-name-resolve (set in mysqld.cnf) a TCP login
+        # from 127.0.0.1 - an SSH tunnel, MySQL Workbench - does not match 'root'@'localhost'.
         mysql_root <<EOS
 ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASSWORD_ESCAPED}';
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASSWORD_ESCAPED}';
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_PASSWORD_ESCAPED}';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 DROP DATABASE IF EXISTS test;
@@ -2862,7 +3231,14 @@ CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
 
-        echo "  MySQL root password set and security initialized."
+        echo "  MySQL root password set (localhost and 127.0.0.1) and security initialized."
+
+        if [[ "${MYSQL_NATIVE_AUTH:-n}" =~ ^[Yy]$ ]]; then
+            enable_mysql_native_password || echo "  [!] Warning: mysql_native_password was not enabled"
+        fi
+        if [[ "${CREATE_DB_USERS:-n}" =~ ^[Yy]$ ]]; then
+            create_extra_db_users mysql || echo "  [!] Warning: not all extra schemas/users were created"
+        fi
     else
         echo "  [!] MySQL installation failed — skipping configuration"
     fi
@@ -2910,12 +3286,16 @@ if [[ "$INSTALL_MARIADB" =~ ^[Yy]$ ]]; then
 
         if [ "$MYSQL_READY" -ne 1 ]; then
             echo "  [!] Error: MariaDB failed to start"
-            exit 1
+            die
         fi
 
-        # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported)
+        # Secure MariaDB — uses mysql_native_password (caching_sha2_password not supported).
+        # root also gets the same password for 127.0.0.1 (SSH tunnel / Workbench logins arrive as 127.0.0.1).
         mysql_root <<EOS
 ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASSWORD_ESCAPED}');
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASSWORD_ESCAPED}');
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_PASSWORD_ESCAPED}');
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 DROP DATABASE IF EXISTS test;
@@ -2929,7 +3309,11 @@ EOS
 CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';
 FLUSH PRIVILEGES;
 EOS
-        echo "  MariaDB root password set and security initialized."
+        echo "  MariaDB root password set (localhost and 127.0.0.1) and security initialized."
+
+        if [[ "${CREATE_DB_USERS:-n}" =~ ^[Yy]$ ]]; then
+            create_extra_db_users mariadb || echo "  [!] Warning: not all extra schemas/users were created"
+        fi
 
         # Create MySQL compatibility symlinks for operator convenience.
         # mariadb-client-compat (which provides these) is only available from Ubuntu 25.04+,
@@ -4293,6 +4677,12 @@ EOF
             ln -s "$DEST" /etc/monit/conf-enabled/
         done
 
+        # Password expiry check requested by the CIS hardening step (Monit did not exist yet at that point)
+        if [[ "${MONIT_PASSWORD_EXPIRY_PENDING:-n}" == "y" ]]; then
+            setup_monit_password_expiry || echo "  [!] Monit password expiry check could not be configured"
+            MONIT_PASSWORD_EXPIRY_PENDING=done
+        fi
+
         # Remove conf-enabled links for services that are no longer installed
         declare -A SERVICE_VAR_MAP=(
             ["mysql"]="ISINSTALLED_MYSQL"
@@ -4321,6 +4711,9 @@ EOF
         done
     fi
 
+    if [[ "${MONIT_PASSWORD_EXPIRY_PENDING:-n}" == "y" ]]; then
+        echo "  [!] Monit was not installed/configured, so the CIS password expiry check was NOT set up."
+    fi
 
     # Wazuh Agent log monitoring configuration
     if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ && "$ISINSTALLED_WAZUHAGENT" == "y" && -f /var/ossec/etc/ossec.conf ]]; then
