@@ -5,7 +5,10 @@
 # by Axel Busch + Claude Sonnet
 # -----------------------------------------------------------------------------------------
 #
-# Usage: sudo bash ubuntu_clone_server.sh [ubuntu_clone_server.conf]
+# Usage: sudo bash ubuntu_clone_server.sh [--python 3.14] [ubuntu_clone_server.conf]
+#   --python VER  Python version used if the virtual environment has to be built on this server
+#                 (python3.14 etc. must be installed). Also PYTHON_VERSION=VER in the .conf file.
+#                 Default: empty = the system python3.
 # Answers are saved to clone_<time>.conf when you confirm, to clone_debug.conf whenever the script
 # stops with an error or is killed, and to clone_aborted.conf on Ctrl-C; pass such a file (or ubuntu_clone_server.conf) to skip the questions.
 #
@@ -27,6 +30,10 @@
 # that would be overwritten without confirmation, or missing user aborts instead of continuing.
 
 set -Eeuo pipefail
+
+# Python used when the virtual environment is built here (e.g. "3.14"). Empty = system python3.
+# Overridden by PYTHON_VERSION in the .conf file, which is overridden by --python.
+PYTHON_VERSION=""
 
 TS="$(date +%F_%H%M%S)"
 TMP_DIR=""
@@ -222,6 +229,7 @@ valid_path() {
     esac
 }
 valid_service_path() { valid_file_path "$1" && [[ "$1" == *.service ]] || { echo "  Service file must end in .service."; return 1; }; }
+valid_python_version() { [[ "$1" =~ ^3\.[0-9]{1,2}$ ]] || { echo "  Python version must look like 3.14."; return 1; }; }
 valid_workers() { [[ "$1" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "  Enter a number between 1 and 999."; return 1; }; }
 valid_db_schema() { [[ "$1" =~ ^[A-Za-z0-9_]{1,64}$ ]] || { echo "  Schema: letters, digits, '_' only (max 64)."; return 1; }; }
 valid_db_user() { [[ "$1" =~ ^[A-Za-z0-9_]{1,32}$ ]] || { echo "  User: letters, digits, '_' only (max 32)."; return 1; }; }
@@ -643,8 +651,8 @@ gather_nginx() {
     [[ -n "$SVC_USER" ]] || die "The source service has no User= line; refusing to run the clone as an unknown user."
     id "$SVC_USER" >/dev/null 2>&1 || die "User '$SVC_USER' (from the service file) does not exist on this server. Create it first."
     SVC_GROUP="$(id -gn "$SVC_USER")"
-    local exe rel top n
-    EXISTING_EXE=""
+    local exe rel top n build_venv_preset="${BUILD_VENV:-}"
+    EXISTING_EXE=""; BUILD_VENV="n"; VENV_DIR=""; PY_BIN=""
     exe="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' <<<"$SVC_TEXT" | head -1)"
     if [[ "$exe" == "$TGT_PATH"/* ]]; then
         rel="${exe#"$TGT_PATH"/}"; top="${rel%%/*}"
@@ -658,7 +666,20 @@ gather_nginx() {
                 else
                     echo ""
                     echo "  [!] The service starts $exe, which lives in '$top/' - a directory you chose not to copy."
-                    echo "      It does not exist on this server yet. Set it up first, then re-run this script:"
+                    echo "      It does not exist on this server yet."
+                    if dir_selected server && rssh "test -f '$SRC_PATH/server/requirements.txt'"; then
+                        BUILD_VENV="$build_venv_preset"
+                        yn BUILD_VENV "  Build the virtual environment '$top' here from server/requirements.txt" "n"
+                    else
+                        echo "      (It cannot be built here: that needs 'server' copied and $SRC_PATH/server/requirements.txt on the source.)"
+                    fi
+                    if [[ "$BUILD_VENV" == "y" ]]; then
+                        VENV_DIR="$TGT_PATH/$top"
+                        resolve_python
+                        echo "      Will use $PY_BIN ($("$PY_BIN" --version 2>&1))."
+                        continue
+                    fi
+                    echo "      Set it up first, then re-run this script:"
                     echo "        sudo -u $SVC_USER mkdir -p $TGT_PATH"
                     echo "        sudo -u $SVC_USER python3 -m venv $TGT_PATH/$top      # same Python version as the source"
                     echo "        sudo -u $SVC_USER $TGT_PATH/$top/bin/pip install gunicorn gevent <the app's requirements>"
@@ -876,6 +897,9 @@ print_summary() {
         echo "  Target domain / path  : $TGT_DOMAIN  $TGT_PATH"
         echo "  Directories copied    : ${COPY_DIRS:-none} (plus files directly in the path)"
         if [[ -n "${EXISTING_EXE:-}" ]]; then echo "  Existing program used : $EXISTING_EXE (set up in advance, not copied)"; fi
+        if [[ "$BUILD_VENV" == "y" ]]; then
+            echo "  Virtual environment   : build $VENV_DIR with $PY_BIN from server/requirements.txt (+ requirements_project.txt, constraints.txt if present)"
+        fi
         local n skipped=""
         for n in "${DIR_NAMES[@]}"; do dir_selected "$n" || skipped+="$n "; done
         echo "  Directories NOT copied: ${skipped:-none}${skipped:+ (created empty: ${CREATE_EMPTY_DIRS})}"
@@ -921,7 +945,7 @@ save_config() {
         echo "# ubuntu_clone_server.sh configuration saved $(date '+%F %T') (passwords and cron lines are never saved)"
         for v in SRC_HOST SRC_PORT SRC_USER SRC_KEY CLONE_NGINX SRC_DOMAIN SRC_PATH SRC_SERVICE SRC_NGINX \
                  WORKERS TGT_DOMAIN TGT_PATH COPY_DIRS CREATE_EMPTY_DIRS ISSUE_CERT LE_EMAIL LE_STAGING START_SERVICE \
-                 ENABLE_NGINX_SERVICE ENABLE_DB_SERVICE CLONE_MYSQL \
+                 ENABLE_NGINX_SERVICE ENABLE_DB_SERVICE BUILD_VENV PYTHON_VERSION CLONE_MYSQL \
                  SRC_DB_SCHEMA SRC_DB_USER TGT_DB_SCHEMA TGT_DB_USER CLONE_CRON SRC_CRON_USER TGT_CRON_USER; do
             if [[ -n "${!v+x}" ]]; then printf '%s=%q\n' "$v" "${!v}"; fi
         done
@@ -945,6 +969,54 @@ check_conf_safe() {
 
 ## Execute phase
 ## --------------------------------------------
+
+# Finds the interpreter for the virtual environment. Fails closed: a requested version that is not installed
+# aborts; there is no fallback to another Python.
+resolve_python() {
+    local name="python3"
+    if [[ -n "${PYTHON_VERSION:-}" ]]; then
+        valid_python_version "$PYTHON_VERSION" || die "Invalid PYTHON_VERSION '$PYTHON_VERSION'."
+        name="python$PYTHON_VERSION"
+    fi
+    PY_BIN="$(command -v "$name" || true)"
+    [[ -n "$PY_BIN" ]] || die "$name is not installed on this server (PYTHON_VERSION='${PYTHON_VERSION:-}', empty = system python3)."
+    "$PY_BIN" -c 'import venv, ensurepip' 2>/dev/null \
+        || die "$PY_BIN cannot create virtual environments (install the matching python3-venv / ${name}-venv package)."
+}
+
+# Builds VENV_DIR from server/requirements.txt (+ requirements_project.txt, constraints.txt if present) as the
+# service user, then adds the gunicorn link the service file starts if that name is missing.
+build_venv() {
+    local srv="$TGT_PATH/server" home pip exe reqs=(-r requirements.txt) cons=() runas
+    home="$(getent passwd "$SVC_USER" | cut -d: -f6)"
+    [[ -n "$home" && -d "$home" ]] || die "Home directory of $SVC_USER not found."
+    if [[ ! -f "$srv/requirements.txt" ]]; then
+        echo "  [!] $srv/requirements.txt is missing - virtual environment NOT built."
+        return 0
+    fi
+    [[ -f "$srv/requirements_project.txt" ]] && reqs+=(-r requirements_project.txt)
+    [[ -f "$srv/constraints.txt" ]] && cons=(-c constraints.txt)
+    runas=(runuser -u "$SVC_USER" -- env HOME="$home")
+    echo "  Building $VENV_DIR with $PY_BIN ..."
+    ( cd "$srv" && "${runas[@]}" "$PY_BIN" -m venv "$VENV_DIR" ) || die "Creating the virtual environment failed."
+    pip=("$VENV_DIR/bin/python" -m pip)
+    ( cd "$srv" \
+        && "${runas[@]}" "${pip[@]}" install --upgrade pip \
+        && "${runas[@]}" "${pip[@]}" install wheel pipdeptree \
+        && "${runas[@]}" "${pip[@]}" install "${reqs[@]}" "${cons[@]}" ) \
+        || die "pip install failed. The virtual environment is left in $VENV_DIR for inspection; nothing was deleted."
+    echo "  Installed: ${reqs[*]} ${cons[*]}"
+
+    exe="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' <<<"$SVC_TEXT" | head -1)"
+    if [[ "$exe" == "$VENV_DIR/bin/"* && ! -e "$exe" && ! -L "$exe" ]]; then
+        if [[ -x "$VENV_DIR/bin/gunicorn" ]]; then
+            "${runas[@]}" ln -s gunicorn "$exe"
+            echo "  Linked ${exe#"$TGT_PATH"/} -> gunicorn"
+        else
+            echo "  [!] $VENV_DIR/bin/gunicorn not found (is gunicorn in the requirements?) - $exe not created."
+        fi
+    fi
+}
 
 step_app_files() {
     echo ""
@@ -1001,6 +1073,8 @@ step_app_files() {
             done < <(find "$d" -maxdepth 1 -name "${SRC_SLUG}*" ! -name '*.sock' ! -name '*.pid' -print0)
         done
     fi
+
+    if [[ "$BUILD_VENV" == "y" ]]; then build_venv; fi
 }
 
 step_service() {
@@ -1199,13 +1273,25 @@ main() {
     trap 'on_ctrl_c 143 "Terminated."' TERM     # not in ubuntu_provision.sh: also keep the answers on kill / closed terminal
     trap 'on_ctrl_c 129 "Terminal closed."' HUP
 
-    if [[ -n "${1:-}" ]]; then
-        [[ -f "$1" ]] || die "Config file '$1' not found."
-        check_conf_safe "$1"
+    local conf="" cli_python=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --python)   [[ -n "${2:-}" ]] || die "--python needs a version, e.g. --python 3.14"; cli_python="$2"; shift 2 ;;
+            --python=*) cli_python="${1#--python=}"; shift ;;
+            -*)         die "Unknown option '$1'." ;;
+            *)          [[ -z "$conf" ]] || die "Only one config file can be given."; conf="$1"; shift ;;
+        esac
+    done
+    [[ -z "$cli_python" ]] || valid_python_version "$cli_python" || die "Invalid --python value."
+    if [[ -n "$conf" ]]; then
+        [[ -f "$conf" ]] || die "Config file '$conf' not found."
+        check_conf_safe "$conf"
         # shellcheck disable=SC1090
-        source "$1"
-        echo "Loaded answers from $1 (anything missing is asked; passwords are always asked)"
+        source "$conf"
+        echo "Loaded answers from $conf (anything missing is asked; passwords are always asked)"
     fi
+    if [[ -n "$cli_python" ]]; then PYTHON_VERSION="$cli_python"; fi   # the command line wins over the .conf file
+    if [[ -n "$PYTHON_VERSION" ]]; then valid_python_version "$PYTHON_VERSION" || die "Invalid PYTHON_VERSION '$PYTHON_VERSION'."; fi
 
     LOG_FILE="/var/log/ubuntu_clone_server_$TS.log"
     ( umask 077; : > "$LOG_FILE" )
