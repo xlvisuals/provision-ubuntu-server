@@ -35,6 +35,9 @@ skip-name-resolve
 
 bind-address		= 127.0.0.1
 mysqlx-bind-address	= 127.0.0.1
+# Block LOAD DATA LOCAL INFILE (lets a client read files from the server via SQL).
+# Already the MySQL 8 default; set explicitly so a changed default cannot turn it on.
+local_infile		= 0
 #
 # * Fine Tuning
 #

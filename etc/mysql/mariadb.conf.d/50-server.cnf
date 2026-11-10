@@ -33,6 +33,8 @@ skip-name-resolve
 # bind-address		= 0.0.0.0
 
 bind-address		= 127.0.0.1
+# Block LOAD DATA LOCAL INFILE (lets a client read files from the server via SQL). MariaDB allows it by default.
+local_infile		= 0
 #
 # * Fine Tuning
 #

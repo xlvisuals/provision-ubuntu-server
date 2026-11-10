@@ -1,0 +1,17 @@
+# Catch-all for requests whose Host / SNI is not one of this server's server_names
+# (IP scanners, spoofed Host headers). Without it, unknown hosts on 80 got /var/www/html
+# and unknown hosts on 443 were answered by the first TLS site, with that site's certificate.
+# Installed by ubuntu_provision.sh; the [::] lines are removed when IPv6 is disabled.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;   # close the connection without a response
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;   # nginx >= 1.19.4; needs no certificate
+}

@@ -172,7 +172,7 @@ save_config() {
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
     set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_)" \
-        | grep -v "PASSWORD\|PASS\|SECRET|MACHINE_ARCH" \
+        | grep -vE "PASSWORD|PASS|SECRET|TOKEN|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
 }
@@ -1380,6 +1380,18 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
         FORGEJO_PORT="${FORGEJO_PORT:-3000}"
     fi
     prompt_if_unset FORGEJO_DOMAIN "  Enter Forgejo domain or ip" n "$LOCAL_IP"
+    # Listen address. 127.0.0.1 (default) = only through an SSH tunnel or a local reverse proxy;
+    # 0.0.0.0 = every interface, then only UFW decides who can reach it. Anything not a plain IPv4 is refused.
+    while true; do
+        prompt_if_unset FORGEJO_HTTP_ADDR "  Forgejo listen address (127.0.0.1 = SSH tunnel / reverse proxy only, 0.0.0.0 = all interfaces)" n "127.0.0.1"
+        # Octets without leading zeros (Forgejo rejects 010.0.0.1, and bash would read it as octal)
+        if [[ "$FORGEJO_HTTP_ADDR" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] \
+           && (( BASH_REMATCH[1] <= 255 && BASH_REMATCH[2] <= 255 && BASH_REMATCH[3] <= 255 && BASH_REMATCH[4] <= 255 )); then
+            break
+        fi
+        echo "  '$FORGEJO_HTTP_ADDR' is not an IPv4 address."
+        FORGEJO_HTTP_ADDR=""
+    done
 
     if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         prompt_if_unset FORGEJO_USE_POSTFIX "  Send Forgejo mail via Postfix? (y/n)" n "n"
@@ -1825,6 +1837,7 @@ echo "Install Forgejo?             : $INSTALL_FORGEJO"
 if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
   echo "  Forgejo domain/ip          : $FORGEJO_DOMAIN"
   echo "  Forgejo port               : $FORGEJO_PORT"
+  echo "  Forgejo listen address     : $FORGEJO_HTTP_ADDR"
   echo "  Database type              : $FORGEJO_DB_TYPE"
   if [[ "$FORGEJO_DB_TYPE" != "sqlite3" ]]; then
     echo "  Database name              : $FORGEJO_DB_NAME"
@@ -2304,7 +2317,7 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
         cat <<EOF > $SSH_HARDENED_CONF
 UsePAM yes
 PermitRootLogin no
-ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
 PasswordAuthentication no
 PermitEmptyPasswords no
 MaxStartups 3:50:10
@@ -2312,15 +2325,23 @@ LoginGraceTime 10
 MaxAuthTries 3
 PubkeyAuthentication yes
 AllowUsers $SSH_ALLOW_USERS
+ClientAliveInterval 300
 ClientAliveCountMax 2
 MaxSessions 2
 AllowTcpForwarding yes
+AllowAgentForwarding no
+PermitTunnel no
 TCPKeepAlive no
 X11Forwarding no
 IgnoreRhosts yes
 AuthenticationMethods publickey
 PrintMotd yes
 EOF
+        # Test before restarting: a restart with a broken config stops sshd and blocks every new login.
+        if ! sshd -t; then
+            echo "  [!] ERROR: sshd -t rejects the SSH config ($SSH_HARDENED_CONF). sshd was NOT restarted."
+            die
+        fi
         # sshd is an alias to ssh
         systemctl restart ssh || true
     else
@@ -2815,6 +2836,11 @@ EOF
     cat <<'EOF' > /etc/issue.net
 Authorized access only. All activity may be monitored and reported.
 EOF
+    # (only when OpenSSH is installed; without it there is nothing to test or restart)
+    if command -v sshd >/dev/null 2>&1 && ! sshd -t; then
+        echo "  [!] ERROR: sshd -t rejects the SSH config after the CIS settings ($SSH_HARDENED_CONF). sshd was NOT restarted."
+        die
+    fi
     systemctl restart ssh || true
 
     echo ""
@@ -3710,6 +3736,7 @@ if [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ ]]; then
 [server]
 SSH_DOMAIN = $FORGEJO_DOMAIN
 DOMAIN = $FORGEJO_DOMAIN
+HTTP_ADDR = ${FORGEJO_HTTP_ADDR:-127.0.0.1}
 HTTP_PORT = $FORGEJO_PORT
 ROOT_URL = http://$FORGEJO_DOMAIN:$FORGEJO_PORT/
 EOF
@@ -3755,6 +3782,8 @@ if [[ "$DISABLE_TX_OFFLOAD" =~ ^[Yy]$ ]]; then
 
     if [[ -f $CONFIG_DIR/etc/systemd/system/disable-offload.service ]]; then
         cp $CONFIG_DIR/etc/systemd/system/disable-offload.service /etc/systemd/system/disable-offload.service
+        # The device unit name needs systemd escaping (a '-' in the interface name becomes \x2d)
+        sed -i "s|%%PRIMARY_INTERFACE_UNIT%%|$(systemd-escape "$PRIMARY_INTERFACE")|g" /etc/systemd/system/disable-offload.service
         sed -i "s|%%PRIMARY_INTERFACE%%|$PRIMARY_INTERFACE|g" /etc/systemd/system/disable-offload.service
         systemctl daemon-reload
         systemctl enable --now disable-offload.service \
@@ -4417,6 +4446,42 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     check_service_installed wazuh-agent PROMPT_WAZUHAGENT ISINSTALLED_WAZUHAGENT
     check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
 
+    # Snapshot the config folders that have a config test, so a copy that fails its test can be put
+    # back before anything is restarted (see cfg_check below). Root only: these folders hold credentials.
+    CFG_BACKUP="/root/config-backup/provision_$(date +%F_%H%M%S)"
+    install -d -m 700 "$CFG_BACKUP"
+    for CFG_DIR in /etc/nginx /etc/mysql /etc/monit; do
+        [[ -d "$CFG_DIR" ]] && cp -a --parents "$CFG_DIR" "$CFG_BACKUP"
+    done
+    echo "  Config snapshot (nginx, mysql, monit) in $CFG_BACKUP"
+
+    # cfg_check <name> <folder> <test command...>
+    # Runs the test. On failure: shows the error, restores <folder> from the snapshot and returns 1,
+    # so the caller skips that service's restart and it keeps running on the config it already had.
+    cfg_check() {
+        local name="$1" dir="$2"; shift 2
+        if "$@" >/dev/null 2>&1; then
+            echo "  [V] $name config test passed"
+            return 0
+        fi
+        echo "  [!] $name config test FAILED ($*):"
+        { "$@" 2>&1 || true; } | tail -n 8 | sed 's/^/        /'
+        # Copy the snapshot next to the folder, then swap it in (no rsync needed; files added by this run disappear)
+        if [[ -d "$CFG_BACKUP$dir" ]] && rm -rf "$dir.cfg-restore" "$dir.cfg-failed" \
+           && cp -a "$CFG_BACKUP$dir" "$dir.cfg-restore" \
+           && mv "$dir" "$dir.cfg-failed" && mv "$dir.cfg-restore" "$dir"; then
+            rm -rf "$dir.cfg-failed"
+            echo "      Restored $dir from $CFG_BACKUP; $name is NOT restarted."
+            if "$@" >/dev/null 2>&1; then
+                echo "      The previous config passes the test."
+            else
+                echo "      [!] The previous config fails the test too - fix $dir by hand before restarting $name."
+            fi
+        else
+            echo "      [!] Could not restore $dir - fix it by hand before restarting $name."
+        fi
+        return 1
+    }
 
     if [[ "$INSTALL_MYSQL" =~ ^[Yy]$ && "$ISINSTALLED_MYSQL" == "y" ]]; then
         echo "  Copying MySQL config files"
@@ -4474,7 +4539,12 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
         fi
 
         if [[ -f $CONFIG_DIR/etc/nginx/sites-available/default ]]; then
+            # Catch-all site: closes connections for unknown Host / SNI instead of serving /var/www/html
             cp $CONFIG_DIR/etc/nginx/sites-available/default /etc/nginx/sites-available/default
+            if [[ ! -d /proc/sys/net/ipv6 || "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" != "0" ]]; then
+                sed -i '/listen \[::\]/d' /etc/nginx/sites-available/default   # IPv6 off: [::] listeners would stop nginx
+            fi
+            ln -sfn /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
         fi
 
         if [[ -f $CONFIG_DIR/etc/systemd/system/nginx.service.d/override.conf ]]; then
@@ -4491,6 +4561,12 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
         echo "  Copying Valkey config files"
         if [[ -f $CONFIG_DIR/etc/valkey/valkey.conf ]]; then
             cp $CONFIG_DIR/etc/valkey/valkey.conf /etc/valkey/valkey.conf
+        fi
+        if [[ -f $CONFIG_DIR/etc/systemd/system/valkey-server.service.d/override.conf ]]; then
+            # Keeps /etc/valkey read-only for valkey (see the comments in the file); applied by the restart below
+            mkdir -p /etc/systemd/system/valkey-server.service.d
+            cp $CONFIG_DIR/etc/systemd/system/valkey-server.service.d/override.conf /etc/systemd/system/valkey-server.service.d/override.conf
+            systemctl daemon-reload
         fi
         if [[ -n "${VALKEY_PASSWORD:-}" ]]; then
             echo "  Setting the Valkey password (/etc/valkey/valkey-auth.conf)"
@@ -4561,12 +4637,27 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
         if [[ -f $CONFIG_DIR/etc/forgejo/app.ini ]]; then
             cp $CONFIG_DIR/etc/forgejo/app.ini /etc/forgejo/app.ini
 
-            # Generate a random secret key for this installation
+            # A separate random secret for each purpose. The two JWT secrets must be 32 bytes in
+            # unpadded base64url (Forgejo rejects anything else and rewrites app.ini with its own).
             FORGEJO_SECRET_KEY=$(openssl rand -hex 32)
+            FORGEJO_INTERNAL_TOKEN=$(openssl rand -hex 32)
+            FORGEJO_LFS_JWT_SECRET=$(openssl rand 32 | base64 | tr '+/' '-_' | tr -d '=\n')
+            FORGEJO_JWT_SECRET=$(openssl rand 32 | base64 | tr '+/' '-_' | tr -d '=\n')
+            if [[ ${#FORGEJO_SECRET_KEY} -ne 64 || ${#FORGEJO_INTERNAL_TOKEN} -ne 64 \
+                  || ${#FORGEJO_LFS_JWT_SECRET} -ne 43 || ${#FORGEJO_JWT_SECRET} -ne 43 ]]; then
+                echo "  [!] ERROR: could not generate the Forgejo secrets (openssl). app.ini is incomplete; Forgejo not configured."
+                systemctl stop forgejo || true
+                die
+            fi
 
             sed -i "s|%%FORGEJO_DOMAIN%%|$FORGEJO_DOMAIN|g"             /etc/forgejo/app.ini
             sed -i "s|%%FORGEJO_PORT%%|$FORGEJO_PORT|g"                 /etc/forgejo/app.ini
+            # Empty would mean "all interfaces" to Forgejo, so an unset value falls back to the stricter 127.0.0.1
+            sed -i "s|%%FORGEJO_HTTP_ADDR%%|${FORGEJO_HTTP_ADDR:-127.0.0.1}|g" /etc/forgejo/app.ini
             sed -i "s|%%FORGEJO_SECRET_KEY%%|$FORGEJO_SECRET_KEY|g"     /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_INTERNAL_TOKEN%%|$FORGEJO_INTERNAL_TOKEN|g" /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_LFS_JWT_SECRET%%|$FORGEJO_LFS_JWT_SECRET|g" /etc/forgejo/app.ini
+            sed -i "s|%%FORGEJO_JWT_SECRET%%|$FORGEJO_JWT_SECRET|g"     /etc/forgejo/app.ini
             sed -i "s|%%FORGEJO_DB_TYPE%%|$FORGEJO_DB_TYPE|g"           /etc/forgejo/app.ini
             sed -i "s|%%FORGEJO_DB_HOST%%|$FORGEJO_DB_HOST|g"           /etc/forgejo/app.ini
             sed -i "s|%%FORGEJO_DB_NAME%%|$FORGEJO_DB_NAME|g"           /etc/forgejo/app.ini
@@ -4584,12 +4675,22 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
             chown git:git /etc/forgejo/app.ini || true
             chmod 640 /etc/forgejo/app.ini || true
 
+            # Fail closed: a placeholder left in app.ini (e.g. an empty secret) means the config is incomplete
+            FORGEJO_LEFT=$( { grep -o '%%[A-Z_]*%%' /etc/forgejo/app.ini || true; } | sort -u | tr '\n' ' ')
+            if [[ -n "$FORGEJO_LEFT" ]]; then
+                echo "  [!] /etc/forgejo/app.ini still contains: $FORGEJO_LEFT- Forgejo stopped, fix the file and start it by hand"
+                systemctl stop forgejo || true
+            fi
+
             # Restart Forgejo to pick up new config, wait for it to be ready
-            echo "  Starting Forgejo..."
-            systemctl restart forgejo || true
             FORGEJO_READY=0
+            [[ -z "$FORGEJO_LEFT" ]] && echo "  Starting Forgejo..." && { systemctl restart forgejo || true; }
+            # 0.0.0.0 also answers on 127.0.0.1; a specific address has to be asked directly
+            FORGEJO_CHECK_ADDR="${FORGEJO_HTTP_ADDR:-127.0.0.1}"
+            [[ "$FORGEJO_CHECK_ADDR" == "0.0.0.0" ]] && FORGEJO_CHECK_ADDR=127.0.0.1
             for i in {1..30}; do
-                if curl -s -o /dev/null -4 --max-time 2 "http://127.0.0.1:${FORGEJO_PORT}" 2>/dev/null; then
+                [[ -n "$FORGEJO_LEFT" ]] && break
+                if curl -s -o /dev/null -4 --max-time 2 "http://${FORGEJO_CHECK_ADDR}:${FORGEJO_PORT}" 2>/dev/null; then
                     FORGEJO_READY=1
                     break
                 fi
@@ -4912,21 +5013,39 @@ EOF
     fi    
 
 
+    # Test the copied configs first. A failed test restores the snapshot and skips that restart.
+    # (MariaDB, Valkey and the rest have no reliable offline config test and are restarted as before.)
+    echo "  Testing configs before restarting"
+    CFG_OK_MYSQL=y; CFG_OK_NGINX=y; CFG_OK_MONIT=y
+    systemctl daemon-reload
+    if [[ "$ISINSTALLED_MYSQL" == "y" ]]; then
+        cfg_check MySQL /etc/mysql mysqld --validate-config || CFG_OK_MYSQL=n
+    fi
+    if [[ "$ISINSTALLED_NGINX" == "y" ]]; then
+        cfg_check nginx /etc/nginx nginx -t || CFG_OK_NGINX=n
+    fi
+    if [[ "$ISINSTALLED_MONIT" == "y" ]]; then
+        cfg_check Monit /etc/monit monit -t || CFG_OK_MONIT=n
+    fi
+
     # Restart services to apply new configs
     echo "  Restarting services to apply configs"
-    [[ "$ISINSTALLED_MYSQL" == "y" ]]      && systemctl restart mysql           || true
+    [[ "$ISINSTALLED_MYSQL" == "y" && "$CFG_OK_MYSQL" == "y" ]] && systemctl restart mysql || true
     [[ "$ISINSTALLED_MARIADB" == "y" ]]    && systemctl restart mariadb         || true
-    [[ "$ISINSTALLED_NGINX" == "y" ]]      && systemctl restart nginx           || true
+    [[ "$ISINSTALLED_NGINX" == "y" && "$CFG_OK_NGINX" == "y" ]] && systemctl restart nginx || true
     [[ "$ISINSTALLED_VALKEY" == "y" ]]     && systemctl restart valkey-server   || true
     [[ "$ISINSTALLED_POSTGRESQL" == "y" ]] && systemctl restart postgresql      || true
     [[ "$ISINSTALLED_POSTFIX" == "y" ]]    && systemctl restart postfix         || true
     [[ "$ISINSTALLED_GRAFANA" == "y" ]]    && systemctl restart grafana-server  || true
     [[ "$ISINSTALLED_FORGEJO" == "y" ]]    && systemctl restart forgejo         || true
     [[ "$ISINSTALLED_MOSQUITTO" == "y" ]]  && systemctl restart mosquitto       || true
-    [[ "$ISINSTALLED_MONIT" == "y" ]]      && systemctl restart monit           || true
+    [[ "$ISINSTALLED_MONIT" == "y" && "$CFG_OK_MONIT" == "y" ]] && systemctl restart monit || true
     [[ "$ISINSTALLED_WAZUHAGENT" == "y" ]] && systemctl restart wazuh-agent     || true
     sleep 2
     echo "  Services restarted"
+    if [[ "$CFG_OK_MYSQL$CFG_OK_NGINX$CFG_OK_MONIT" != "yyy" ]]; then
+        echo "  [!] At least one config failed its test and was rolled back (see above). Snapshot: $CFG_BACKUP"
+    fi
 
     echo "  Configuration files installed."
 
@@ -5175,9 +5294,10 @@ echo "==========================================="
 echo ""
 echo "SSH config"
 echo "==========================================="
-# sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# sudo sshd -T | egrep -i '^(UsePAM|PermitRootLogin|KbdInteractiveAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveInterval|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|AllowAgentForwarding|PermitTunnel|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd) '
 # Fetch the active runtime configuration from sshd
-sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd' | \
+# Anchored (^...<space>): otherwise 'MaxStartups' also matches PerSourceMaxStartups, which has no rule.
+sudo sshd -T | egrep -i '^(UsePAM|PermitRootLogin|KbdInteractiveAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveInterval|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|AllowAgentForwarding|PermitTunnel|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd) ' | \
 while read -r param value; do
     # Normalize parameter name to lowercase for easy matching
     param_lower=$(echo "$param" | tr '[:upper:]' '[:lower:]')
@@ -5185,11 +5305,12 @@ while read -r param value; do
 
     case "$param_lower" in
         # These parameters should strictly be "no"
-        permitrootlogin|passwordauthentication|challengeresponseauthentication|permitemptypasswords|x11forwarding|ignorerhosts)
+        # tcpkeepalive: "no" is the hardened value; ClientAliveInterval does the (encrypted, unspoofable) keepalive instead
+        permitrootlogin|passwordauthentication|kbdinteractiveauthentication|permitemptypasswords|x11forwarding|allowagentforwarding|permittunnel|tcpkeepalive)
             if [ "$value" = "no" ]; then is_safe=true; fi
             ;;
         # These parameters should strictly be "yes"
-        usepam|pubkeyauthentication|tcpkeepalive|printmotd)
+        usepam|pubkeyauthentication|ignorerhosts|printmotd)
             if [ "$value" = "yes" ]; then is_safe=true; fi
             ;;
         # MaxAuthTries should be 4 or fewer
@@ -5203,6 +5324,10 @@ while read -r param value; do
         # MaxSessions should be restricted (e.g., 10 or fewer)
         maxsessions)
             if [ "$value" -le 10 ]; then is_safe=true; fi
+            ;;
+        # ClientAliveInterval must be on (0 = off, then ClientAliveCountMax does nothing) and at most 5 minutes
+        clientaliveinterval)
+            if [ "$value" -ge 1 ] && [ "$value" -le 300 ]; then is_safe=true; fi
             ;;
         # ClientAliveCountMax should be low (e.g., 2 or fewer)
         clientalivecountmax)
@@ -5679,13 +5804,33 @@ smoke_http() {
 }
 
 # HTTP checks
+# Catch-all default site (return 444 / ssl_reject_handshake): unknown hosts must get a closed connection
+smoke_closed() {   # smoke_closed "label" url [curl args]
+    local label="$1" url="$2" extra_args="${3:-}" code rc
+    code=$(curl -s -o /dev/null -w "%{http_code}" -4 $extra_args --max-time 5 "$url" 2>/dev/null); rc=$?
+    case "$rc" in
+        52|35) smoke_ok "$label: connection closed for unknown host (catch-all)" ;;   # 52 empty reply, 35 TLS refused
+        0)     smoke_warn "$label: catch-all answered HTTP $code instead of closing the connection" ;;
+        *)     smoke_warn "$label: could not connect (curl exit $rc) — is nginx listening?" ;;
+    esac
+}
 if systemctl is-active --quiet nginx 2>/dev/null; then
-    smoke_http "Nginx HTTP"  "http://localhost"  "ok"
-    if [[ -f /etc/letsencrypt/live/*/fullchain.pem ]] || grep -qr "ssl_certificate" /etc/nginx/sites-enabled/ 2>/dev/null; then
-        smoke_http "Nginx HTTPS" "https://localhost" "ok" "-k"
+    if grep -qs "return 444" /etc/nginx/sites-enabled/default; then
+        smoke_closed "Nginx HTTP"  "http://localhost"
+        grep -qs "ssl_reject_handshake on" /etc/nginx/sites-enabled/default && smoke_closed "Nginx HTTPS" "https://localhost" "-k"
     else
-        smoke_skip "Nginx HTTPS (no SSL certificate configured)"
+        smoke_http "Nginx HTTP"  "http://localhost"  "ok"
     fi
+    # Each site with a Let's Encrypt certificate, requested by its own name but sent to this server
+    NGX_TLS_SITES=0
+    for le_dir in /etc/letsencrypt/live/*/; do
+        le_name=$(basename "$le_dir")
+        [[ -f "$le_dir/fullchain.pem" ]] || continue
+        grep -RqsF "$le_name" /etc/nginx/sites-enabled/ || continue   # -R: sites-enabled holds symlinks
+        smoke_http "Nginx HTTPS $le_name" "https://$le_name/" "ok" "-k --noproxy $le_name --resolve $le_name:443:127.0.0.1"
+        NGX_TLS_SITES=$((NGX_TLS_SITES + 1))
+    done
+    (( NGX_TLS_SITES > 0 )) || smoke_skip "Nginx HTTPS site with a Let's Encrypt certificate"
 else smoke_skip "Nginx"; fi
 
 if systemctl is-active --quiet grafana-server 2>/dev/null; then
@@ -5783,6 +5928,15 @@ for wz_pkg in wazuh-indexer wazuh-manager filebeat wazuh-dashboard; do
     wz_pv=$(dpkg-query -W -f='${Version}' "$wz_pkg" 2>/dev/null)
     if grep -qx "$wz_pkg" <<<"$WZ_HELD"; then
         wz ok "$wz_pkg $wz_pv" "[HELD]"
+        continue
+    fi
+    # Not held. Also safe if no enabled apt source offers the package (Wazuh's recommended
+    # "comment out wazuh.list"): then the only entry in apt's version table is the installed copy
+    # (/var/lib/dpkg/status). Anything else — another source, or apt-cache output we cannot read — warns.
+    wz_policy=$(apt-cache policy "$wz_pkg" 2>/dev/null)
+    wz_sources=$(awk '/^ +Version table:/ {t=1; next} t && /^ +[0-9]+ (\/|[a-z]+:)/ {print $2}' <<<"$wz_policy" | sort -u)
+    if grep -q '^ *Installed:' <<<"$wz_policy" && [[ "$wz_sources" == "/var/lib/dpkg/status" ]]; then
+        wz ok "$wz_pkg $wz_pv" "[NOT HELD, but no enabled apt source offers it — repo disabled]"
     else
         wz warn "$wz_pkg $wz_pv" "[NOT HELD — unattended-upgrades can upgrade it on its own]"
     fi

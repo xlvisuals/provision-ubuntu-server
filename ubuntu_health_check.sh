@@ -40,9 +40,10 @@ echo "==========================================="
 echo ""
 echo "SSH config"
 echo "==========================================="
-# sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd'
+# sudo sshd -T | egrep -i '^(UsePAM|PermitRootLogin|KbdInteractiveAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveInterval|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|AllowAgentForwarding|PermitTunnel|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd) '
 # Fetch the active runtime configuration from sshd
-sudo sshd -T | egrep -i 'UsePAM|PermitRootLogin|ChallengeResponseAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd' | \
+# Anchored (^...<space>): otherwise 'MaxStartups' also matches PerSourceMaxStartups, which has no rule.
+sudo sshd -T | egrep -i '^(UsePAM|PermitRootLogin|KbdInteractiveAuthentication|PasswordAuthentication|PermitEmptyPasswords|MaxStartups|LoginGraceTime|MaxAuthTries|PubkeyAuthentication|AllowUsers|ClientAliveInterval|ClientAliveCountMax|MaxSessions|AllowTcpForwarding|AllowAgentForwarding|PermitTunnel|TCPKeepAlive|X11Forwarding|IgnoreRhosts|AuthenticationMethods|PrintMotd) ' | \
 while read -r param value; do
     # Normalize parameter name to lowercase for easy matching
     param_lower=$(echo "$param" | tr '[:upper:]' '[:lower:]')
@@ -50,11 +51,12 @@ while read -r param value; do
 
     case "$param_lower" in
         # These parameters should strictly be "no"
-        permitrootlogin|passwordauthentication|challengeresponseauthentication|permitemptypasswords|x11forwarding|ignorerhosts)
+        # tcpkeepalive: "no" is the hardened value; ClientAliveInterval does the (encrypted, unspoofable) keepalive instead
+        permitrootlogin|passwordauthentication|kbdinteractiveauthentication|permitemptypasswords|x11forwarding|allowagentforwarding|permittunnel|tcpkeepalive)
             if [ "$value" = "no" ]; then is_safe=true; fi
             ;;
         # These parameters should strictly be "yes"
-        usepam|pubkeyauthentication|tcpkeepalive|printmotd)
+        usepam|pubkeyauthentication|ignorerhosts|printmotd)
             if [ "$value" = "yes" ]; then is_safe=true; fi
             ;;
         # MaxAuthTries should be 4 or fewer
@@ -68,6 +70,10 @@ while read -r param value; do
         # MaxSessions should be restricted (e.g., 10 or fewer)
         maxsessions)
             if [ "$value" -le 10 ]; then is_safe=true; fi
+            ;;
+        # ClientAliveInterval must be on (0 = off, then ClientAliveCountMax does nothing) and at most 5 minutes
+        clientaliveinterval)
+            if [ "$value" -ge 1 ] && [ "$value" -le 300 ]; then is_safe=true; fi
             ;;
         # ClientAliveCountMax should be low (e.g., 2 or fewer)
         clientalivecountmax)
@@ -544,13 +550,33 @@ smoke_http() {
 }
 
 # HTTP checks
+# Catch-all default site (return 444 / ssl_reject_handshake): unknown hosts must get a closed connection
+smoke_closed() {   # smoke_closed "label" url [curl args]
+    local label="$1" url="$2" extra_args="${3:-}" code rc
+    code=$(curl -s -o /dev/null -w "%{http_code}" -4 $extra_args --max-time 5 "$url" 2>/dev/null); rc=$?
+    case "$rc" in
+        52|35) smoke_ok "$label: connection closed for unknown host (catch-all)" ;;   # 52 empty reply, 35 TLS refused
+        0)     smoke_warn "$label: catch-all answered HTTP $code instead of closing the connection" ;;
+        *)     smoke_warn "$label: could not connect (curl exit $rc) — is nginx listening?" ;;
+    esac
+}
 if systemctl is-active --quiet nginx 2>/dev/null; then
-    smoke_http "Nginx HTTP"  "http://localhost"  "ok"
-    if [[ -f /etc/letsencrypt/live/*/fullchain.pem ]] || grep -qr "ssl_certificate" /etc/nginx/sites-enabled/ 2>/dev/null; then
-        smoke_http "Nginx HTTPS" "https://localhost" "ok" "-k"
+    if grep -qs "return 444" /etc/nginx/sites-enabled/default; then
+        smoke_closed "Nginx HTTP"  "http://localhost"
+        grep -qs "ssl_reject_handshake on" /etc/nginx/sites-enabled/default && smoke_closed "Nginx HTTPS" "https://localhost" "-k"
     else
-        smoke_skip "Nginx HTTPS (no SSL certificate configured)"
+        smoke_http "Nginx HTTP"  "http://localhost"  "ok"
     fi
+    # Each site with a Let's Encrypt certificate, requested by its own name but sent to this server
+    NGX_TLS_SITES=0
+    for le_dir in /etc/letsencrypt/live/*/; do
+        le_name=$(basename "$le_dir")
+        [[ -f "$le_dir/fullchain.pem" ]] || continue
+        grep -RqsF "$le_name" /etc/nginx/sites-enabled/ || continue   # -R: sites-enabled holds symlinks
+        smoke_http "Nginx HTTPS $le_name" "https://$le_name/" "ok" "-k --noproxy $le_name --resolve $le_name:443:127.0.0.1"
+        NGX_TLS_SITES=$((NGX_TLS_SITES + 1))
+    done
+    (( NGX_TLS_SITES > 0 )) || smoke_skip "Nginx HTTPS site with a Let's Encrypt certificate"
 else smoke_skip "Nginx"; fi
 
 if systemctl is-active --quiet grafana-server 2>/dev/null; then
@@ -648,6 +674,15 @@ for wz_pkg in wazuh-indexer wazuh-manager filebeat wazuh-dashboard; do
     wz_pv=$(dpkg-query -W -f='${Version}' "$wz_pkg" 2>/dev/null)
     if grep -qx "$wz_pkg" <<<"$WZ_HELD"; then
         wz ok "$wz_pkg $wz_pv" "[HELD]"
+        continue
+    fi
+    # Not held. Also safe if no enabled apt source offers the package (Wazuh's recommended
+    # "comment out wazuh.list"): then the only entry in apt's version table is the installed copy
+    # (/var/lib/dpkg/status). Anything else — another source, or apt-cache output we cannot read — warns.
+    wz_policy=$(apt-cache policy "$wz_pkg" 2>/dev/null)
+    wz_sources=$(awk '/^ +Version table:/ {t=1; next} t && /^ +[0-9]+ (\/|[a-z]+:)/ {print $2}' <<<"$wz_policy" | sort -u)
+    if grep -q '^ *Installed:' <<<"$wz_policy" && [[ "$wz_sources" == "/var/lib/dpkg/status" ]]; then
+        wz ok "$wz_pkg $wz_pv" "[NOT HELD, but no enabled apt source offers it — repo disabled]"
     else
         wz warn "$wz_pkg $wz_pv" "[NOT HELD — unattended-upgrades can upgrade it on its own]"
     fi

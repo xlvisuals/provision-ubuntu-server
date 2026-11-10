@@ -3,7 +3,7 @@
    group mail
    group postfix
    start program = "/usr/bin/systemctl start postfix" with timeout 60 seconds
-   stop  program  = "/usr/bin/systemctl start postfix" with timeout 60 seconds
+   stop  program  = "/usr/bin/systemctl stop postfix" with timeout 60 seconds
    if failed host localhost port 25 with protocol smtp for 2 times within 3 cycles then restart
    if 5 restarts with 5 cycles then timeout
    depend master_bin

@@ -461,6 +461,7 @@ GRAFANA_SMTP_STARTTLS_POLICY=MandatoryStartTLS
 # Forgejo
 FORGEJO_DOMAIN=example.com
 FORGEJO_PORT=3030
+FORGEJO_HTTP_ADDR=127.0.0.1
 FORGEJO_USE_POSTFIX=y
 FORGEJO_MAILER_ENABLED=true
 FORGEJO_SMTP_ADDR=smtp.example.com
@@ -509,6 +510,7 @@ etc/
   monit/conf-available/
   monit/conf-available/password-expiry
   systemd/system/disable-offload.service
+  systemd/system/valkey-server.service.d/override.conf
 usr/
   local/bin/check-password-expiry.sh
 ```
@@ -534,6 +536,7 @@ Files containing `%%PLACEHOLDER%%` variables are copied to the target path after
 | Placeholder | Value |
 |---|---|
 | `%%PRIMARY_INTERFACE%%` | Auto-detected primary network interface |
+| `%%PRIMARY_INTERFACE_UNIT%%` | The same name, `systemd-escape`d for the device unit the service waits for (`BindsTo=`/`After=`) |
 
 ### PostgreSQL (`etc/postgresql/postgresql.conf`)
 
@@ -594,6 +597,7 @@ Called by Monit to alert when the sudo user's password is approaching expiry. Al
 | Placeholder                  | Value                                               |
 |------------------------------|-----------------------------------------------------|
 | `%%FORGEJO_DOMAIN%%`         | Domain name or IP (defaults to server's primary IP) |
+| `%%FORGEJO_HTTP_ADDR%%`      | Listen address (`FORGEJO_HTTP_ADDR`, prompted; default `127.0.0.1` = SSH tunnel or local reverse proxy only, `0.0.0.0` = all interfaces) |
 | `%%FORGEJO_PORT%%`           | HTTP port (3000, or 3030 if Grafana also installed) |
 | `%%FORGEJO_MAILER_ENABLED%%` | `true` or `false`                                   |
 | `%%FORGEJO_SMTP_ADDR%%`      | SMTP host (empty if via Postfix)                    |
@@ -606,6 +610,10 @@ Called by Monit to alert when the sudo user's password is approaching expiry. Al
 | `%%FORGEJO_DB_USER%%`        | Database username (empty for sqlite3)               |
 | `%%FORGEJO_DB_PASSWORD%%`    | Database password (empty for sqlite3)               |
 | `%%FORGEJO_DB_HOST%%`        | Database host (empty for sqlite3)                   |
+| `%%FORGEJO_SECRET_KEY%%`, `%%FORGEJO_INTERNAL_TOKEN%%` | Generated per install, a separate random value each |
+| `%%FORGEJO_LFS_JWT_SECRET%%`, `%%FORGEJO_JWT_SECRET%%` | Generated per install: 32 random bytes as unpadded base64url, the format Forgejo requires |
+
+The template turns off self-registration (`DISABLE_REGISTRATION = true`; the admin account is created by the script, further accounts by the admin), requires a login to see anything (`REQUIRE_SIGNIN_VIEW = true`), keeps e-mail addresses private by default and disables OpenID sign-in and sign-up. If a placeholder is still in `app.ini` after substitution, Forgejo is stopped instead of started.
 
 ---
 
@@ -707,7 +715,11 @@ sudo ~/ubuntu_health_check.sh
 - **curl and IPv6:** on Ubuntu 26.04, curl prefers IPv6 when connecting to `localhost`. The health check smoke tests use `curl -4` to force IPv4, ensuring consistent behaviour regardless of how `localhost` resolves on the system.
 - **Idempotent-friendly:** the script detects already-installed services and prompts to `reinstall` rather than blindly overwriting. On re-runs, services that were skipped are still detected as installed and their configs updated.
 - **`INSTALL_DEFAULT`:** set this in the conf file to apply a default `y` or `n` to all `INSTALL_` and `CONFIGURE_` variables not explicitly set. Useful for targeted re-runs — e.g. `INSTALL_DEFAULT=n` with `INSTALL_POSTFIX=y` to update only Postfix.
-- **SSH lockout prevention:** if you choose to harden SSH, the script requires a valid public key before proceeding — it will abort rather than risk locking you out.
+- **SSH lockout prevention:** if you choose to harden SSH, the script requires a valid public key before proceeding — it will abort rather than risk locking you out. Every SSH restart is preceded by `sshd -t`; if the config is rejected, sshd is not restarted and the script stops.
+- **SSH settings:** besides key-only login, the hardened drop-in sets `ClientAliveInterval 300` with `ClientAliveCountMax 2` (dead sessions are dropped after about 10 minutes; `TCPKeepAlive no` is intended, the client-alive messages replace it), `KbdInteractiveAuthentication no` (the current name for `ChallengeResponseAuthentication`), `AllowAgentForwarding no` and `PermitTunnel no`. `AllowTcpForwarding yes` stays for SSH tunnels to MySQL, Forgejo and the like.
+- **Config test and rollback:** before step 48 copies any config, `/etc/nginx`, `/etc/mysql` and `/etc/monit` are copied to `/root/config-backup/provision_<timestamp>/` (mode 700). Before the services are restarted, `nginx -t`, `mysqld --validate-config` and `monit -t` are run; a failing service gets its folder restored from that copy and is not restarted, so it keeps running on its previous config. MariaDB, Valkey and the other services have no reliable offline test and are restarted as before.
+- **nginx catch-all site:** `etc/nginx/sites-available/default` replaces the package's default site. Requests whose Host / SNI is not one of the server's `server_name`s get no answer: port 80 closes the connection (`return 444`), port 443 refuses the TLS handshake (`ssl_reject_handshake`), so scanners never see `/var/www/html` or the certificate of your first TLS site. Its `[::]` listeners are removed when IPv6 is disabled. The health check expects these closed connections and tests each enabled Let's Encrypt site by its own name.
+- **Valkey:** `valkey-server.service.d/override.conf` removes the packaged unit's write access to `/etc/valkey` (`ReadWriteDirectories=-/etc/valkey`, only needed for cluster mode), so a client with the password cannot use `CONFIG SET dir` / `CONFIG REWRITE` to change `valkey.conf` or `valkey-auth.conf`. Data, log and runtime folders stay writable.
 - **Postfix:** configured as relay-only (`inet_interfaces = 127.0.0.1`). Does not accept external mail. Rewrites all outgoing sender addresses to `POSTFIX_FROM_ADDRESS` via `sender_canonical_maps`, `header_check`, and `generic`. SASL credentials are written to `sasl_passwd`, hashed with `postmap`, and the plaintext file is deleted immediately. `mydestination` is set to localhost only — the mail domain must not appear there or Postfix will try to deliver locally instead of relaying.
 - **Monit / Grafana / Forgejo:** if Postfix is installed, each service is offered the option to route mail through it (`localhost:25`) instead of providing individual SMTP credentials.
 - **AppArmor:** enabled and set to enforce mode for profiles that exist on disk (`mysqld`, `rsyslogd`, `mosquitto` on Ubuntu 26.04). Services without profiles (`nginx`, `postgresql`, `postfix`, `grafana`, `forgejo`) are set to complain mode automatically so `aa-logprof` can build profiles from real usage. Run `sudo aa-logprof` after normal use, then `sudo aa-enforce` to activate.
@@ -805,7 +817,7 @@ Enable with `CONFIGURE_CIS_HARDENING=y`. All controls are applied idempotently �
 | su restriction | `pam_wheel` restricts `su` to members of the `wheel` group |
 | System accounts | All system accounts (UID < 1000) set to `/usr/sbin/nologin`, except `root` and service accounts that legitimately need a shell (e.g. `forgejo`) |
 | Cron/at | Directories set to `700`, `crontab` to `600`. `/etc/cron.allow` and `/etc/at.allow` restrict scheduling to `root` and the sudo user |
-| SSH | `LogLevel INFO`, warning banner, no host-based auth, no user environment, `ClientAliveInterval 300`. CIS cipher suite, MACs, and key exchange algorithms enforced |
+| SSH | `LogLevel INFO`, warning banner, no host-based auth, no user environment (`ClientAliveInterval 300` is already part of the base SSH hardening). CIS cipher suite, MACs, and key exchange algorithms enforced |
 | Sudo logging | `Defaults logfile="/var/log/sudo.log"` (skipped on Ubuntu 26.04 which uses `sudo-rs` and logs to journald) |
 | Core dumps | Disabled via PAM limits, sysctl (`fs.suid_dumpable=0`), and systemd coredump config |
 | sysctl | ASLR, TCP SYN cookies, martian packet logging, ICMP redirect hardening, IPv6 RA disabled |

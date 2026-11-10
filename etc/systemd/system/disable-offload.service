@@ -1,6 +1,8 @@
 [Unit]
 Description=Disable TCP Transmit Offloading
-After=network.target
+# Wait for the interface itself: network.target alone can be reached before it exists at boot.
+BindsTo=sys-subsystem-net-devices-%%PRIMARY_INTERFACE_UNIT%%.device
+After=sys-subsystem-net-devices-%%PRIMARY_INTERFACE_UNIT%%.device network.target
 
 [Service]
 Type=oneshot
