@@ -171,7 +171,7 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_)" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|EXCLUDE_|PIN_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_)" \
         | grep -vE "PASSWORD|PASS|SECRET|TOKEN|MACHINE_ARCH" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
@@ -1591,37 +1591,91 @@ else
     WAZUH_AGENT_VERSION=''
 fi
 
-# --- Hold services against automatic upgrades ---
-# unattended-upgrades skips held packages, also for security fixes. For services that run round the clock the admin
-# upgrades them by hand after warning the users; a mail (held-package-updates) reminds the admin that an update waits.
+# --- Exclude services from upgrades ---
+# Two separate levels, each asked per service the script manages:
+#   1. Unattended only: the service goes on unattended-upgrades' Package-Blacklist ($UU_EXCLUDE_FILE).
+#      The daily timer skips it; a manual 'sudo apt update && sudo apt upgrade' still upgrades it.
+#   2. Pinned (apt-mark hold): skipped by unattended-upgrades AND by a plain manual 'apt upgrade'.
+#      Upgrade it with 'sudo upgrade-held-packages' (lifts the hold, upgrades, holds again).
+# Both levels also skip security fixes, so a mail (held-package-updates) reminds the admin when an update waits.
+UU_EXCLUDE_FILE=/etc/apt/apt.conf.d/52unattended-upgrades-provision
+UPG_KEYS=(NGINX VALKEY MYSQL MARIADB POSTGRESQL GRAFANA)
 pkg_is_held() { apt-mark showhold 2>/dev/null | grep -qE "^$1"; }
-HLD_ANY=n
-for HLD_KEY in NGINX VALKEY MYSQL MARIADB POSTGRESQL GRAFANA; do
-    case "$HLD_KEY" in
-        NGINX)      HLD_LABEL="Nginx";      HLD_PKGRE="nginx" ;;
-        VALKEY)     HLD_LABEL="Valkey";     HLD_PKGRE="valkey" ;;
-        MYSQL)      HLD_LABEL="MySQL";      HLD_PKGRE="mysql-(server|client)" ;;
-        MARIADB)    HLD_LABEL="MariaDB";    HLD_PKGRE="mariadb-(server|client)" ;;
-        POSTGRESQL) HLD_LABEL="PostgreSQL"; HLD_PKGRE="postgresql-($PG_VERSION|client-$PG_VERSION)" ;;
-        GRAFANA)    HLD_LABEL="Grafana";    HLD_PKGRE="grafana" ;;
+uu_is_excluded() { [[ -f "$UU_EXCLUDE_FILE" ]] && grep -q "// $1\$" "$UU_EXCLUDE_FILE"; }   # entries carry a "// KEY" tag
+upg_is_managed() { local i="INSTALL_$1" s="ISINSTALLED_$1"; [[ "${!i:-n}" =~ ^[Yy]$ || "${!s:-n}" == "y" ]]; }
+upg_label() {
+    case "$1" in
+        NGINX) echo "Nginx" ;; VALKEY) echo "Valkey" ;; MYSQL) echo "MySQL" ;; MARIADB) echo "MariaDB" ;;
+        POSTGRESQL) echo "PostgreSQL" ;; GRAFANA) echo "Grafana" ;;
     esac
-    HLD_INSTALL_VAR="INSTALL_$HLD_KEY"; HLD_ISIN_VAR="ISINSTALLED_$HLD_KEY"
-    if [[ "${!HLD_INSTALL_VAR:-n}" =~ ^[Yy]$ || "${!HLD_ISIN_VAR:-n}" == "y" ]]; then
-        pkg_is_held "$HLD_PKGRE" && default_val=y || default_val=n   # keep today's state when just pressing Enter
-        prompt_if_unset "HOLD_$HLD_KEY" "Hold $HLD_LABEL against automatic upgrades (you upgrade it manually, you get a mail when an update is available)? (y/n)" n $default_val
-    else
-        printf -v "HOLD_$HLD_KEY" 'n'   # not installed here, nothing to hold
+}
+upg_held_re() {   # regex for apt-mark showhold, used to read today's hold state
+    case "$1" in
+        NGINX) echo "nginx" ;; VALKEY) echo "valkey" ;; MYSQL) echo "mysql-(server|client)" ;;
+        MARIADB) echo "mariadb-(server|client)" ;; POSTGRESQL) echo "postgresql-($PG_VERSION|client-$PG_VERSION)" ;;
+        GRAFANA) echo "grafana" ;;
+    esac
+}
+UPG_MANAGED=()
+for UPG_KEY in "${UPG_KEYS[@]}"; do upg_is_managed "$UPG_KEY" && UPG_MANAGED+=("$UPG_KEY"); done
+
+if [[ ${#UPG_MANAGED[@]} -gt 0 ]]; then
+    # Each question defaults to today's state (or what the config file presets), so pressing Enter changes nothing.
+    default_val=n
+    for UPG_KEY in "${UPG_MANAGED[@]}"; do
+        UPG_VAR="EXCLUDE_UNATTENDED_$UPG_KEY"
+        if uu_is_excluded "$UPG_KEY" || [[ "${!UPG_VAR:-n}" =~ ^[Yy]$ ]]; then default_val=y; fi
+    done
+    prompt_if_unset EXCLUDE_UNATTENDED "Do you want to exclude packages from automatic (unattended) upgrades? (y/n)" n $default_val
+    if [[ "$EXCLUDE_UNATTENDED" =~ ^[Yy]$ ]]; then
+        echo "  Excluded services are skipped by the daily unattended upgrade (security fixes too)."
+        echo "  'sudo apt update && sudo apt upgrade' still upgrades them."
+        for UPG_KEY in "${UPG_MANAGED[@]}"; do
+            uu_is_excluded "$UPG_KEY" && default_val=y || default_val=n
+            prompt_if_unset "EXCLUDE_UNATTENDED_$UPG_KEY" "  Exclude $(upg_label "$UPG_KEY") from unattended upgrades? (y/n)" n $default_val
+        done
     fi
-    HLD_VAR="HOLD_$HLD_KEY"
-    [[ "${!HLD_VAR}" =~ ^[Yy]$ ]] && HLD_ANY=y
+
+    default_val=n
+    for UPG_KEY in "${UPG_MANAGED[@]}"; do
+        UPG_VAR="HOLD_$UPG_KEY"
+        if pkg_is_held "$(upg_held_re "$UPG_KEY")" || [[ "${!UPG_VAR:-n}" =~ ^[Yy]$ ]]; then default_val=y; fi
+    done
+    prompt_if_unset PIN_PACKAGES "Do you want to exclude packages from manual upgrades (pin)? (y/n)" n $default_val
+    if [[ "$PIN_PACKAGES" =~ ^[Yy]$ ]]; then
+        echo "  Pinned services (apt-mark hold) are skipped by unattended upgrades AND by 'apt upgrade'."
+        echo "  Upgrade them with: sudo upgrade-held-packages   (you get a mail when an update is available)"
+        for UPG_KEY in "${UPG_MANAGED[@]}"; do
+            pkg_is_held "$(upg_held_re "$UPG_KEY")" && default_val=y || default_val=n
+            prompt_if_unset "HOLD_$UPG_KEY" "  Pin $(upg_label "$UPG_KEY")? (y/n)" n $default_val
+        done
+    fi
+fi
+: "${EXCLUDE_UNATTENDED:=n}"
+: "${PIN_PACKAGES:=n}"
+# Everything not asked about is 'n': not installed here, or the overall question was answered n.
+# Step 49b then takes it off the exclusion list / lifts its hold, and says so.
+HLD_ANY=n
+for UPG_KEY in "${UPG_KEYS[@]}"; do
+    for UPG_VAR in "EXCLUDE_UNATTENDED_$UPG_KEY" "HOLD_$UPG_KEY"; do
+        if ! upg_is_managed "$UPG_KEY"; then
+            printf -v "$UPG_VAR" 'n'
+        elif [[ "$UPG_VAR" == EXCLUDE_* && ! "$EXCLUDE_UNATTENDED" =~ ^[Yy]$ ]] || [[ "$UPG_VAR" == HOLD_* && ! "$PIN_PACKAGES" =~ ^[Yy]$ ]]; then
+            [[ "${!UPG_VAR:-n}" =~ ^[Yy]$ ]] && echo "  [!] $UPG_VAR=y ignored: the overall question for it was answered n"
+            printf -v "$UPG_VAR" 'n'
+        elif [[ -z "${!UPG_VAR:-}" ]]; then
+            printf -v "$UPG_VAR" 'n'
+        fi
+        [[ "${!UPG_VAR}" =~ ^[Yy]$ ]] && HLD_ANY=y
+    done
 done
 # Wazuh packages are held as well (agent always, server if chosen), so the same mail covers them.
 if [[ "$HLD_ANY" == "y" || "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ || "$INSTALL_WAZUHMANAGER" =~ ^[Yy]$ ]]; then
-    echo "  Held packages are skipped by unattended-upgrades, including security fixes - so an admin mail is important."
+    echo "  Excluded and pinned packages miss security fixes from unattended-upgrades - so an admin mail is important."
     if ! [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ || "$ISINSTALLED_POSTFIX" == "y" ]]; then
         echo "  [!] Postfix is not installed/selected: without a working 'mail' command the notice only goes to the journal."
     fi
-    prompt_if_unset HELD_UPDATE_MAIL_TO "  Mail address for held-package update notices" n "${POSTFIX_ROOT_ALIAS:-${MONIT_ALERT_RECIPIENT:-root}}"
+    prompt_if_unset HELD_UPDATE_MAIL_TO "  Mail address for update notices about excluded and pinned packages" n "${POSTFIX_ROOT_ALIAS:-${MONIT_ALERT_RECIPIENT:-root}}"
     prompt_if_unset HELD_UPDATE_REMINDER_DAYS "  Repeat the notice every N days while an update is pending (0 = only for new versions)" n 7
     if ! [[ "$HELD_UPDATE_MAIL_TO" =~ ^[A-Za-z0-9._%+-]+(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?$ ]]; then
         echo "  [!] '$HELD_UPDATE_MAIL_TO' is not a valid mail address - no held-package notices will be configured."
@@ -1890,7 +1944,8 @@ if [[ "$INSTALL_WAZUHAGENT" =~ ^[Yy]$ ]]; then
   echo "  Wazuh Manager              : $WAZUH_MANAGER"
   echo "  Wazuh Agent version        : $WAZUH_AGENT_VERSION"
 fi
-echo "Hold from auto-upgrade?       : nginx=$HOLD_NGINX valkey=$HOLD_VALKEY mysql=$HOLD_MYSQL mariadb=$HOLD_MARIADB postgresql=$HOLD_POSTGRESQL grafana=$HOLD_GRAFANA"
+echo "Exclude from unattended?     : nginx=$EXCLUDE_UNATTENDED_NGINX valkey=$EXCLUDE_UNATTENDED_VALKEY mysql=$EXCLUDE_UNATTENDED_MYSQL mariadb=$EXCLUDE_UNATTENDED_MARIADB postgresql=$EXCLUDE_UNATTENDED_POSTGRESQL grafana=$EXCLUDE_UNATTENDED_GRAFANA"
+echo "Pin (also no manual upgrade)?: nginx=$HOLD_NGINX valkey=$HOLD_VALKEY mysql=$HOLD_MYSQL mariadb=$HOLD_MARIADB postgresql=$HOLD_POSTGRESQL grafana=$HOLD_GRAFANA"
 if [[ -n "$HELD_UPDATE_MAIL_TO" ]]; then
   echo "  Notify about updates       : $HELD_UPDATE_MAIL_TO (reminder every $HELD_UPDATE_REMINDER_DAYS days, 0 = new versions only)"
 fi
@@ -2160,7 +2215,7 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     apt_install apt-file apt-show-versions apt-utils arping btop ca-certificates curl debsums dnsutils \
           git git-lfs gnupg gnupg2 gpg iftop iotop iputils-ping jq lsb-release lsof mc micro mtr nano ncdu ne \
           needrestart net-tools nethogs nload nmap p7zip-full rsync sed socat speedtest-cli sysstat tmux traceroute tree \
-          unattended-upgrades unzip vim vim-gui-common vnstat wget zip ethtool
+          unattended-upgrades unzip update-notifier-common vim vim-gui-common vnstat wget zip ethtool
     apt-file update
 
     # vnstat: lightweight per-interface traffic accounting (used by the health check)
@@ -2312,6 +2367,8 @@ if [[ "$INSTALL_SSH" =~ ^[Yy]$ ]]; then
         SSH_ALLOW_USERS="$USER_SUDO_USER_USERNAME"
         [[ "$INSTALL_FORGEJO" =~ ^[Yy]$ || "$ISINSTALLED_FORGEJO" == "y" ]] && SSH_ALLOW_USERS="$SSH_ALLOW_USERS forgejo"
 
+        # Keep these settings in sync with ssh_managed_block() in utils/update_server_config.sh,
+        # which re-applies them on existing servers.
         # Override file ensures custom settings take precedence in Ubuntu 26.04.
         # Using <<EOF, not <<'EOF', so that variables are expanded.
         cat <<EOF > $SSH_HARDENED_CONF
@@ -2789,7 +2846,8 @@ EOF
     # Remove any legacy 02-cis-hardening.conf left by older runs.
     rm -f /etc/ssh/sshd_config.d/02-cis-hardening.conf
 
-    # Each directive only added if not already present
+    # Each directive only added if not already present.
+    # Keep in sync with the CIS part of ssh_managed_block() in utils/update_server_config.sh.
     declare -A CIS_SSH_SETTINGS=(
         [LogLevel]="INFO"
         [Banner]="/etc/issue.net"
@@ -4824,15 +4882,24 @@ EOF
             fi
         done
 
-        # Link remaining utilities
+        # Link remaining utilities. The file is always refreshed (a re-run picks up a changed check);
+        # the link is only created when missing.
         for UTILITY in "reboot-required" "disk-alerts"; do
             SRC="$CONFIG_DIR/etc/monit/conf-available/$UTILITY"
             DEST="/etc/monit/conf-available/$UTILITY"
             LINK="/etc/monit/conf-enabled/$UTILITY"
             [[ ! -f "$SRC" ]] && continue
-            [[ -L "$LINK" ]] && continue
+            if [[ "$UTILITY" == "reboot-required" ]]; then
+                # The check runs this helper; without it Monit would alert on every cycle
+                if [[ -f "$CONFIG_DIR/usr/local/sbin/reboot-required-check" ]]; then
+                    install -m 755 -o root -g root "$CONFIG_DIR/usr/local/sbin/reboot-required-check" /usr/local/sbin/reboot-required-check
+                else
+                    echo "  [!] $CONFIG_DIR/usr/local/sbin/reboot-required-check not found - reboot-required check not enabled"
+                    rm -f "$LINK"; continue
+                fi
+            fi
             cp -f "$SRC" "$DEST"
-            ln -s "$DEST" /etc/monit/conf-enabled/
+            [[ -L "$LINK" ]] || ln -s "$DEST" /etc/monit/conf-enabled/
         done
 
         # Password expiry check requested by the CIS hardening step (Monit did not exist yet at that point)
@@ -5186,7 +5253,51 @@ fi
 
 
 echo ""
-echo "--- 49b. Hold packages against automatic upgrades, notify about pending updates ---"
+echo "--- 49b. Exclude packages from unattended upgrades, pin (hold) packages, notify about pending updates ---"
+# Unattended-upgrades exclusion: patterns are Python regexes matched at the start of the package name.
+# They cover the same packages as the hold globs below; shared packages (mysql-common, postgresql-common,
+# postgresql-client-common) are left out so libraries that depend on them keep getting fixes.
+declare -A UU_PATTERNS=(
+    [NGINX]="nginx libnginx-mod-"
+    [VALKEY]="valkey"
+    [MYSQL]="mysql-server mysql-client"
+    [MARIADB]="mariadb-server mariadb-client"
+    [POSTGRESQL]="postgresql\$ postgresql-[0-9] postgresql-client-[0-9]"
+    [GRAFANA]="grafana"
+)
+UU_TMP=$(mktemp)
+{
+    echo "// Managed by ubuntu_provision.sh - re-run the script to change it (edits here are overwritten)."
+    echo "// Packages listed here are skipped by unattended-upgrades (security fixes too)."
+    echo "// A manual 'sudo apt update && sudo apt upgrade' still upgrades them."
+    echo "Unattended-Upgrade::Package-Blacklist {"
+} > "$UU_TMP"
+UU_COUNT=0
+for UPG_KEY in "${UPG_KEYS[@]}"; do
+    UPG_VAR="EXCLUDE_UNATTENDED_$UPG_KEY"
+    if [[ "${!UPG_VAR}" =~ ^[Yy]$ ]]; then
+        read -ra UU_PATS <<<"${UU_PATTERNS[$UPG_KEY]}"   # read -a: no glob expansion of [0-9]
+        for UU_PAT in "${UU_PATS[@]}"; do
+            printf '    "%s";  // %s\n' "$UU_PAT" "$UPG_KEY" >> "$UU_TMP"
+        done
+        UU_COUNT=$((UU_COUNT + 1))
+        echo "  [V] $UPG_KEY excluded from unattended upgrades: ${UU_PATTERNS[$UPG_KEY]}"
+    elif uu_is_excluded "$UPG_KEY"; then
+        echo "  [!] $UPG_KEY removed from the unattended-upgrades exclusion list as requested"
+    fi
+done
+echo "};" >> "$UU_TMP"
+if (( UU_COUNT == 0 )); then
+    rm -f "$UU_EXCLUDE_FILE" "$UU_TMP"
+    echo "  No service excluded from unattended upgrades."
+elif apt-config -c "$UU_TMP" dump >/dev/null 2>&1; then
+    # Checked before installing: a syntax error in apt.conf.d would break every apt command
+    install -m 644 -o root -g root "$UU_TMP" "$UU_EXCLUDE_FILE"
+    rm -f "$UU_TMP"
+else
+    echo "  [!] Generated exclusion list did not parse - $UU_EXCLUDE_FILE left unchanged. Check: apt-config -c $UU_TMP dump"
+fi
+
 # Packages that really make up each service (globs are matched against what is installed, so modules,
 # clients and extensions that must stay in step with the server are held with it).
 declare -A HLD_GLOBS=(
@@ -5219,8 +5330,11 @@ for HLD_KEY in NGINX VALKEY MYSQL MARIADB POSTGRESQL GRAFANA; do
     fi
 done
 
-if [[ -n "$(apt-mark showhold)" && -n "$HELD_UPDATE_MAIL_TO" ]]; then
-    for HLD_FILE in held-package-updates upgrade-held-packages; do
+# The notice covers held packages and packages excluded from unattended upgrades: both miss security fixes.
+UPG_NEEDS_NOTICE=n
+[[ -n "$(apt-mark showhold)" || -f "$UU_EXCLUDE_FILE" ]] && UPG_NEEDS_NOTICE=y
+if [[ "$UPG_NEEDS_NOTICE" == "y" && -n "$HELD_UPDATE_MAIL_TO" ]]; then
+    for HLD_FILE in held-package-updates upgrade-held-packages reboot-required-check; do
         if [[ -f "$CONFIG_DIR/usr/local/sbin/$HLD_FILE" ]]; then
             install -m 750 -o root -g root "$CONFIG_DIR/usr/local/sbin/$HLD_FILE" "/usr/local/sbin/$HLD_FILE"
         else
@@ -5233,15 +5347,16 @@ if [[ -n "$(apt-mark showhold)" && -n "$HELD_UPDATE_MAIL_TO" ]]; then
     mkdir -p /etc/systemd/system/apt-daily.service.d
     printf '[Service]\nExecStartPost=-/usr/local/sbin/held-package-updates\n' > /etc/systemd/system/apt-daily.service.d/held-package-updates.conf
     systemctl daemon-reload
-    echo "  [V] Held-package notices go to $HELD_UPDATE_MAIL_TO after each apt update (reminder every $HELD_UPDATE_REMINDER_DAYS days)"
-    echo "      Upgrade held packages with: sudo upgrade-held-packages   (lifts the hold, upgrades, restores the hold)"
-    echo "      Preview the mail:           sudo held-package-updates --dry-run"
-elif [[ -z "$(apt-mark showhold)" ]]; then
+    echo "  [V] Update notices for excluded/pinned packages go to $HELD_UPDATE_MAIL_TO after each apt update (reminder every $HELD_UPDATE_REMINDER_DAYS days)"
+    echo "      Upgrade pinned packages with:   sudo upgrade-held-packages   (lifts the hold, upgrades, restores the hold)"
+    echo "      Upgrade excluded packages with: sudo apt update && sudo apt upgrade"
+    echo "      Preview the mail:               sudo held-package-updates --dry-run"
+elif [[ "$UPG_NEEDS_NOTICE" == "n" ]]; then
     rm -f /etc/systemd/system/apt-daily.service.d/held-package-updates.conf
     systemctl daemon-reload
-    echo "  Nothing is held - no held-package notices needed."
+    echo "  Nothing is excluded or pinned - no update notices needed."
 else
-    echo "  [!] Packages are held but no valid notice address was given - NO mail will be sent about pending updates."
+    echo "  [!] Packages are excluded or pinned but no valid notice address was given - NO mail will be sent about pending updates."
 fi
 
 
@@ -5411,12 +5526,69 @@ fi
 echo ""
 echo "Reboot required"
 echo "==========================================="
-if [ -f /var/run/reboot-required ]; then
+# reboot_reasons — print one line per reason this server needs a reboot; nothing when it does not.
+# Does not rely only on /var/run/reboot-required: that flag is written by update-notifier-common's kernel hook
+# (missing on minimized installs) and vanishes on any reboot, also one that booted the old kernel again.
+# A line starting with "info: " is a note (kernel could not be compared), not a reason to reboot.
+reboot_reasons() {
+    local run flavour run_ver newest="" newest_ver="" f v btime inst ksta ucsta RR_INFO=""
+    if [[ -f /var/run/reboot-required ]]; then
+        echo "reboot-required flag set by: $(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+    fi
+    run=$(uname -r)
+    # Ubuntu kernel releases look like 6.8.0-101-generic: version-ABI-flavour
+    if [[ "$run" =~ ^([0-9]+\.[0-9]+\.[0-9]+-[0-9]+)-(.+)$ ]]; then
+        run_ver=${BASH_REMATCH[1]}; flavour=${BASH_REMATCH[2]}
+        for f in /boot/vmlinuz-*-"$flavour"; do
+            [[ -f "$f" ]] || continue
+            v=${f#/boot/vmlinuz-}
+            [[ -d "/lib/modules/$v" ]] || continue          # leftovers of a removed kernel do not count
+            v=${v%-"$flavour"}
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || continue
+            if [[ -z "$newest_ver" ]] || dpkg --compare-versions "$v" gt "$newest_ver"; then
+                newest_ver=$v; newest="$v-$flavour"
+            fi
+        done
+        if [[ -z "$newest" ]]; then
+            RR_INFO="no installed $flavour kernel found in /boot (container or custom kernel) - kernel not compared"
+        elif dpkg --compare-versions "$newest_ver" gt "$run_ver"; then
+            echo "running kernel $run, newer kernel $newest is installed"
+            btime=$(awk '/^btime/ {print $2}' /proc/stat)
+            inst=$(stat -c %Z "/boot/vmlinuz-$newest" 2>/dev/null)   # ctime = when it was written here
+            if [[ -n "$btime" && -n "$inst" ]] && (( btime > inst )); then
+                echo "  the server was rebooted after $newest was installed but still booted $run:"
+                echo "  check the GRUB default (grep GRUB_DEFAULT /etc/default/grub; grub-editenv list)"
+            fi
+        fi
+    else
+        RR_INFO="kernel release '$run' is not an Ubuntu kernel name - kernel not compared"
+    fi
+    [[ -n "$RR_INFO" ]] && echo "info: $RR_INFO"
+    if [[ ! -d "/lib/modules/$run" && -z "$RR_INFO" ]]; then
+        echo "modules of the running kernel $run were removed (autoremove?) - new hardware/modules cannot load"
+    fi
+    # needrestart's own view (kernel and CPU microcode); -r l only lists, it never restarts anything
+    if command -v needrestart >/dev/null 2>&1; then
+        local nr
+        nr=$(needrestart -b -r l 2>/dev/null) || nr=""
+        ksta=$(sed -n 's/^NEEDRESTART-KSTA: //p' <<<"$nr")
+        ucsta=$(sed -n 's/^NEEDRESTART-UCSTA: //p' <<<"$nr")
+        if [[ "$ksta" == "2" || "$ksta" == "3" ]] && [[ -z "$newest" || "$newest" == "$run" ]]; then
+            echo "needrestart: a kernel upgrade is pending (expected $(sed -n 's/^NEEDRESTART-KEXP: //p' <<<"$nr"))"
+        fi
+        [[ "$ucsta" == "2" ]] && echo "needrestart: a CPU microcode update is waiting for a reboot"
+    fi
+    return 0
+}
+RR_OUT=$(reboot_reasons)
+RR_REASONS=$(grep -v '^info: ' <<<"$RR_OUT" || true)
+if [[ -n "$RR_REASONS" ]]; then
     echo -e "${YELLOW}[REBOOT REQUIRED]${NC}"
-    cat /var/run/reboot-required.pkgs 2>/dev/null | sort -u | sed 's/^/  /'
+    sed 's/^/  /' <<<"$RR_REASONS"
 else
     echo -e "${GREEN}[NO REBOOT NEEDED]${NC}"
 fi
+grep '^info: ' <<<"$RR_OUT" | sed 's/^info: /  Note: /' || true
 
 echo ""
 echo "Time synchronisation"
@@ -5492,25 +5664,55 @@ echo "==========================================="
 apt-get -s upgrade 2>/dev/null | grep -P "^\d+ upgraded" || echo "Could not check."
 
 echo ""
-echo "Held packages (skipped by automatic upgrades)"
+echo "Excluded from unattended upgrades (a manual apt upgrade still installs them)"
 echo "==========================================="
+UU_PATS=$(apt-config dump Unattended-Upgrade::Package-Blacklist 2>/dev/null \
+          | sed -n 's/^Unattended-Upgrade::Package-Blacklist:: "\(.*\)";$/\1/p')
 HELD_LIST=$(apt-mark showhold 2>/dev/null)
+upg_status() {   # upg_status PACKAGE -> "version: [status]"; returns 1 when an update is available
+    local p="$1" inst cand
+    inst=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null) || inst="?"
+    cand=$(apt-cache policy "$p" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
+    if [[ -n "$cand" && "$cand" != "(none)" && "$inst" != "?" ]] && dpkg --compare-versions "$cand" gt "$inst"; then
+        echo -e "$inst: ${YELLOW}[UPDATE AVAILABLE: $cand]${NC}"; return 1
+    fi
+    echo -e "$inst: ${GREEN}[up to date]${NC}"
+}
+if [[ -z "$UU_PATS" ]]; then
+    echo "  None"
+else
+    echo "  Patterns: $(tr '\n' ' ' <<<"$UU_PATS")"
+    UU_WAITING=0; UU_FOUND=0
+    while read -r up; do
+        [[ -n "$up" ]] || continue
+        while read -r pat; do
+            [[ -n "$pat" && "$up" =~ ^($pat) ]] || continue
+            UU_FOUND=$((UU_FOUND + 1))
+            hp_note=""; grep -qxF "$up" <<<"$HELD_LIST" && hp_note=" (also pinned)"
+            if hp_line=$(upg_status "$up"); then :; else UU_WAITING=$((UU_WAITING + 1)); fi
+            echo -e "  $up $hp_line$hp_note"
+            break
+        done <<<"$UU_PATS"
+    done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 == "ii" {print $2}')
+    (( UU_FOUND == 0 )) && echo "  No installed package matches."
+    (( UU_WAITING > 0 )) && echo -e "  ${YELLOW}$UU_WAITING excluded package(s) have updates: sudo apt update && sudo apt upgrade${NC}"
+fi
+
+echo ""
+echo "Pinned packages (apt-mark hold: skipped by unattended AND manual apt upgrade)"
+echo "==========================================="
 if [[ -z "$HELD_LIST" ]]; then
     echo "  None"
 else
     HELD_WAITING=0
     while read -r hp; do
         [[ -n "$hp" ]] || continue
-        hp_inst=$(dpkg-query -W -f='${Version}' "$hp" 2>/dev/null) || continue
-        hp_cand=$(apt-cache policy "$hp" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
-        if [[ -n "$hp_cand" && "$hp_cand" != "(none)" ]] && dpkg --compare-versions "$hp_cand" gt "$hp_inst"; then
-            echo -e "  $hp $hp_inst: ${YELLOW}[UPDATE AVAILABLE: $hp_cand]${NC}"
-            HELD_WAITING=$((HELD_WAITING + 1))
-        else
-            echo -e "  $hp $hp_inst: ${GREEN}[up to date]${NC}"
-        fi
+        if hp_line=$(upg_status "$hp"); then :; else HELD_WAITING=$((HELD_WAITING + 1)); fi
+        echo -e "  $hp $hp_line"
     done <<<"$HELD_LIST"
-    (( HELD_WAITING > 0 )) && echo -e "  ${YELLOW}$HELD_WAITING held package(s) have updates: sudo upgrade-held-packages${NC}"
+    (( HELD_WAITING > 0 )) && echo -e "  ${YELLOW}$HELD_WAITING pinned package(s) have updates: sudo upgrade-held-packages${NC}"
+fi
+if [[ -n "$UU_PATS" || -n "$HELD_LIST" ]]; then
     if [[ -x /usr/local/sbin/held-package-updates && -f /etc/systemd/system/apt-daily.service.d/held-package-updates.conf ]]; then
         HELD_MAIL=$(sed -n 's/^MAIL_TO=//p' /etc/held-package-updates.conf 2>/dev/null | head -1)
         echo -e "  Update notice mail: ${GREEN}[to ${HELD_MAIL:-?}]${NC}"

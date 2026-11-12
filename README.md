@@ -269,6 +269,8 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 | `ubuntu_backup_config.sh` | Backs up all service configurations to a timestamped tarball |
 | `ubuntu_clone_server.sh`, `ubuntu_clone_server.conf` | Clones a gunicorn/nginx web app, its MySQL schema and its cron jobs from another server over SSH; the `.conf` is a sample of its saved answers |
 | `usr/local/sbin/held-package-updates`, `usr/local/sbin/upgrade-held-packages` | Mail the admin when a held package has an update; upgrade held packages and restore the hold (installed to `/usr/local/sbin`) |
+| `usr/local/sbin/reboot-required-check` | Exit 1 and say why when the server needs a reboot (flag, newer installed kernel, needrestart). Used by the Monit `reboot-required` check and `upgrade-held-packages` (installed to `/usr/local/sbin`) |
+| `utils/update_server_config.sh` | Safely re-applies the SSH hardening and the automatic-update settings on an existing server: backup, diff, test, rollback (see [Updating settings on existing servers](#updating-settings-on-existing-servers)) |
 | `utils/wazuh_server_tune.sh` | Tunes a Wazuh server (indexer heap, shards, alert retention, read-only health user); called by the provisioning script, also usable on an existing server |
 | `etc/` | Service configuration templates with `%%PLACEHOLDER%%` variables |
 
@@ -687,6 +689,7 @@ Run it any time (as root) to get a colour-coded status report covering:
 - SSH configuration
 - Swap and disk usage
 - Memory usage
+- Reboot required: the reboot-required flag, a newer installed kernel than the running one (also after a reboot that booted the old kernel again, with a hint to check the GRUB default), removed modules of the running kernel, and pending kernel/microcode updates according to needrestart
 - TCP transmit offloading status
 - Failed systemd units
 - Recent failed SSH logins
@@ -716,6 +719,7 @@ sudo ~/ubuntu_health_check.sh
 - **Idempotent-friendly:** the script detects already-installed services and prompts to `reinstall` rather than blindly overwriting. On re-runs, services that were skipped are still detected as installed and their configs updated.
 - **`INSTALL_DEFAULT`:** set this in the conf file to apply a default `y` or `n` to all `INSTALL_` and `CONFIGURE_` variables not explicitly set. Useful for targeted re-runs — e.g. `INSTALL_DEFAULT=n` with `INSTALL_POSTFIX=y` to update only Postfix.
 - **SSH lockout prevention:** if you choose to harden SSH, the script requires a valid public key before proceeding — it will abort rather than risk locking you out. Every SSH restart is preceded by `sshd -t`; if the config is rejected, sshd is not restarted and the script stops.
+- **Reboot detection:** `/var/run/reboot-required` alone is not reliable. Only `update-notifier-common`'s kernel hook writes it, and that package is missing on minimized installs (the script now installs it with the recommended tools). The flag is also gone after any reboot, even one that booted the old kernel again. The health check, the Monit `reboot-required` check and `upgrade-held-packages` therefore also compare the running kernel (`uname -r`) with the newest installed kernel of the same flavour, and ask needrestart. Unattended-upgrades' automatic reboot still only looks at the flag, so `utils/update_server_config.sh` offers to install `update-notifier-common` when you turn automatic reboot on.
 - **SSH settings:** besides key-only login, the hardened drop-in sets `ClientAliveInterval 300` with `ClientAliveCountMax 2` (dead sessions are dropped after about 10 minutes; `TCPKeepAlive no` is intended, the client-alive messages replace it), `KbdInteractiveAuthentication no` (the current name for `ChallengeResponseAuthentication`), `AllowAgentForwarding no` and `PermitTunnel no`. `AllowTcpForwarding yes` stays for SSH tunnels to MySQL, Forgejo and the like.
 - **Config test and rollback:** before step 48 copies any config, `/etc/nginx`, `/etc/mysql` and `/etc/monit` are copied to `/root/config-backup/provision_<timestamp>/` (mode 700). Before the services are restarted, `nginx -t`, `mysqld --validate-config` and `monit -t` are run; a failing service gets its folder restored from that copy and is not restarted, so it keeps running on its previous config. MariaDB, Valkey and the other services have no reliable offline test and are restarted as before.
 - **nginx catch-all site:** `etc/nginx/sites-available/default` replaces the package's default site. Requests whose Host / SNI is not one of the server's `server_name`s get no answer: port 80 closes the connection (`return 444`), port 443 refuses the TLS handshake (`ssl_reject_handshake`), so scanners never see `/var/www/html` or the certificate of your first TLS site. Its `[::]` listeners are removed when IPv6 is disabled. The health check expects these closed connections and tests each enabled Let's Encrypt site by its own name.
@@ -735,14 +739,55 @@ sudo ~/ubuntu_health_check.sh
 - **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy 3.11 release is fetched dynamically at install time, with a hardcoded fallback version if the fetch fails.
 - **Webmin:** installed via the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
 
-## Holding services against automatic upgrades
+## Updating settings on existing servers
 
-Servers that run round the clock cannot let the daily timer upgrade a database or web server in the middle of use. The script asks, for each of Nginx, Valkey, MySQL/MariaDB, PostgreSQL and Grafana that is installed or selected, whether to hold it (`HOLD_NGINX`, `HOLD_VALKEY`, `HOLD_MYSQL`, `HOLD_MARIADB`, `HOLD_POSTGRESQL`, `HOLD_GRAFANA`). Pressing Enter keeps the current state, so a re-run does not silently lift a hold; answering `n` for a held service lifts it and says so.
+`utils/update_server_config.sh` brings a server that was provisioned earlier up to today's settings without re-running the whole provisioning script. It asks for each section (or name them: `ssh`, `updates`), shows the current values, and pressing Enter keeps a value. Before anything is written it shows a diff and asks for confirmation. Every file it changes is first copied to `/root/config-backup/update_config_<time>/`, and a failed test puts the backup back.
 
+```bash
+sudo ./utils/update_server_config.sh --dry-run        # show what would change, change nothing
+sudo ./utils/update_server_config.sh ssh              # SSH only
+sudo ./utils/update_server_config.sh updates          # automatic updates only
+sudo ./utils/update_server_config.sh ssh --rollback-minutes 10
+```
+
+Step-by-step guide: [howto/howto-upgrade-config.md](howto/howto-upgrade-config.md).
+
+**SSH** rewrites the hardened drop-in (`/etc/ssh/sshd_config.d/01-<user>-hardened.conf`) with the settings from provisioning step 11, plus the CIS ciphers, MACs, KEX, `LogLevel` and login banner if you choose them (the default follows what the file has now). Directives the scripts do not manage (a `Port`, say) and `Match` blocks are kept. It refuses and changes nothing when the change could lock you out:
+
+- AllowUsers would be empty, names a user that does not exist, or leaves out the admin user or the user running `sudo`
+- the admin user is not in the `sudo` group, or has no public key that sshd would accept (checked with `ssh-keygen`, including the file permissions that `StrictModes` requires)
+- the current config already fails `sshd -t`, there is more than one `*-hardened.conf`, or systemd cannot create the rollback timer
+
+**Servers provisioned by older versions** have the hardened settings in `/etc/ssh/sshd_config` itself, above the `Include /etc/ssh/sshd_config.d/*.conf` line. sshd uses the first value it reads for each setting, so those lines would silently override the drop-in. The script lists them and asks to move them. If you agree, it comments them out in `sshd_config` with a `# [moved to 01-<user>-hardened.conf <time>]` tag; nothing is deleted, and `sshd_config` is backed up and rolled back with the drop-in. Their values carry over: the current `AllowUsers` (read from `sshd -T`, so every user allowed today stays allowed) and `UsePAM`. If `UsePAM` is `no` today, you are asked whether to switch to the current `yes`. The default is to keep `no`. Switching is refused when the admin account is expired or its password is past the inactivity period, because PAM would then refuse that login, and other users in that state are named. Obsolete `Protocol 2` and `ChallengeResponseAuthentication` lines are commented out as well. Lines below the `Include` are overridden by the drop-in and are left alone. If you decline, or `sshd_config` has no `Include` line, nothing is changed.
+
+Once the new drop-in passes `sshd -t` and the effective config (`sshd -T`) still lets the admin in, sshd is reloaded. Existing sessions stay open. A systemd timer then restores the previous config after 5 minutes (`--rollback-minutes`, 2-30) unless you open a **new** terminal, log in, and type `yes` in the original one. If your session is cut off, the timer still restores the old config. Afterwards every managed setting is compared with what sshd actually uses (`sshd -T`). The script warns for each one that another file overrides, for example a `PasswordAuthentication yes` that sshd reads first.
+
+**Automatic updates** sets:
+
+- whether updates are installed automatically (`APT::Periodic::Update-Package-Lists` and `Unattended-Upgrade`)
+- the hours of the `apt-get update` timer (twice a day, 12 hours apart) and the `apt-get upgrade` timer, in the same format as provisioning step 15 and `utils/set_update_daily_hour.sh`
+- the timezone those hours are in
+- automatic reboot when an upgrade needs one, and at what time
+- needrestart's automatic mode
+
+The apt values go to `/etc/apt/apt.conf.d/51unattended-upgrades-settings`, which is read after `20auto-upgrades` and `50unattended-upgrades`. After writing, the script checks that apt actually shows the new value: if a later file overrides it, the change is undone and that file is named. The timers are restarted and checked. If they don't come up, the previous schedule is restored. needrestart's setting goes to `/etc/needrestart/conf.d/50-update-server-config.conf` and is syntax-checked. Excluding or pinning packages is done by re-running the provisioning script (see below).
+
+## Excluding services from upgrades
+
+Servers that run round the clock cannot let the daily timer upgrade a database or web server in the middle of use. The script asks two questions, and for each one answered `y` it asks per service (Nginx, Valkey, MySQL/MariaDB, PostgreSQL, Grafana) that is installed or selected:
+
+| Question | Variables | Daily unattended upgrade | Manual `apt update && apt upgrade` |
+|---|---|---|---|
+| Do you want to exclude packages from automatic (unattended) upgrades? | `EXCLUDE_UNATTENDED`, `EXCLUDE_UNATTENDED_NGINX`, `_VALKEY`, `_MYSQL`, `_MARIADB`, `_POSTGRESQL`, `_GRAFANA` | skipped | **upgraded** |
+| Do you want to exclude packages from manual upgrades (pin)? | `PIN_PACKAGES`, `HOLD_NGINX`, `HOLD_VALKEY`, `HOLD_MYSQL`, `HOLD_MARIADB`, `HOLD_POSTGRESQL`, `HOLD_GRAFANA` | skipped | skipped (use `sudo upgrade-held-packages`) |
+
+Pressing Enter keeps the current state, so a re-run does not silently change anything. Answering `n` for a service, or `n` to the overall question, takes it off the list or lifts its hold, and says so.
+
+- Unattended exclusions go to `/etc/apt/apt.conf.d/52unattended-upgrades-provision` as `Unattended-Upgrade::Package-Blacklist` patterns (regexes matched at the start of the package name). They cover the server, client and modules/extensions: `nginx`, `libnginx-mod-`; `valkey`; `mysql-server`, `mysql-client`; `mariadb-server`, `mariadb-client`; `postgresql$`, `postgresql-[0-9]`, `postgresql-client-[0-9]`; `grafana`. Shared packages such as `mysql-common` and `postgresql-common` are left out. The file is checked with `apt-config` before it is installed, and is removed when nothing is excluded. Check the effect with `sudo unattended-upgrade --dry-run --debug 2>&1 | grep -i blacklist`.
 - All packages that make up the service are held with `apt-mark hold` (server, client, nginx modules, PostgreSQL extensions), because a held server with an upgraded module breaks. Shared infrastructure such as `postgresql-common` is not held.
-- **Held packages also miss security fixes.** To make sure that is never overlooked, `/usr/local/sbin/held-package-updates` runs after every `apt-get update` (a drop-in on `apt-daily.service`) and mails `HELD_UPDATE_MAIL_TO` when a held package has a newer version. Updates from a `-security` pocket are marked `[SECURITY]` and put in the subject. The mail is repeated every `HELD_UPDATE_REMINDER_DAYS` days (default 7; 0 = only for new versions) until the package is upgraded. It also covers the Wazuh packages the script holds. If sending fails it is retried on the next run; without a valid address nothing is sent and the log says so.
+- **Excluded and held packages also miss security fixes.** To make sure that is never overlooked, `/usr/local/sbin/held-package-updates` runs after every `apt-get update` (a drop-in on `apt-daily.service`) and mails `HELD_UPDATE_MAIL_TO` when a held or excluded package has a newer version, listing each group with its upgrade command. Updates from a `-security` pocket are marked `[SECURITY]` and put in the subject. The mail is repeated every `HELD_UPDATE_REMINDER_DAYS` days (default 7; 0 = only for new versions) until the package is upgraded. It also covers the Wazuh packages the script holds. If sending fails it is retried on the next run; without a valid address nothing is sent and the log says so.
 - To upgrade: warn the users, then `sudo upgrade-held-packages` (everything with an update, after a confirmation) or `sudo upgrade-held-packages nginx` (packages whose name contains `nginx`, with their companions). It lifts the hold, upgrades, and puts the hold back even when the upgrade fails.
-- Preview the mail with `sudo held-package-updates --dry-run`. The health check lists every held package with its update status and whether the notice mail is configured.
+- Preview the mail with `sudo held-package-updates --dry-run`. The health check lists the unattended-upgrades exclusion patterns with the installed packages they match, every pinned (held) package, the update status of each, and whether the notice mail is configured.
 - Re-running the provisioning script on a server where a held package has an update available may print an apt error for that package: apt will not upgrade it while it is held. This is expected and does not stop the script.
 - Configuration is in `/etc/held-package-updates.conf`; the notifier needs the `mail` command (installed with Postfix).
 

@@ -157,12 +157,69 @@ fi
 echo ""
 echo "Reboot required"
 echo "==========================================="
-if [ -f /var/run/reboot-required ]; then
+# reboot_reasons — print one line per reason this server needs a reboot; nothing when it does not.
+# Does not rely only on /var/run/reboot-required: that flag is written by update-notifier-common's kernel hook
+# (missing on minimized installs) and vanishes on any reboot, also one that booted the old kernel again.
+# A line starting with "info: " is a note (kernel could not be compared), not a reason to reboot.
+reboot_reasons() {
+    local run flavour run_ver newest="" newest_ver="" f v btime inst ksta ucsta RR_INFO=""
+    if [[ -f /var/run/reboot-required ]]; then
+        echo "reboot-required flag set by: $(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+    fi
+    run=$(uname -r)
+    # Ubuntu kernel releases look like 6.8.0-101-generic: version-ABI-flavour
+    if [[ "$run" =~ ^([0-9]+\.[0-9]+\.[0-9]+-[0-9]+)-(.+)$ ]]; then
+        run_ver=${BASH_REMATCH[1]}; flavour=${BASH_REMATCH[2]}
+        for f in /boot/vmlinuz-*-"$flavour"; do
+            [[ -f "$f" ]] || continue
+            v=${f#/boot/vmlinuz-}
+            [[ -d "/lib/modules/$v" ]] || continue          # leftovers of a removed kernel do not count
+            v=${v%-"$flavour"}
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || continue
+            if [[ -z "$newest_ver" ]] || dpkg --compare-versions "$v" gt "$newest_ver"; then
+                newest_ver=$v; newest="$v-$flavour"
+            fi
+        done
+        if [[ -z "$newest" ]]; then
+            RR_INFO="no installed $flavour kernel found in /boot (container or custom kernel) - kernel not compared"
+        elif dpkg --compare-versions "$newest_ver" gt "$run_ver"; then
+            echo "running kernel $run, newer kernel $newest is installed"
+            btime=$(awk '/^btime/ {print $2}' /proc/stat)
+            inst=$(stat -c %Z "/boot/vmlinuz-$newest" 2>/dev/null)   # ctime = when it was written here
+            if [[ -n "$btime" && -n "$inst" ]] && (( btime > inst )); then
+                echo "  the server was rebooted after $newest was installed but still booted $run:"
+                echo "  check the GRUB default (grep GRUB_DEFAULT /etc/default/grub; grub-editenv list)"
+            fi
+        fi
+    else
+        RR_INFO="kernel release '$run' is not an Ubuntu kernel name - kernel not compared"
+    fi
+    [[ -n "$RR_INFO" ]] && echo "info: $RR_INFO"
+    if [[ ! -d "/lib/modules/$run" && -z "$RR_INFO" ]]; then
+        echo "modules of the running kernel $run were removed (autoremove?) - new hardware/modules cannot load"
+    fi
+    # needrestart's own view (kernel and CPU microcode); -r l only lists, it never restarts anything
+    if command -v needrestart >/dev/null 2>&1; then
+        local nr
+        nr=$(needrestart -b -r l 2>/dev/null) || nr=""
+        ksta=$(sed -n 's/^NEEDRESTART-KSTA: //p' <<<"$nr")
+        ucsta=$(sed -n 's/^NEEDRESTART-UCSTA: //p' <<<"$nr")
+        if [[ "$ksta" == "2" || "$ksta" == "3" ]] && [[ -z "$newest" || "$newest" == "$run" ]]; then
+            echo "needrestart: a kernel upgrade is pending (expected $(sed -n 's/^NEEDRESTART-KEXP: //p' <<<"$nr"))"
+        fi
+        [[ "$ucsta" == "2" ]] && echo "needrestart: a CPU microcode update is waiting for a reboot"
+    fi
+    return 0
+}
+RR_OUT=$(reboot_reasons)
+RR_REASONS=$(grep -v '^info: ' <<<"$RR_OUT" || true)
+if [[ -n "$RR_REASONS" ]]; then
     echo -e "${YELLOW}[REBOOT REQUIRED]${NC}"
-    cat /var/run/reboot-required.pkgs 2>/dev/null | sort -u | sed 's/^/  /'
+    sed 's/^/  /' <<<"$RR_REASONS"
 else
     echo -e "${GREEN}[NO REBOOT NEEDED]${NC}"
 fi
+grep '^info: ' <<<"$RR_OUT" | sed 's/^info: /  Note: /' || true
 
 echo ""
 echo "Time synchronisation"
@@ -238,25 +295,55 @@ echo "==========================================="
 apt-get -s upgrade 2>/dev/null | grep -P "^\d+ upgraded" || echo "Could not check."
 
 echo ""
-echo "Held packages (skipped by automatic upgrades)"
+echo "Excluded from unattended upgrades (a manual apt upgrade still installs them)"
 echo "==========================================="
+UU_PATS=$(apt-config dump Unattended-Upgrade::Package-Blacklist 2>/dev/null \
+          | sed -n 's/^Unattended-Upgrade::Package-Blacklist:: "\(.*\)";$/\1/p')
 HELD_LIST=$(apt-mark showhold 2>/dev/null)
+upg_status() {   # upg_status PACKAGE -> "version: [status]"; returns 1 when an update is available
+    local p="$1" inst cand
+    inst=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null) || inst="?"
+    cand=$(apt-cache policy "$p" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
+    if [[ -n "$cand" && "$cand" != "(none)" && "$inst" != "?" ]] && dpkg --compare-versions "$cand" gt "$inst"; then
+        echo -e "$inst: ${YELLOW}[UPDATE AVAILABLE: $cand]${NC}"; return 1
+    fi
+    echo -e "$inst: ${GREEN}[up to date]${NC}"
+}
+if [[ -z "$UU_PATS" ]]; then
+    echo "  None"
+else
+    echo "  Patterns: $(tr '\n' ' ' <<<"$UU_PATS")"
+    UU_WAITING=0; UU_FOUND=0
+    while read -r up; do
+        [[ -n "$up" ]] || continue
+        while read -r pat; do
+            [[ -n "$pat" && "$up" =~ ^($pat) ]] || continue
+            UU_FOUND=$((UU_FOUND + 1))
+            hp_note=""; grep -qxF "$up" <<<"$HELD_LIST" && hp_note=" (also pinned)"
+            if hp_line=$(upg_status "$up"); then :; else UU_WAITING=$((UU_WAITING + 1)); fi
+            echo -e "  $up $hp_line$hp_note"
+            break
+        done <<<"$UU_PATS"
+    done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 == "ii" {print $2}')
+    (( UU_FOUND == 0 )) && echo "  No installed package matches."
+    (( UU_WAITING > 0 )) && echo -e "  ${YELLOW}$UU_WAITING excluded package(s) have updates: sudo apt update && sudo apt upgrade${NC}"
+fi
+
+echo ""
+echo "Pinned packages (apt-mark hold: skipped by unattended AND manual apt upgrade)"
+echo "==========================================="
 if [[ -z "$HELD_LIST" ]]; then
     echo "  None"
 else
     HELD_WAITING=0
     while read -r hp; do
         [[ -n "$hp" ]] || continue
-        hp_inst=$(dpkg-query -W -f='${Version}' "$hp" 2>/dev/null) || continue
-        hp_cand=$(apt-cache policy "$hp" 2>/dev/null | awk '/^ +Candidate:/ {print $2; exit}')
-        if [[ -n "$hp_cand" && "$hp_cand" != "(none)" ]] && dpkg --compare-versions "$hp_cand" gt "$hp_inst"; then
-            echo -e "  $hp $hp_inst: ${YELLOW}[UPDATE AVAILABLE: $hp_cand]${NC}"
-            HELD_WAITING=$((HELD_WAITING + 1))
-        else
-            echo -e "  $hp $hp_inst: ${GREEN}[up to date]${NC}"
-        fi
+        if hp_line=$(upg_status "$hp"); then :; else HELD_WAITING=$((HELD_WAITING + 1)); fi
+        echo -e "  $hp $hp_line"
     done <<<"$HELD_LIST"
-    (( HELD_WAITING > 0 )) && echo -e "  ${YELLOW}$HELD_WAITING held package(s) have updates: sudo upgrade-held-packages${NC}"
+    (( HELD_WAITING > 0 )) && echo -e "  ${YELLOW}$HELD_WAITING pinned package(s) have updates: sudo upgrade-held-packages${NC}"
+fi
+if [[ -n "$UU_PATS" || -n "$HELD_LIST" ]]; then
     if [[ -x /usr/local/sbin/held-package-updates && -f /etc/systemd/system/apt-daily.service.d/held-package-updates.conf ]]; then
         HELD_MAIL=$(sed -n 's/^MAIL_TO=//p' /etc/held-package-updates.conf 2>/dev/null | head -1)
         echo -e "  Update notice mail: ${GREEN}[to ${HELD_MAIL:-?}]${NC}"

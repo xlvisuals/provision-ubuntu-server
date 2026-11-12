@@ -13,11 +13,12 @@ It provides a colour-coded status report covering:
 - SSH configuration
 - Swap and disk usage
 - Memory usage
+- Reboot required: the reboot-required flag, a newer installed kernel than the running one (also after a reboot that booted the old kernel again, with a hint to check the GRUB default), removed modules of the running kernel, and pending kernel/microcode updates according to needrestart
 - TCP transmit offloading status
 - Failed systemd units
 - Recent failed SSH logins
 - Pending package updates
-- Held packages and whether an update is waiting for them
+- Packages excluded from unattended upgrades and pinned (held) packages, and whether an update is waiting for them
 - Service status (running/stopped/failed/not installed) for all installed services
 - AppArmor profile status per service
 - Recent AppArmor denials

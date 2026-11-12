@@ -1,0 +1,71 @@
+#!/bin/bash
+# reboot-required-check — exit 1 (and print why) when this server needs a reboot, 0 when it does not.
+#
+# Checks the reboot-required flag, compares the running kernel with the newest installed one, and asks
+# needrestart about the kernel and CPU microcode. Used by Monit (etc/monit/conf-available/reboot-required)
+# and upgrade-held-packages. Same logic as the "Reboot required" section of ubuntu_health_check.sh: keep in sync.
+#
+# Usage: reboot-required-check [-q]     -q: no output, exit code only
+set -u
+# reboot_reasons — print one line per reason this server needs a reboot; nothing when it does not.
+# Does not rely only on /var/run/reboot-required: that flag is written by update-notifier-common's kernel hook
+# (missing on minimized installs) and vanishes on any reboot, also one that booted the old kernel again.
+# A line starting with "info: " is a note (kernel could not be compared), not a reason to reboot.
+reboot_reasons() {
+    local run flavour run_ver newest="" newest_ver="" f v btime inst ksta ucsta RR_INFO=""
+    if [[ -f /var/run/reboot-required ]]; then
+        echo "reboot-required flag set by: $(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+    fi
+    run=$(uname -r)
+    # Ubuntu kernel releases look like 6.8.0-101-generic: version-ABI-flavour
+    if [[ "$run" =~ ^([0-9]+\.[0-9]+\.[0-9]+-[0-9]+)-(.+)$ ]]; then
+        run_ver=${BASH_REMATCH[1]}; flavour=${BASH_REMATCH[2]}
+        for f in /boot/vmlinuz-*-"$flavour"; do
+            [[ -f "$f" ]] || continue
+            v=${f#/boot/vmlinuz-}
+            [[ -d "/lib/modules/$v" ]] || continue          # leftovers of a removed kernel do not count
+            v=${v%-"$flavour"}
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || continue
+            if [[ -z "$newest_ver" ]] || dpkg --compare-versions "$v" gt "$newest_ver"; then
+                newest_ver=$v; newest="$v-$flavour"
+            fi
+        done
+        if [[ -z "$newest" ]]; then
+            RR_INFO="no installed $flavour kernel found in /boot (container or custom kernel) - kernel not compared"
+        elif dpkg --compare-versions "$newest_ver" gt "$run_ver"; then
+            echo "running kernel $run, newer kernel $newest is installed"
+            btime=$(awk '/^btime/ {print $2}' /proc/stat)
+            inst=$(stat -c %Z "/boot/vmlinuz-$newest" 2>/dev/null)   # ctime = when it was written here
+            if [[ -n "$btime" && -n "$inst" ]] && (( btime > inst )); then
+                echo "  the server was rebooted after $newest was installed but still booted $run:"
+                echo "  check the GRUB default (grep GRUB_DEFAULT /etc/default/grub; grub-editenv list)"
+            fi
+        fi
+    else
+        RR_INFO="kernel release '$run' is not an Ubuntu kernel name - kernel not compared"
+    fi
+    [[ -n "$RR_INFO" ]] && echo "info: $RR_INFO"
+    if [[ ! -d "/lib/modules/$run" && -z "$RR_INFO" ]]; then
+        echo "modules of the running kernel $run were removed (autoremove?) - new hardware/modules cannot load"
+    fi
+    # needrestart's own view (kernel and CPU microcode); -r l only lists, it never restarts anything
+    if command -v needrestart >/dev/null 2>&1; then
+        local nr
+        nr=$(needrestart -b -r l 2>/dev/null) || nr=""
+        ksta=$(sed -n 's/^NEEDRESTART-KSTA: //p' <<<"$nr")
+        ucsta=$(sed -n 's/^NEEDRESTART-UCSTA: //p' <<<"$nr")
+        if [[ "$ksta" == "2" || "$ksta" == "3" ]] && [[ -z "$newest" || "$newest" == "$run" ]]; then
+            echo "needrestart: a kernel upgrade is pending (expected $(sed -n 's/^NEEDRESTART-KEXP: //p' <<<"$nr"))"
+        fi
+        [[ "$ucsta" == "2" ]] && echo "needrestart: a CPU microcode update is waiting for a reboot"
+    fi
+    return 0
+}
+
+out=$(reboot_reasons)
+reasons=$(grep -v '^info: ' <<<"$out" || true)
+if [[ "${1:-}" != "-q" ]]; then
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    [[ -z "$reasons" ]] && echo "No reboot needed."
+fi
+[[ -z "$reasons" ]]

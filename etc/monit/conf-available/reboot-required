@@ -1,2 +1,5 @@
-check file reboot-required path /var/run/reboot-required
-    if exist for 1 cycles then alert
+# Alert when the server needs a reboot: reboot-required flag, a newer installed kernel than the running one,
+# or a pending kernel/microcode update according to needrestart (see /usr/local/sbin/reboot-required-check).
+check program reboot-required with path "/usr/local/sbin/reboot-required-check"
+    every 30 cycles
+    if status != 0 then alert

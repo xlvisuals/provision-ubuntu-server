@@ -83,7 +83,11 @@ if [[ $rc -eq 0 ]]; then
         /usr/local/sbin/install_coraza_nginx.sh --auto || echo "WARNING: Coraza rebuild failed - see /var/log/coraza-nginx-build.log; nginx may not start."
     fi
     systemctl --failed --no-legend | grep -q . && { echo; echo "WARNING: failed units:"; systemctl --failed --no-legend; }
-    [[ -f /var/run/reboot-required ]] && echo "A reboot is required."
+    if [[ -x /usr/local/sbin/reboot-required-check ]]; then
+        /usr/local/sbin/reboot-required-check -q || { echo "A reboot is required:"; /usr/local/sbin/reboot-required-check | sed 's/^/  /'; }
+    elif [[ -f /var/run/reboot-required ]]; then
+        echo "A reboot is required."
+    fi
 else
     echo "apt-get failed (exit $rc). If it names a held package that is not in the list above, run again with a name that covers it." >&2
 fi
