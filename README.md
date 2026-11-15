@@ -3,29 +3,30 @@
 An interactive Bash provisioning script for **Ubuntu 24.04 LTS** and **Ubuntu 26.04 LTS** Server (minimized or standard) to 
 quickly provision a hardened server and install any of the following services if desired: 
 
-- Auditd<sup>*</sup>
-- Fail2Ban<sup>*</sup>
-- Forgejo
-- Firewall<sup>*</sup>
-- Grafana
-- IP Blocklists<sup>*</sup>
-- CIS Level 1 hardening<sup>*</sup>
-- Kernel module blocklists<sup>*</sup>
-- Monit<sup>*</sup>
-- Mosquitto
-- MySQL or MariaDB
-- Nginx
-- OpenSSH<sup>*</sup>
-- Postfix
-- PostgreSQL
-- Suricata IDS<sup>*</sup>
-- Valkey
-- Wazuh Agent<sup>*</sup>
-- Wazuh Server (manager, indexer, dashboard; all-in-one)
-- Webmin
+- Auditd<sup>*</sup> — kernel audit logging
+- Fail2Ban<sup>*</sup> — bans IPs after failed logins
+- Forgejo — self-hosted Git server
+- Firewall<sup>*</sup> — UFW, deny by default
+- Grafana — analytics and visualization web application
+- IP Blocklists<sup>*</sup> — daily-updated bad-IP blocking
+- CIS Level 1 hardening<sup>*</sup> — baseline security settings
+- Kernel module blocklists<sup>*</sup> — blocks unused kernel modules
+- LiveKit — self-hosted video calls (WebRTC + TURN)
+- Monit<sup>*</sup> — service monitoring and alerts
+- Mosquitto — MQTT message broker
+- MySQL or MariaDB — relational database
+- Nginx — web server and reverse proxy
+- OpenSSH<sup>*</sup> — hardened remote login
+- Postfix — relay-only outgoing mail
+- PostgreSQL — relational database
+- Suricata IDS<sup>*</sup> — network intrusion detection
+- Valkey — Redis-compatible in-memory key–value database (cache)
+- Wazuh Agent<sup>*</sup> — sends logs to a Wazuh server
+- Wazuh Server (manager, indexer, dashboard; all-in-one) — security monitoring (SIEM)
+- Webmin — web-based admin panel and dashboard (not usually recommended, see [Notes](#notes))
 
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
-The components marked * are recommended.
+The components marked * are recommended for all servers.
 
 ---
 
@@ -61,11 +62,26 @@ Would you like to install fonts? (y/n) : y
    Install Microsoft core fonts? (y/n) : y
 Would you like to install weasyprint? (y/n) : y
 Would you like to install imagemagick? (y/n) : y
-Would you like to install Python 3.14? (y/n) : y
-Would you like to install Pypy 3.11? (y/n) : n
+Would you like to install or reinstall Python (3.13 3.14 3.15)? (y/n) : y
+  Python version (3.13, 3.14, 3.15) : 3.15
+Would you like to install PyPy 3.12? (y/n) : n
 Would you like to install nginx? (y/n) : y
   nginx worker processes? : 2
   Build the Coraza WAF module for nginx? (compiles from source, takes several minutes; NOT activated, see README) (y/n) : n
+Would you like a Let's Encrypt certificate with a placeholder nginx site and forced http->https? (y/n) : n
+Would you like to install LiveKit (video calls; best on a dedicated server)? (y/n) : y
+  LiveKit signalling domain, e.g. livekit.example.org (must point to this server) : livekit.example.com
+  Serve TURN/TLS on port 443 for participants behind strict firewalls (shares 443 with nginx by SNI)? (y/n) : y
+  TURN domain, e.g. turn.example.org (must point to this server) : turn.example.com
+  Contact email for the Let's Encrypt certificates : admin@example.com
+  Continuing means you accept the Let's Encrypt subscriber agreement (certbot --agree-tos).
+  Use the Let's Encrypt STAGING server (test run, browsers will not trust the certificates)? (y/n) : n
+  Public IPv4 address that participants connect to : 203.0.113.10
+  First UDP port for media : 50000
+  Last UDP port for media : 60000
+  Maximum participants per room : 10
+  Webhook URL for room events (https://..., or 'none') : https://cpd.example.com/api/v1/livekit/webhook
+  IPv4 addresses/CIDRs allowed to call the server API /twirp/ (space-separated, or 'none') : none
 Would you like to install valkey? (y/n) : y
 Would you like to install MySQL? (y/n) : n
 Would you like to install MariaDB? (y/n) : y
@@ -215,17 +231,23 @@ A timestamped log is written automatically to `/var/log/ubuntu_provision_<date>.
 
 | Package | Default Port | Notes |
 |---|---|---|
-| Webmin | 10000 | Installed via official `webmin-setup-repo.sh` |
+| Webmin | 10000 | Not recommended: little benefit, leaks memory and needs frequent restarts (Monit restarts it, at the cost of alert noise). Installed via official `webmin-setup-repo.sh` |
 | Monit | 2812 | |
 | Grafana | 3000 | |
 | Forgejo | 3000 (3030 if Grafana also installed) | Self-hosted Git |
+
+**Video**
+
+| Package | Default Port | Notes |
+|---|---|---|
+| LiveKit | 443 (via nginx), 7881/tcp, 50000-60000/udp, 3478/udp | WebRTC media server with built-in TURN, for a dedicated server. Binary from the GitHub release, installed only if its SHA-256 matches the release checksums. Let's Encrypt certificates, optional TURN/TLS on 443 via nginx SNI routing; see [LiveKit](#livekit) |
 
 **Runtimes**
 
 | Package | Notes |
 |---|---|
-| Python 3.14 | Via deadsnakes PPA on Ubuntu 24.04; pre-installed on Ubuntu 26.04 |
-| PyPy 3.11 | Installed to `/opt`, symlinked into `/usr/local/bin`; latest release fetched dynamically with hardcoded fallback |
+| Python 3.13, 3.14 or 3.15 | One version per run, chosen at the prompt (`CPYTHON_VERSION`). From the Ubuntu archive when it has the version (3.14 is the system Python on 26.04), otherwise from the deadsnakes PPA. The system Python stays the default `python3`. New versions are added to `PYTHON_VERSIONS` in the script |
+| PyPy | Installed to `/opt`, symlinked into `/usr/local/bin`; latest release fetched dynamically with hardcoded fallback. The Python version follows `PYPY_FALLBACK_VERSION` |
 | Weasyprint | PDF generation |
 | ImageMagick | Image processing |
 | Fonts | Liberation, FreeFonts, Microsoft core fonts (EULA pre-accepted) |
@@ -296,6 +318,11 @@ All files must sit in the same directory. The script uses its own location as th
 | Forgejo (standalone)   | 3000 | blocked         |
 | Forgejo (with Grafana) | 3030 | blocked         |
 | Webmin                 | 10000 | blocked         |
+| LiveKit signalling     | 443 (nginx → 127.0.0.1:7880) | **allowed** (7880 itself listens on 127.0.0.1 only) |
+| LiveKit ICE/TCP        | 7881/tcp | **allowed**   |
+| LiveKit media          | 50000-60000/udp (configurable) | **allowed** |
+| LiveKit TURN/UDP       | 3478/udp | **allowed**   |
+| LiveKit TURN/TLS       | 443 (nginx stream, SNI) → 5350 → 5349 | 443 **allowed**; 5349/5350/8443 local hops, blocked |
 | Wazuh agents → manager | 1514, 1515 | blocked unless you answer yes to opening them (optionally restricted to one IP/CIDR) |
 | Wazuh Manager API      | 55000 | blocked         |
 | Wazuh Indexer          | 9200 | blocked (listens on 127.0.0.1 only) |
@@ -317,7 +344,8 @@ FORCE_APPLY=n
 
 # Package versions
 PG_VERSION=18
-PYPY_FALLBACK_VERSION=pypy3.11-v8.0.1
+PYTHON_VERSIONS="3.13 3.14 3.15"
+PYPY_FALLBACK_VERSION=pypy3.12-v8.0.1
 FORGEJO_FALLBACK_VERSION=17.0.0
 MODULEJAIL_FALLBACK_VERSION=1.6.3
 FORGEJO_FALLBACK_PORT=3030
@@ -360,8 +388,10 @@ INSTALL_SSH=y
 INSTALL_FONTS=y
 INSTALL_WEASYPRINT=y
 INSTALL_IMAGEMAGICK=y
-INSTALL_CPYTHON314=y
-INSTALL_PYPY311=y
+INSTALL_CPYTHON=y
+# One of PYTHON_VERSIONS in the script (3.13 3.14 3.15)
+CPYTHON_VERSION=3.14
+INSTALL_PYPY=y
 INSTALL_NGINX=y
 INSTALL_CORAZA=n
 INSTALL_VALKEY=y
@@ -371,7 +401,7 @@ INSTALL_POSTGRESQL=y
 INSTALL_MOSQUITTO=y
 INSTALL_POSTFIX=y
 INSTALL_MONIT=y
-INSTALL_WEBMIN=y
+INSTALL_WEBMIN=n
 INSTALL_GRAFANA=y
 INSTALL_FORGEJO=y
 INSTALL_FAIL2BAN=y
@@ -735,9 +765,9 @@ sudo ~/ubuntu_health_check.sh
 - **PostgreSQL version** is pinned to 18 (configurable via `PG_VERSION` in the conf file or at the top of the script).
 - **MySQL and PostgreSQL tuning** values are auto-calculated from available RAM and CPU at runtime if left blank in the conf file. `work_mem` is calculated as 25% of RAM divided by `max_connections`, floored at 4MB and capped at 16MB, since it is allocated per sort/hash operation and multiplies under concurrent load.
 - **File limits:** `nofile` and `nproc` are set via a drop-in in `limits.d`. Note these only apply to PAM-authenticated sessions — systemd services use their own `LimitNOFILE` directives in their unit files.
-- **Python venvs:** `setuptools` and `wheel` are not installed at the system level. Install them per-project inside a venv: `python3.14 -m venv /path/to/venv && pip install setuptools wheel`.
-- **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy 3.11 release is fetched dynamically at install time, with a hardcoded fallback version if the fetch fails.
-- **Webmin:** installed via the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
+- **Python venvs:** `setuptools` and `wheel` are not installed at the system level. Install them per-project inside a venv, e.g. `python3.15 -m venv /path/to/venv && pip install setuptools wheel`.
+- **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy release for the Python version in `PYPY_FALLBACK_VERSION` (currently 3.12) is fetched dynamically at install time, with that version as the fallback if the fetch fails. To move to a new PyPy line, only `PYPY_FALLBACK_VERSION` needs changing (in the script, `ubuntu_provision.conf` and `utils/upgrade_pypy.sh`). Older .conf files with `INSTALL_PYPY311` still work.
+- **Webmin:** not recommended. It adds little over SSH, has issues with memory bloat or creep over time and needs frequent restarts; Monit is configured to take care of that, but each restart is an alert. If you do install it, it comes from the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
 
 ## Updating settings on existing servers
 
@@ -792,6 +822,44 @@ Pressing Enter keeps the current state, so a re-run does not silently change any
 - Configuration is in `/etc/held-package-updates.conf`; the notifier needs the `mail` command (installed with Postfix).
 
 ---
+
+## LiveKit
+
+Self-hosted WebRTC media server (SFU) with its own TURN server, for video calls from a web app. Install it on a
+**dedicated server**: it opens a UDP port range to the internet and, with TURN/TLS, takes over port 443 routing.
+Answer `y` to "LiveKit" (needs nginx) or set `INSTALL_LIVEKIT=y` and the `LIVEKIT_*` values in the .conf.
+
+What step 48c does:
+
+- Downloads `livekit-server` from the GitHub release and installs it **only** when the archive's SHA-256 is listed in
+  the release's checksum file (latest version, or `LIVEKIT_FALLBACK_VERSION` when GitHub cannot be asked).
+- Runs it as the unprivileged `livekit` user under a hardened systemd unit; config in `/etc/livekit/livekit.yaml`,
+  API key and secret in `/etc/livekit/keys.yaml` (root:livekit 0640). The key is kept on re-runs; the secret is never
+  printed or logged. `LIVEKIT_ROTATE_KEYS=y` makes a new pair (never saved to a .conf).
+- Signalling and the server API listen on 127.0.0.1:7880 only. nginx serves `wss://LIVEKIT_DOMAIN` on 443 with a
+  Let's Encrypt certificate (webroot, renewed by `certbot.timer`, nginx reloaded by a deploy hook).
+- `/twirp/` (server API) is denied by nginx unless the caller is in `LIVEKIT_API_ALLOW_FROM` (`none` = nobody).
+  Access tokens need no API call, so most web apps can leave this at `none`.
+- `node_ip` is set to `LIVEKIT_NODE_IP`, so LiveKit makes no STUN lookup to a third-party server at start-up.
+- Optional webhook (`LIVEKIT_WEBHOOK_URL`, https only) for room and participant events, signed with the API key.
+- UFW: 80, 443, 7881/tcp, the media range and 3478/udp.
+- Monit check and health-check entries.
+
+**TURN/TLS on 443** (`LIVEKIT_TURN_TLS=y`): LiveKit always tells clients `turns:LIVEKIT_TURN_DOMAIN:443`. nginx's stream
+module owns 443 and routes by SNI: the TURN domain goes to a TLS terminator on 127.0.0.1:5350 that forwards plain TURN to
+LiveKit on 5349 with a PROXY header (so LiveKit sees the participant's address); every other name goes to the http block
+on 127.0.0.1:8443, also with a PROXY header. Consequences:
+
+- Every https site on this server must listen on `127.0.0.1:8443 ssl proxy_protocol` instead of 443. The default
+  catch-all site and the Let's Encrypt placeholder site are rewritten automatically; any other site on 443 stops the setup.
+- nginx.conf includes `/etc/nginx/main.d/*.conf` at the top level for the stream block.
+- Another program on 443 (e.g. the Wazuh dashboard) stops the setup.
+
+With `LIVEKIT_TURN_TLS=n`, nginx is left as a normal https server and only TURN/UDP is offered; participants on
+networks that allow only TCP 443 then cannot connect media.
+
+The web app needs `wss://LIVEKIT_DOMAIN`, the API key and the secret (`sudo cat /etc/livekit/keys.yaml`). See
+[howto-livekit.md](howto/howto-livekit.md) for testing and operation.
 
 ## Wazuh Server
 
@@ -966,7 +1034,7 @@ The following are installed from apt repositories and update automatically with 
 | PostgreSQL | [apt.postgresql.org](https://apt.postgresql.org) |
 | Grafana | [apt.grafana.com](https://apt.grafana.com) |
 | Webmin | Webmin apt repo (configured by `webmin-setup-repo.sh`) |
-| Python 3.14 | deadsnakes PPA (`ppa:deadsnakes/ppa`) |
+| Python (when not in the Ubuntu archive) | deadsnakes PPA (`ppa:deadsnakes/ppa`) |
 
 ### Manual updates
 
@@ -1028,16 +1096,16 @@ sudo ./utils/upgrade_forgejo.sh 16.0.4
 
 The script fetches the latest release from the Codeberg API, backs up the database (sqlite3, MySQL, or PostgreSQL — detected automatically from `/etc/forgejo/app.ini`), stops the service, replaces the binary, and restarts. Backups are written to `/var/backups/forgejo/`.
 
-#### PyPy 3.11
+#### PyPy
 
-PyPy is downloaded from [downloads.python.org/pypy](https://downloads.python.org/pypy) and installed to `/opt/`. The symlinks `/usr/local/bin/pypy3`, `pypy3.11`, and `pypy` point to the active version. Old versions in `/opt/` are left in place and must be removed manually.
+PyPy is downloaded from [downloads.python.org/pypy](https://downloads.python.org/pypy) and installed to `/opt/`. The symlinks `/usr/local/bin/pypy3`, `pypy3.12` (the Python version of the release), and `pypy` point to the active version. Moving from 3.11 to 3.12 leaves the `pypy3.11` symlink pointing at the old install; remove it with the old directory. Old versions in `/opt/` are left in place and must be removed manually.
 
 ```bash
 # Upgrade to latest
 sudo ./utils/upgrade_pypy.sh
 
 # Or pin to a specific version
-sudo ./utils/upgrade_pypy.sh pypy3.11-v7.3.23
+sudo ./utils/upgrade_pypy.sh pypy3.12-v8.0.1
 ```
 
 #### Coraza WAF for nginx

@@ -376,6 +376,7 @@ check_service_status "monit" "Monit Server"
 check_service_status "webmin" "Webmin Server"
 check_service_status "grafana-server" "Grafana Server"
 check_service_status "forgejo" "Forgejo Git Server"
+check_service_status "livekit" "LiveKit Media Server"
 check_service_status "fail2ban" "Fail2Ban IDS"
 check_service_status "auditd" "Auditd Daemon"
 check_service_status "suricata" "Suricata IDS"
@@ -609,6 +610,8 @@ check_port "monit"          "2812"
 check_port "grafana-server" "3000"
 check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
 check_port "webmin"         "10000"
+check_port "livekit"        "7880"
+check_port "livekit"        "7881"
 check_port "wazuh-indexer"   "9200"
 check_port "wazuh-manager"   "55000"
 WZ_PORT_DASH=$(sed -n 's/^server\.port:[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' /etc/wazuh-dashboard/opensearch_dashboards.yml 2>/dev/null | head -1)
@@ -734,6 +737,27 @@ if systemctl is-active --quiet mosquitto 2>/dev/null; then
         smoke_warn "Mosquitto: pub/sub failed — check service status"
     fi
 else smoke_skip "Mosquitto"; fi
+
+if systemctl is-active --quiet livekit 2>/dev/null; then
+    if [[ "$(curl -s --noproxy '*' --max-time 5 http://127.0.0.1:7880/ 2>/dev/null)" == "OK" ]]; then
+        smoke_ok "LiveKit: answers on 127.0.0.1:7880"
+    else
+        smoke_warn "LiveKit: no answer on 127.0.0.1:7880 — check 'journalctl -u livekit'"
+    fi
+    LK_DOM=$(sed -n 's/^[[:space:]]*server_name[[:space:]]\+\([^ ;]*\).*/\1/p' /etc/nginx/sites-available/livekit 2>/dev/null | tail -1)
+    if [[ -n "$LK_DOM" ]]; then
+        LK_CODE=$(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$LK_DOM:443:127.0.0.1" "https://$LK_DOM/" 2>/dev/null || true)
+        [[ "$LK_CODE" == "200" ]] && smoke_ok "LiveKit: https://$LK_DOM/ through nginx" || smoke_warn "LiveKit: https://$LK_DOM/ returned '$LK_CODE' (expected 200)"
+    fi
+    LK_CERT=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\+\(\/etc\/letsencrypt\/live\/[^ ;]*\/fullchain.pem\).*/\1/p' /etc/nginx/main.d/livekit-stream.conf /etc/nginx/sites-available/livekit 2>/dev/null)
+    for LK_C in $LK_CERT; do
+        if openssl x509 -checkend 1209600 -noout -in "$LK_C" >/dev/null 2>&1; then
+            smoke_ok "LiveKit: certificate $(basename "$(dirname "$LK_C")") valid for 14+ days"
+        else
+            smoke_warn "LiveKit: certificate $LK_C expires within 14 days or is unreadable — check 'certbot renew --dry-run'"
+        fi
+    done
+else smoke_skip "LiveKit"; fi
 
 # --- Wazuh Server (shown only when a server component is installed) ---
 WAZUH_SERVER_PRESENT=n

@@ -59,6 +59,7 @@ process_service() {
             "webmin")          [ -f /etc/webmin/version ] && version=$(cat /etc/webmin/version) ;;
             "grafana-server")  version=$($bin_path -v 2>/dev/null | awk '{print $2}') ;;
             "forgejo")         version=$($bin_path -v 2>/dev/null | awk '{print $3}') ;;
+            "livekit-server")  version=$($bin_path --version 2>/dev/null | awk '{print $3}') ;;
             "fail2ban-client") version=$($bin_path -v 2>&1 | grep -i fail2ban | awk '{print $3}' | sed 's/v//') ;;
             "auditd")          version=$($bin_path -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*') ;;
             "suricata")        version=$($bin_path -V 2>/dev/null | awk '{print $5}') ;;
@@ -98,6 +99,7 @@ services=(
     "Webmin|webmin|webmin|webmin"
     "Grafana Server|grafana|grafana-server|grafana-server"
     "Forgejo|forgejo|forgejo|forgejo"
+    "LiveKit|livekit|livekit-server|livekit"
     "Fail2Ban|fail2ban|fail2ban-client|fail2ban"
     "Auditd|auditd|auditd|auditd"
     "Suricata|suricata|suricata|suricata"

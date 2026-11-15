@@ -17,7 +17,8 @@
 #   - Web stack:    Nginx, MySQL, MariaDB, PostgreSQL, Valkey, Mosquitto
 #   - Mail:         Postfix (relay-only; Monit, Grafana, Forgejo can route through it)
 #   - Management:   Monit, Grafana, Forgejo, Webmin (not recommended; see README)
-#   - Runtimes:     Python 3.14, PyPy 3.11, Weasyprint, ImageMagick
+#   - Video:        LiveKit media server (WebRTC SFU + TURN, behind nginx with Let's Encrypt)
+#   - Runtimes:     Python (one of PYTHON_VERSIONS), PyPy (Python version taken from PYPY_FALLBACK_VERSION), Weasyprint, ImageMagick
 #   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist,
 #					Wazuh Server (manager+indexer+dashboard), Coraza
 #   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils, vnstat, nload,  
@@ -36,10 +37,14 @@
 ## --------------------------------------------
 
 PG_VERSION=18
+# Python versions offered (one is installed). Add a new release here; the system Python of each Ubuntu release is
+# completed by Ubuntu, the others come from the Ubuntu archive when it has them, otherwise from the deadsnakes PPA.
+PYTHON_VERSIONS="3.13 3.14 3.15"
 PYPY_FALLBACK_VERSION=pypy3.12-v8.0.1
 FORGEJO_FALLBACK_VERSION=17.0.1
 MODULEJAIL_FALLBACK_VERSION=1.6.3
 FORGEJO_FALLBACK_PORT=3030
+LIVEKIT_FALLBACK_VERSION=1.13.11
 
 
 ## Checks and Utilities
@@ -69,14 +74,25 @@ if [[ -n "$1" ]]; then
     fi
 fi
 
+# Older .conf files use INSTALL_CPYTHON314 (now INSTALL_CPYTHON + CPYTHON_VERSION) and INSTALL_PYPY311 (now INSTALL_PYPY)
+if [[ -z "${INSTALL_CPYTHON:-}" && -n "${INSTALL_CPYTHON314:-}" ]]; then
+    INSTALL_CPYTHON="$INSTALL_CPYTHON314"
+    [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ && -z "${CPYTHON_VERSION:-}" ]] && CPYTHON_VERSION=3.14
+fi
+[[ -z "${INSTALL_PYPY:-}" && -n "${INSTALL_PYPY311:-}" ]] && INSTALL_PYPY="$INSTALL_PYPY311"
+
+# PyPy: the Python version (e.g. 3.12) comes from PYPY_FALLBACK_VERSION, so a new PyPy line only needs that value changed
+PYPY_PYVER=""
+[[ "${PYPY_FALLBACK_VERSION:-}" =~ ^pypy(3\.[0-9]+)-v[0-9]+(\.[0-9]+)+$ ]] && PYPY_PYVER="${BASH_REMATCH[1]}"
+
 # If INSTALL_DEFAULT is set, apply INSTALL_DEFAULT to any INSTALL_ and CONFIGURE_ variable not explicitly set in conf
 if [[ -n "${INSTALL_DEFAULT:-}" ]]; then
     for var in \
         INSTALL_UFW INSTALL_SSH INSTALL_FONTS INSTALL_WEASYPRINT INSTALL_IMAGEMAGICK \
-        INSTALL_CPYTHON314 INSTALL_PYPY311 INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
+        INSTALL_CPYTHON INSTALL_PYPY INSTALL_NGINX INSTALL_VALKEY INSTALL_MYSQL \
         INSTALL_MARIADB INSTALL_POSTGRESQL INSTALL_MOSQUITTO INSTALL_POSTFIX INSTALL_MONIT INSTALL_WEBMIN \
         INSTALL_GRAFANA INSTALL_FORGEJO INSTALL_FAIL2BAN INSTALL_AUDITD INSTALL_IPBLOCK \
-        INSTALL_SURICATA INSTALL_WAZUHAGENT INSTALL_WAZUHMANAGER \
+        INSTALL_SURICATA INSTALL_WAZUHAGENT INSTALL_WAZUHMANAGER INSTALL_LIVEKIT \
         INSTALL_MS_FONTS INSTALL_LIBERATION_FONTS INSTALL_FREEFONT_FONTS CREATE_HEALTHSCRIPT; do
         [[ -z "${!var:-}" ]] && printf -v "$var" "$INSTALL_DEFAULT"
     done
@@ -118,6 +134,10 @@ fi
 : "${MONIT_MAILSERVER_PORT:=}"
 : "${MONIT_MAILSERVER_USERNAME:=}"
 : "${MONIT_MAILSERVER_PASSWORD:=}"
+: "${INSTALL_LIVEKIT:=}"
+: "${LIVEKIT_DOMAIN:=}"
+: "${LIVEKIT_TURN_TLS:=}"
+: "${LIVEKIT_TURN_DOMAIN:=}"
 
 # change into current directory
 cd "$(dirname "$(readlink -f "$0")")" || exit
@@ -171,8 +191,8 @@ save_config() {
     else
         config_output_file="provision_$(date +%F_%H%M%S).conf"
     fi
-    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|EXCLUDE_|PIN_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_)" \
-        | grep -vE "PASSWORD|PASS|SECRET|TOKEN|MACHINE_ARCH" \
+    set | grep -E "^(INSTALL_|CONFIGURE_|CREATE_|MYSQL_|PG_|POSTFIX_|MONIT_|GRAFANA_|FORGEJO_|WAZUH_|NGINX_|APPARMOR_|AUTO_|DISABLE_|LVM_RESIZE_|SWAP_|TUNE_|UNINSTALL_|UPDATE_|USER_|HOLD_|HELD_|EXCLUDE_|PIN_|CURRENT_TIMEZONE|NEW_TIMEZONE|CHANGE_HOSTNAME|NEW_HOSTNAME|DB_EXTRA_|LETSENCRYPT_|LIVEKIT_)" \
+        | grep -vE "PASSWORD|PASS|SECRET|TOKEN|MACHINE_ARCH|LIVEKIT_ROTATE_KEYS" \
         > $config_output_file
     echo "  Configuration parameters written to '$config_output_file'. "
 }
@@ -462,6 +482,105 @@ le_dns_matches() {
     return 1
 }
 
+## --- nginx https listeners behind the LiveKit stream (SNI) router ---------------------------------------------------
+# With LiveKit TURN/TLS on 443, nginx's stream block owns port 443 and routes by SNI: the TURN domain goes to the TURN
+# TLS terminator, everything else to the http block on 127.0.0.1:8443 with a PROXY protocol header (client address).
+# Every https server of the http block must then listen there instead of on 443, or nginx cannot start.
+LIVEKIT_STREAM_CONF=/etc/nginx/main.d/livekit-stream.conf
+nginx_has_ipv6() {
+    [[ -d /proc/sys/net/ipv6 && "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" == "0" ]]
+}
+# Rewrites 'listen 443 ...;' to 'listen 127.0.0.1:8443 ... proxy_protocol;' and drops '[::]:443' listeners.
+# No-op unless the stream router is configured.
+nginx_https_behind_stream() {
+    local f="$1"
+    [[ -f "$LIVEKIT_STREAM_CONF" && -f "$f" ]] || return 0
+    sed -i -E -e '/^[[:space:]]*listen[[:space:]]+\[::\]:443([[:space:];])/d' \
+              -e 's/^([[:space:]]*)listen[[:space:]]+(0\.0\.0\.0:)?443([[:space:]][^;]*)?;/\1listen 127.0.0.1:8443\3 proxy_protocol;/' "$f"
+}
+# Reverse of nginx_https_behind_stream, used when TURN/TLS on 443 is switched off again.
+nginx_https_restore() {
+    local f="$1" v6=""
+    [[ -f "$f" ]] || return 0
+    nginx_has_ipv6 && v6=y
+    if [[ -n "$v6" ]]; then
+        sed -i -E 's/^([[:space:]]*)listen[[:space:]]+127\.0\.0\.1:8443([^;]*)[[:space:]]+proxy_protocol;/\1listen 443\2;\n\1listen [::]:443\2;/' "$f"
+    else
+        sed -i -E 's/^([[:space:]]*)listen[[:space:]]+127\.0\.0\.1:8443([^;]*)[[:space:]]+proxy_protocol;/\1listen 443\2;/' "$f"
+    fi
+}
+
+## --- LiveKit validators ---------------------------------------------------------------------------------------------
+# Each prints a message and returns 1 when the value is not acceptable. Anything not matching is denied.
+valid_ipv4() {
+    local v="${1:-}" o
+    [[ "$v" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || { echo "  Not an IPv4 address."; return 1; }
+    for o in "${BASH_REMATCH[@]:1}"; do
+        [[ "$o" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( o <= 255 )) || { echo "  Not an IPv4 address."; return 1; }
+    done
+    return 0
+}
+# A private, loopback, link-local, CGNAT or unspecified address cannot be reached by remote participants
+ipv4_is_public() {
+    local v="$1"
+    [[ "$v" =~ ^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]] && return 1
+    return 0
+}
+valid_lk_node_ip() {
+    valid_ipv4 "${1:-}" || return 1
+    if ! ipv4_is_public "$1" && [[ ! "${LIVEKIT_ALLOW_PRIVATE_NODE_IP:-n}" =~ ^[Yy]$ ]]; then
+        echo "  $1 is not a public address; remote participants could not reach it."
+        echo "  Enter the server's public IPv4 (or set LIVEKIT_ALLOW_PRIVATE_NODE_IP=y in the .conf for a test network)."
+        return 1
+    fi
+    return 0
+}
+valid_lk_port() {
+    local v="${1:-}"
+    [[ "$v" =~ ^[1-9][0-9]{3,4}$ ]] && (( v >= 1024 && v <= 65535 )) || { echo "  Enter a port number from 1024 to 65535."; return 1; }
+    return 0
+}
+valid_lk_participants() {
+    local v="${1:-}"
+    [[ "$v" =~ ^[1-9][0-9]{0,3}$ ]] && (( v <= 1000 )) || { echo "  Enter a whole number from 1 to 1000."; return 1; }
+    return 0
+}
+valid_python_version() {
+    local v
+    for v in $PYTHON_VERSIONS; do [[ "${1:-}" == "$v" ]] && return 0; done
+    echo "  Choose one of: ${PYTHON_VERSIONS// /, }"; return 1
+}
+valid_yn() {
+    [[ "${1:-}" =~ ^[YyNn]$ ]] || { echo "  Answer y or n."; return 1; }
+    return 0
+}
+# 'none' = no webhook. Otherwise an https URL without quotes, spaces or other characters that would need escaping in YAML.
+valid_lk_webhook() {
+    local v="${1:-}"
+    [[ "$v" == "none" ]] && return 0
+    if (( ${#v} > 500 )) || [[ ! "$v" =~ ^https://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]{1,62}(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._~%/?=\&+-]*)?$ ]]; then
+        echo "  Enter an https:// URL on a domain name (e.g. https://cpd.example.org/api/v1/livekit/webhook), or 'none'."; return 1
+    fi
+    return 0
+}
+# 'none' = nobody may call the server API (/twirp/) from outside. Otherwise space-separated IPv4 addresses or CIDRs.
+valid_lk_allow_list() {
+    local v="${1:-}" a ip len
+    [[ "$v" == "none" ]] && return 0
+    [[ -n "${v// /}" ]] || { echo "  Enter one or more IPv4 addresses or CIDRs separated by spaces, or 'none'."; return 1; }
+    for a in $v; do
+        ip="${a%/*}"; len=""
+        [[ "$a" == */* ]] && len="${a#*/}"
+        if ! valid_ipv4 "$ip" >/dev/null; then
+            echo "  '$a' is not an IPv4 address or CIDR (prefix /8 to /32)."; return 1
+        fi
+        if [[ "$a" == */* ]] && ! { [[ "$len" =~ ^[0-9]{1,2}$ ]] && (( len >= 8 && len <= 32 )); }; then
+            echo "  '$a' is not an IPv4 address or CIDR (prefix /8 to /32)."; return 1
+        fi
+    done
+    return 0
+}
+
 # prompt_validated VAR "prompt" VALIDATOR [default]
 # Uses the value already in VAR (e.g. from the .conf file) if it passes VALIDATOR, otherwise asks until it does.
 prompt_validated() {
@@ -664,12 +783,14 @@ echo ""
 echo "--- 2. Configure new installation ---"
 
 echo "  Determining installed python:"
-check_file /usr/bin/python3.12 PROMPT_CPYTHON312
-check_file /usr/bin/python3.13 PROMPT_CPYTHON313
-check_file /usr/bin/python3.14 PROMPT_CPYTHON314
-check_file /usr/local/bin/pypy3.9 PROMPT_PYPY39
-check_file /usr/local/bin/pypy3.10 PROMPT_PYPY310
-check_file /usr/local/bin/pypy3.11 PROMPT_PYPY311
+case "$VERSION_ID" in 24.04) SYSTEM_PYTHON=3.12 ;; 26.04) SYSTEM_PYTHON=3.14 ;; *) SYSTEM_PYTHON="" ;; esac
+PYTHON_INSTALLED=()   # offered versions that are already on this server
+for PY_V in $PYTHON_VERSIONS; do
+    check_file "/usr/bin/python$PY_V" PY_STATE
+    [[ "$PY_STATE" == "reinstall" ]] && PYTHON_INSTALLED+=("$PY_V")
+done
+PROMPT_PYPY=install
+[[ -n "$PYPY_PYVER" ]] && check_file "/usr/local/bin/pypy${PYPY_PYVER}" PROMPT_PYPY
 echo "  Determining installed programs:"
 check_file /usr/bin/weasyprint PROMPT_WEASYPRINT
 check_file /usr/bin/convert PROMPT_IMAGEMAGICK
@@ -691,6 +812,7 @@ check_service_installed auditd PROMPT_AUDITD ISINSTALLED_AUDITD
 check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
 check_service_installed wazuh-agent PROMPT_WAZUHAGENT ISINSTALLED_WAZUHAGENT
 check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
+check_service_installed livekit PROMPT_LIVEKIT ISINSTALLED_LIVEKIT
 
 # Detect AppArmor state
 APPARMOR_INSTALLED=n
@@ -886,31 +1008,43 @@ prompt_if_unset INSTALL_WEASYPRINT "Would you like to $PROMPT_WEASYPRINT weasypr
 [[ "$PROMPT_IMAGEMAGICK" == "install" ]] && default_val="y" || default_val="n"
 prompt_if_unset INSTALL_IMAGEMAGICK "Would you like to $PROMPT_IMAGEMAGICK imagemagick? (y/n)" n $default_val
 
-#[[ "$PROMPT_CPYTHON314" == "install" ]] && default_val="y" || default_val="n"
+# Python: one version from PYTHON_VERSIONS
 default_val="n"
-prompt_if_unset INSTALL_CPYTHON314 "Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n $default_val
-if [[ ! "$INSTALL_CPYTHON314" =~ ^[Yy]$ && $PROMPT_CPYTHON314 == "reinstall" ]]; then
-    # Python installed and choice is do not reinstall python. Check if important packages are installed.
-    PYTHON_PACKAGES=("python3.14-venv" "pipx")
-    PYTHON_PACKAGES_TO_INSTALL=()
-
-    for PKG in "${PYTHON_PACKAGES[@]}"; do
-        # -W (show) -f (format) checks if the package is installed
-        if ! dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q "install ok installed"; then
-            echo "  Package $PKG is missing."
-            PYTHON_PACKAGES_TO_INSTALL+=("$PKG")
-        fi
+prompt_if_unset INSTALL_CPYTHON "Would you like to install or reinstall Python ($PYTHON_VERSIONS)? (y/n)" n $default_val
+if [[ ! "$INSTALL_CPYTHON" =~ ^[Yy]$ ]]; then
+    # Not (re)installing: offer it again when an installed version lacks venv or pipx
+    for PY_V in "${PYTHON_INSTALLED[@]}"; do
+        for PKG in "python$PY_V-venv" pipx; do
+            if ! dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q "install ok installed"; then
+                echo "  Package $PKG is missing."
+                PY_MISSING_FOR="$PY_V"
+            fi
+        done
     done
-
-    if [ ${#PYTHON_PACKAGES_TO_INSTALL[@]} -ne 0 ]; then
-        INSTALL_CPYTHON314=""
-        prompt_if_unset INSTALL_CPYTHON314 "  Would you like to $PROMPT_CPYTHON314 Python 3.14? (y/n)" n $default_val
+    if [[ -n "${PY_MISSING_FOR:-}" ]]; then
+        INSTALL_CPYTHON=""
+        prompt_if_unset INSTALL_CPYTHON "  Would you like to reinstall Python $PY_MISSING_FOR? (y/n)" n $default_val
+        [[ "$INSTALL_CPYTHON" =~ ^[Yy]$ && -z "${CPYTHON_VERSION:-}" ]] && CPYTHON_VERSION="$PY_MISSING_FOR"
     fi
 fi
-
+if [[ "$INSTALL_CPYTHON" =~ ^[Yy]$ ]]; then
+    # Default: the newest offered version already installed, otherwise the newest offered version
+    PY_DEFAULT="${PYTHON_VERSIONS##* }"
+    (( ${#PYTHON_INSTALLED[@]} > 0 )) && PY_DEFAULT="${PYTHON_INSTALLED[${#PYTHON_INSTALLED[@]}-1]}"
+    prompt_validated CPYTHON_VERSION "  Python version (${PYTHON_VERSIONS// /, })" valid_python_version "$PY_DEFAULT"
+    check_file "/usr/bin/python$CPYTHON_VERSION" PROMPT_CPYTHON
+else
+    CPYTHON_VERSION=""
+    PROMPT_CPYTHON=install
+fi
 
 default_val="n"
-prompt_if_unset INSTALL_PYPY311 "Would you like to $PROMPT_PYPY311 Pypy 3.11? (y/n)" n $default_val
+if [[ -n "$PYPY_PYVER" ]]; then
+    prompt_if_unset INSTALL_PYPY "Would you like to $PROMPT_PYPY PyPy $PYPY_PYVER? (y/n)" n $default_val
+else
+    echo "  [!] PYPY_FALLBACK_VERSION '${PYPY_FALLBACK_VERSION:-}' is not like pypy3.12-v8.0.1 - PyPy will NOT be installed."
+    INSTALL_PYPY=n
+fi
 
 #[[ "$PROMPT_NGINX" == "install" ]] && default_val="y" || default_val="n"
 default_val="n"
@@ -943,6 +1077,64 @@ if [[ "$INSTALL_LETSENCRYPT" =~ ^[Yy]$ ]]; then
     if [[ "$INSTALL_LETSENCRYPT" =~ ^[Yy]$ ]]; then
         echo "  Continuing means you accept the Let's Encrypt subscriber agreement (certbot --agree-tos)."
     fi
+fi
+
+# LiveKit media server (WebRTC SFU + TURN). Needs nginx for TLS; meant for a dedicated server (see README).
+INSTALL_LIVEKIT="${INSTALL_LIVEKIT:-}"
+if [[ "$INSTALL_NGINX" =~ ^[Yy]$ || "$ISINSTALLED_NGINX" == "y" ]]; then
+    prompt_if_unset INSTALL_LIVEKIT "Would you like to $PROMPT_LIVEKIT LiveKit (video calls; best on a dedicated server)? (y/n)" n "n"
+else
+    [[ "$INSTALL_LIVEKIT" =~ ^[Yy]$ ]] && echo "  [!] LiveKit needs nginx (TLS for signalling and TURN) - LiveKit will NOT be installed."
+    INSTALL_LIVEKIT=n
+fi
+if [[ "$INSTALL_LIVEKIT" =~ ^[Yy]$ ]]; then
+    prompt_validated LIVEKIT_DOMAIN "  LiveKit signalling domain, e.g. livekit.example.org (must point to this server)" valid_le_domain
+    LIVEKIT_DOMAIN="${LIVEKIT_DOMAIN,,}"
+    prompt_validated LIVEKIT_TURN_TLS "  Serve TURN/TLS on port 443 for participants behind strict firewalls (shares 443 with nginx by SNI)? (y/n)" valid_yn "y"
+    if [[ "$LIVEKIT_TURN_TLS" =~ ^[Yy]$ ]]; then
+        while true; do
+            prompt_validated LIVEKIT_TURN_DOMAIN "  TURN domain, e.g. turn.example.org (must point to this server)" valid_le_domain
+            LIVEKIT_TURN_DOMAIN="${LIVEKIT_TURN_DOMAIN,,}"
+            [[ "$LIVEKIT_TURN_DOMAIN" != "$LIVEKIT_DOMAIN" ]] && break
+            echo "  The TURN domain must differ from the signalling domain (nginx routes 443 by name)."
+            LIVEKIT_TURN_DOMAIN=""
+        done
+    else
+        LIVEKIT_TURN_DOMAIN=""
+    fi
+    prompt_validated LIVEKIT_LE_EMAIL "  Contact email for the Let's Encrypt certificates" valid_le_email "${LETSENCRYPT_EMAIL:-}"
+    echo "  Continuing means you accept the Let's Encrypt subscriber agreement (certbot --agree-tos)."
+    prompt_validated LIVEKIT_LE_STAGING "  Use the Let's Encrypt STAGING server (test run, browsers will not trust the certificates)? (y/n)" valid_yn "n"
+    LK_DNS_OK=y
+    for LK_D in "$LIVEKIT_DOMAIN" ${LIVEKIT_TURN_DOMAIN:+"$LIVEKIT_TURN_DOMAIN"}; do
+        le_dns_matches "$LK_D" || LK_DNS_OK=n
+    done
+    if [[ "$LK_DNS_OK" == "n" ]]; then
+        echo "  [!] A LiveKit domain does not resolve to an address on this server (fine behind NAT or a proxy, fatal otherwise)."
+        prompt_validated LIVEKIT_DNS_OVERRIDE "  Request the certificates anyway? (y/n)" valid_yn "n"
+        if [[ ! "$LIVEKIT_DNS_OVERRIDE" =~ ^[Yy]$ ]]; then
+            echo "  Skipping LiveKit. Point the DNS records here and re-run."
+            INSTALL_LIVEKIT=n
+        fi
+    fi
+    if [[ "$INSTALL_LETSENCRYPT" =~ ^[Yy]$ && ( "${LETSENCRYPT_DOMAIN:-}" == "$LIVEKIT_DOMAIN" || "${LETSENCRYPT_DOMAIN:-}" == "${LIVEKIT_TURN_DOMAIN:-}" ) ]]; then
+        echo "  [!] $LETSENCRYPT_DOMAIN is both the Let's Encrypt placeholder site and a LiveKit domain - LiveKit will NOT be installed."
+        echo "      Answer 'n' to the placeholder site (LiveKit gets its own certificates) or use another domain."
+        INSTALL_LIVEKIT=n
+    fi
+fi
+if [[ "$INSTALL_LIVEKIT" =~ ^[Yy]$ ]]; then
+    prompt_validated LIVEKIT_NODE_IP "  Public IPv4 address that participants connect to" valid_lk_node_ip "$PRIMARY_IP"
+    prompt_validated LIVEKIT_RTC_PORT_START "  First UDP port for media" valid_lk_port "50000"
+    while true; do
+        prompt_validated LIVEKIT_RTC_PORT_END "  Last UDP port for media" valid_lk_port "60000"
+        (( LIVEKIT_RTC_PORT_END > LIVEKIT_RTC_PORT_START )) && break
+        echo "  The last port must be higher than the first port ($LIVEKIT_RTC_PORT_START)."
+        LIVEKIT_RTC_PORT_END=""
+    done
+    prompt_validated LIVEKIT_ROOM_MAX_PARTICIPANTS "  Maximum participants per room" valid_lk_participants "10"
+    prompt_validated LIVEKIT_WEBHOOK_URL "  Webhook URL for room events (https://..., or 'none')" valid_lk_webhook "none"
+    prompt_validated LIVEKIT_API_ALLOW_FROM "  IPv4 addresses/CIDRs allowed to call the server API /twirp/ (space-separated, or 'none')" valid_lk_allow_list "none"
 fi
 
 #[[ "$PROMPT_VALKEY" == "install" ]] && default_val="y" || default_val="n"
@@ -1772,8 +1964,8 @@ if [[ "$INSTALL_FONTS" =~ ^[Yy]$ ]]; then
 fi
 echo "Install weasyprint?          : $INSTALL_WEASYPRINT"
 echo "Install imagemagick?         : $INSTALL_IMAGEMAGICK"
-echo "Install Python 3.14?         : $INSTALL_CPYTHON314"
-echo "Install Pypy 3.11?           : $INSTALL_PYPY311"
+echo "Install Python?              : $INSTALL_CPYTHON${CPYTHON_VERSION:+ ($CPYTHON_VERSION)}"
+echo "Install PyPy ${PYPY_PYVER:-?}?           : $INSTALL_PYPY"
 echo "Install nginx?               : $INSTALL_NGINX"
 if [[ "$INSTALL_NGINX" =~ ^[Yy]$ ]]; then
   echo "    nginx worker processes   : $NGINX_WORKER_PROCESSES"
@@ -1784,6 +1976,21 @@ if [[ "${INSTALL_LETSENCRYPT:-n}" =~ ^[Yy]$ ]]; then
   echo "    Domain                   : $LETSENCRYPT_DOMAIN"
   echo "    Contact email            : $LETSENCRYPT_EMAIL"
   echo "    Staging server           : $LETSENCRYPT_STAGING"
+fi
+echo "Install LiveKit?             : ${INSTALL_LIVEKIT:-n}"
+if [[ "${INSTALL_LIVEKIT:-n}" =~ ^[Yy]$ ]]; then
+  echo "    Signalling domain        : $LIVEKIT_DOMAIN (wss://, port 443)"
+  if [[ "$LIVEKIT_TURN_TLS" =~ ^[Yy]$ ]]; then
+    echo "    TURN/TLS domain          : $LIVEKIT_TURN_DOMAIN (port 443, routed by nginx stream/SNI)"
+  else
+    echo "    TURN/TLS                 : off (TURN/UDP 3478 only)"
+  fi
+  echo "    Public IPv4              : $LIVEKIT_NODE_IP"
+  echo "    Media ports              : $LIVEKIT_RTC_PORT_START-$LIVEKIT_RTC_PORT_END/udp, 7881/tcp, TURN 3478/udp"
+  echo "    Max participants / room  : $LIVEKIT_ROOM_MAX_PARTICIPANTS"
+  echo "    Webhook URL              : $LIVEKIT_WEBHOOK_URL"
+  echo "    Server API (/twirp/) from: $LIVEKIT_API_ALLOW_FROM"
+  echo "    Let's Encrypt email      : $LIVEKIT_LE_EMAIL (staging: $LIVEKIT_LE_STAGING)"
 fi
 echo "Install valkey?              : $INSTALL_VALKEY"
 if [[ "$INSTALL_VALKEY" =~ ^[Yy]$ ]]; then
@@ -3142,74 +3349,78 @@ fi
 
 
 echo ""
-echo "--- 25. Install Python 3.14 ---"
-if [[ "$INSTALL_CPYTHON314" =~ ^[Yy]$ ]]; then
-    if [[ "$PROMPT_CPYTHON314" == 'reinstall' ]]; then
-        echo "  Uninstall Python 3.14"
-        wait_for_apt
-        apt-get purge -y python3.14-full python3.14-venv pipx || true
+echo "--- 25. Install Python ${CPYTHON_VERSION:-} ---"
+if [[ "$INSTALL_CPYTHON" =~ ^[Yy]$ && -n "${CPYTHON_VERSION:-}" ]] && valid_python_version "$CPYTHON_VERSION"; then
+    PY_V="$CPYTHON_VERSION"
+    PY_OK=y
+    if [[ "$PY_V" == "$SYSTEM_PYTHON" ]]; then
+        # Ubuntu's own python$PY_V: never purged (the system depends on it), only venv and pipx are added
+        PY_PACKAGES=("python$PY_V-venv" pipx)
+    else
+        PY_PACKAGES=("python$PY_V-full" "python$PY_V-venv" pipx)
+        if [[ "$PROMPT_CPYTHON" == 'reinstall' ]]; then
+            echo "  Uninstall Python $PY_V"
+            wait_for_apt
+            apt-get purge -y "python$PY_V-full" "python$PY_V-venv" || true
+        fi
     fi
-
-    if [[ "$VERSION_ID" == "24.04" ]]; then
-        # On Ubuntu 24.04, system python is 3.12. Install 3.14 via deadsnakes PPA.
-        wait_for_apt
-        if add-apt-repository -y ppa:deadsnakes/ppa 2>&1; then
-            apt-get update
-            if apt_install python3.14-full python3.14-venv pipx; then
-
-                # Keep 3.12 as default, 3.14 available explicitly via python3.14
-                if command -v python3.12 &>/dev/null; then
-                    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2
-                    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1
-                fi
-            fi
+    wait_for_apt
+    # Ubuntu archive first; the deadsnakes PPA only when Ubuntu does not have this version
+    if ! apt-cache policy "${PY_PACKAGES[0]}" 2>/dev/null | grep -qE 'Candidate: [^(]'; then
+        echo "  python$PY_V is not in the Ubuntu archive for $VERSION_ID - adding the deadsnakes PPA"
+        if add-apt-repository -y ppa:deadsnakes/ppa 2>&1 && apt-get update; then
+            apt-cache policy "${PY_PACKAGES[0]}" 2>/dev/null | grep -qE 'Candidate: [^(]' || PY_OK=n
         else
-            echo "  [!] Warning: deadsnakes PPA unavailable — skipping Python 3.14 installation"
-            APT_PACKAGES_NOT_INSTALLED+=("python3.14-full" "python3.14-venv" "pipx")
+            PY_OK=n
+        fi
+    fi
+    if [[ "$PY_OK" == "y" ]] && apt_install "${PY_PACKAGES[@]}"; then
+        # Keep the system Python as the default python3; python$PY_V is available explicitly
+        if [[ -n "$SYSTEM_PYTHON" && "$PY_V" != "$SYSTEM_PYTHON" && -x "/usr/bin/python$SYSTEM_PYTHON" && -x "/usr/bin/python$PY_V" ]]; then
+            update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python$SYSTEM_PYTHON" 2
+            update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python$PY_V" 1
         fi
 
-    elif [[ "$VERSION_ID" == "26.04" ]]; then
-        # On Ubuntu 26.04, system python is 3.14. Just ensure venv and pipx are present.
-        wait_for_apt
-        apt_install python3.14-venv pipx || true
+        # Install virtualenv globally via pipx
+        # pipx installs tools in isolated pockets, avoiding conflicts with system python
+        pipx install virtualenv --include-deps --force
+
+        VIRTUALENV_BIN=$(find /root/.local/bin /usr/local/bin -name virtualenv 2>/dev/null | head -n1)
+        if [[ -n "$VIRTUALENV_BIN" && "$VIRTUALENV_BIN" != "/usr/local/bin/virtualenv" ]]; then
+            ln -sf "$VIRTUALENV_BIN" /usr/local/bin/virtualenv
+        fi
+
+        echo "  Note: Python setuptools and wheel were NOT installed at the system level."
+        echo "  Install them inside individual venvs as needed:"
+        echo "     python$PY_V -m venv /path/to/venv"
+        echo "     source /path/to/venv/bin/activate"
+        echo "     pip install setuptools wheel"
+
+        echo "  Python $PY_V and packaging tools (pipx/virtualenv) installed."
+    else
+        echo "  [!] Warning: python$PY_V is not available for Ubuntu $VERSION_ID (Ubuntu archive or deadsnakes PPA) - skipping Python installation"
+        APT_PACKAGES_NOT_INSTALLED+=("${PY_PACKAGES[@]}")
     fi
-
-    # Install virtualenv globally via pipx
-    # pipx installs tools in isolated pockets, avoiding conflicts with system python
-    pipx install virtualenv --include-deps --force
-
-    VIRTUALENV_BIN=$(find /root/.local/bin /usr/local/bin -name virtualenv 2>/dev/null | head -n1)
-    if [[ -n "$VIRTUALENV_BIN" && "$VIRTUALENV_BIN" != "/usr/local/bin/virtualenv" ]]; then
-        ln -sf "$VIRTUALENV_BIN" /usr/local/bin/virtualenv
-    fi
-
-    echo "  Note: Python setuptools and wheel were NOT installed at the system level."
-    echo "  Install them inside individual venvs as needed:"
-    echo "     python3.14 -m venv /path/to/venv"
-    echo "     source /path/to/venv/bin/activate"
-    echo "     pip install setuptools wheel"
-
-    echo "  Python 3.14 and packaging tools (pipx/virtualenv) installed."
 else
-    echo "  Skipping Python 3.14 installation."
+    echo "  Skipping Python installation."
 fi
 
 
 echo ""
-echo "--- 26. Install PyPy 3.11 ---"
-if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
+echo "--- 26. Install PyPy ${PYPY_PYVER} ---"
+if [[ "$INSTALL_PYPY" =~ ^[Yy]$ && -n "$PYPY_PYVER" ]]; then
 
-    # Fetch latest PyPy 3.11 version dynamically, fall back to known version if unavailable
+    # Fetch the latest PyPy release for this Python version, fall back to PYPY_FALLBACK_VERSION if unavailable
     PYPY_ARCH=$(uname -m | sed 's/x86_64/linux64/;s/aarch64/aarch64/')  # linux64 or aarch64
     PYPY_BASE_URL="https://downloads.python.org/pypy"
-    PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP "pypy3\\.11-v[\\d.]+-${PYPY_ARCH}\\.tar\\.bz2" | sort -V | tail -n1) || true
+    PYPY_FILENAME=$(curl -fsSL https://downloads.python.org/pypy/versions.json | grep -oP "pypy${PYPY_PYVER//./\\.}-v[\\d.]+-${PYPY_ARCH}\\.tar\\.bz2" | sort -V | tail -n1) || true
     if [[ -z "$PYPY_FILENAME" ]]; then
-        echo "  Could not determine latest PyPy 3.11 version. Falling back to $PYPY_FALLBACK_VERSION on ${PYPY_ARCH}."
+        echo "  Could not determine latest PyPy $PYPY_PYVER version. Falling back to $PYPY_FALLBACK_VERSION on ${PYPY_ARCH}."
         PYPY_FILENAME="${PYPY_FALLBACK_VERSION}-${PYPY_ARCH}.tar.bz2"
     fi
 
     PYPY_DIRNAME="${PYPY_FILENAME%.tar.bz2}"
-    echo "  Installing PyPy 3.11 ($PYPY_DIRNAME) to /opt"
+    echo "  Installing PyPy $PYPY_PYVER ($PYPY_DIRNAME) to /opt"
     pushd /opt > /dev/null
 
     if [ ! -d /opt/$PYPY_DIRNAME ]; then
@@ -3217,22 +3428,22 @@ if [[ "$INSTALL_PYPY311" =~ ^[Yy]$ ]]; then
         tar -xjf $PYPY_FILENAME
         rm $PYPY_FILENAME || true
     fi
-    ln -sf /opt/$PYPY_DIRNAME/bin/pypy3 /usr/local/bin/pypy3.11
+    ln -sf /opt/$PYPY_DIRNAME/bin/pypy3 "/usr/local/bin/pypy${PYPY_PYVER}"
     ln -sf /opt/$PYPY_DIRNAME/bin/pypy3 /usr/local/bin/pypy3
     ln -sf /opt/$PYPY_DIRNAME/bin/pypy3 /usr/local/bin/pypy
 
     # Bootstrap pip for pypy - safe as this is isolated from the system Python
-    /usr/local/bin/pypy3.11 -m ensurepip
-    /usr/local/bin/pypy3.11 -m pip install --upgrade --root-user-action=ignore pip virtualenv
+    "/usr/local/bin/pypy${PYPY_PYVER}" -m ensurepip
+    "/usr/local/bin/pypy${PYPY_PYVER}" -m pip install --upgrade --root-user-action=ignore pip virtualenv
 
     echo "  Note: PyPy setuptools and wheel were NOT installed at the system level."
     echo "  Install them inside individual venvs as needed:"
-    echo "     pypy3.11 -m venv /path/to/venv"
+    echo "     pypy${PYPY_PYVER} -m venv /path/to/venv"
     echo "     source /path/to/venv/bin/activate"
     echo "     pip install setuptools wheel"
 
     popd > /dev/null
-    echo "  PyPy 3.11 installation complete."
+    echo "  PyPy $PYPY_PYVER installation complete."
 else
     echo "  Skipping PyPy installation."
 fi
@@ -4503,6 +4714,7 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
     check_service_installed suricata PROMPT_SURICATA ISINSTALLED_SURICATA
     check_service_installed wazuh-agent PROMPT_WAZUHAGENT ISINSTALLED_WAZUHAGENT
     check_service_installed wazuh-manager PROMPT_WAZUHMANAGER ISINSTALLED_WAZUHMANAGER
+    check_service_installed livekit PROMPT_LIVEKIT ISINSTALLED_LIVEKIT
 
     # Snapshot the config folders that have a config test, so a copy that fails its test can be put
     # back before anything is restarted (see cfg_check below). Root only: these folders hold credentials.
@@ -4602,6 +4814,7 @@ if [[ "$ANY_INSTALL_SET" =~ ^[Yy]$ ]]; then
             if [[ ! -d /proc/sys/net/ipv6 || "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" != "0" ]]; then
                 sed -i '/listen \[::\]/d' /etc/nginx/sites-available/default   # IPv6 off: [::] listeners would stop nginx
             fi
+            nginx_https_behind_stream /etc/nginx/sites-available/default   # LiveKit TURN/TLS owns 443 (no-op otherwise)
             ln -sfn /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
         fi
 
@@ -4861,6 +5074,7 @@ EOF
             "$( [[ "$ISINSTALLED_WEBMIN"     == "y" ]] && echo webmin )" \
             "$( [[ "$ISINSTALLED_GRAFANA"    == "y" ]] && echo grafana-server )" \
             "$( [[ "$ISINSTALLED_FORGEJO"    == "y" ]] && echo forgejo )" \
+            "$( [[ "$ISINSTALLED_LIVEKIT"    == "y" ]] && echo livekit )" \
             "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-indexer )" \
             "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-manager )" \
             "$( [[ "$ISINSTALLED_WAZUHMANAGER" == "y" ]] && echo wazuh-dashboard )" \
@@ -4920,6 +5134,7 @@ EOF
             ["webmin"]="ISINSTALLED_WEBMIN"
             ["grafana-server"]="ISINSTALLED_GRAFANA"
             ["forgejo"]="ISINSTALLED_FORGEJO"
+            ["livekit"]="ISINSTALLED_LIVEKIT"
             ["wazuh-indexer"]="ISINSTALLED_WAZUHMANAGER"
             ["wazuh-manager"]="ISINSTALLED_WAZUHMANAGER"
             ["wazuh-dashboard"]="ISINSTALLED_WAZUHMANAGER"
@@ -5204,6 +5419,7 @@ setup_letsencrypt_site() {
         echo "    location / { try_files \$uri \$uri/ =404; }"
         echo "}"
     } > "$site"
+    nginx_https_behind_stream "$site"   # LiveKit TURN/TLS owns 443 (no-op otherwise)
     ln -sfn "$site" "$link"
     if ! nginx -t || ! systemctl reload nginx; then
         echo "  [!] nginx rejects the final site config - disabling it again (certificate kept)"
@@ -5225,6 +5441,538 @@ if [[ "${INSTALL_LETSENCRYPT:-n}" =~ ^[Yy]$ ]]; then
     setup_letsencrypt_site || echo "  [!] Let's Encrypt setup did not complete (see above); provisioning continues"
 else
     echo "  Skipping Let's Encrypt."
+fi
+
+echo ""
+echo "--- 48c. LiveKit media server ---"
+
+LK_ETC=/etc/livekit
+LK_CONF="$LK_ETC/livekit.yaml"
+LK_KEYS="$LK_ETC/keys.yaml"
+LK_BIN=/usr/local/bin/livekit-server
+LK_UNIT=/etc/systemd/system/livekit.service
+LK_SITE=/etc/nginx/sites-available/livekit
+LK_SITE_LINK=/etc/nginx/sites-enabled/livekit
+LK_REALIP_CONF=/etc/nginx/conf.d/livekit-realip.conf
+LK_ACME_ROOT=/var/www/letsencrypt
+LK_RENEW_HOOK=/etc/letsencrypt/renewal-hooks/deploy/50-livekit-nginx-reload
+LK_MARK="# Managed by ubuntu_provision.sh (LiveKit)"
+LK_HTTP_PORT=7880      # LiveKit signalling + server API, bound to 127.0.0.1 only (nginx in front)
+LK_TCP_PORT=7881       # ICE over TCP, public
+LK_TURN_UDP_PORT=3478  # TURN/UDP, public
+LK_TURN_TLS_PORT=5349  # plain TURN behind nginx (PROXY protocol), never opened in UFW
+LK_TURN_TLS_LOCAL=5350 # nginx stream TLS terminator for the TURN domain, 127.0.0.1 only
+LK_HTTPS_LOCAL=8443    # http-block https servers when the stream router owns 443, 127.0.0.1 only
+
+# Prints "KEY SECRET" from an existing keys file written by this script, when it is well-formed.
+lk_existing_keys() {
+    local line
+    [[ -f "$LK_KEYS" ]] && grep -qF "$LK_MARK" "$LK_KEYS" || return 1
+    line=$(grep -vE '^[[:space:]]*(#|$)' "$LK_KEYS" | head -n1)
+    [[ "$line" =~ ^([A-Za-z0-9]{8,64}):[[:space:]]+([A-Za-z0-9]{32,128})$ ]] || return 1
+    printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+# Downloads the release archive and its checksum file, and installs livekit-server only when the archive's
+# SHA-256 is listed in that file. Sets LK_VERSION. Returns 1 (nothing installed) on any failure.
+lk_install_binary() {
+    local ver arch tmp tgz sums base line
+    ver=$(curl -fsS --max-time 10 https://api.github.com/repos/livekit/livekit/releases/latest 2>/dev/null \
+          | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
+    if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "  [!] Could not determine the latest LiveKit version - using fallback $LIVEKIT_FALLBACK_VERSION"
+        ver="$LIVEKIT_FALLBACK_VERSION"
+    fi
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "  [!] Invalid LiveKit version '$ver'"; return 1; }
+    case "$MACHINE_ARCH" in
+        x86_64)  arch=amd64 ;;
+        aarch64) arch=arm64 ;;
+        *) echo "  [!] No LiveKit build for $MACHINE_ARCH"; return 1 ;;
+    esac
+    tgz="livekit_${ver}_linux_${arch}.tar.gz"
+    sums="livekit_${ver}_checksums.txt"
+    base="https://github.com/livekit/livekit/releases/download/v${ver}"
+    tmp=$(mktemp -d) || return 1
+    echo "  Downloading LiveKit $ver ($tgz) ..."
+    if ! curl -fsSL --max-time 300 -o "$tmp/$tgz" "$base/$tgz" || ! curl -fsSL --max-time 30 -o "$tmp/$sums" "$base/$sums"; then
+        echo "  [!] Could not download $base/$tgz or its checksum file"
+        rm -rf "$tmp"; return 1
+    fi
+    # Fail closed: exactly one well-formed checksum line for this archive, and it must match
+    line=$(awk -v f="$tgz" '$2 == f || $2 == "*" f' "$tmp/$sums")
+    if [[ $(printf '%s\n' "$line" | grep -c .) -ne 1 || ! "$line" =~ ^[0-9a-f]{64}[[:space:]] ]] \
+       || ! (cd "$tmp" && printf '%s  %s\n' "${line%% *}" "$tgz" | sha256sum -c --status -); then
+        echo "  [!] $tgz does not match the SHA-256 in $sums - LiveKit NOT installed"
+        rm -rf "$tmp"; return 1
+    fi
+    mkdir "$tmp/x"
+    if ! tar -xzf "$tmp/$tgz" -C "$tmp/x" --no-same-owner --no-same-permissions || [[ ! -f "$tmp/x/livekit-server" ]]; then
+        echo "  [!] livekit-server not found in $tgz"
+        rm -rf "$tmp"; return 1
+    fi
+    install -m 755 -o root -g root "$tmp/x/livekit-server" "$LK_BIN"
+    rm -rf "$tmp"
+    LK_VERSION="$ver"
+    echo "  [V] LiveKit $ver installed in $LK_BIN (SHA-256 verified)"
+}
+
+# certonly via the webroot served by the port-80 server of the LiveKit site
+lk_get_cert() {
+    local d="$1" args
+    if [[ -f "/etc/letsencrypt/live/$d/fullchain.pem" && -f "/etc/letsencrypt/live/$d/privkey.pem" ]]; then
+        echo "  A certificate for $d already exists - reusing it."
+        return 0
+    fi
+    args=(certonly --webroot -w "$LK_ACME_ROOT" -d "$d" --cert-name "$d" --non-interactive --agree-tos --no-eff-email -m "$LIVEKIT_LE_EMAIL")
+    [[ "${LIVEKIT_LE_STAGING:-n}" =~ ^[Yy]$ ]] && args+=(--staging)
+    echo "  Requesting the certificate for $d ..."
+    if ! certbot "${args[@]}" || [[ ! -f "/etc/letsencrypt/live/$d/fullchain.pem" ]]; then
+        echo "  [!] Certificate request for $d failed. Check that $d points to this server and port 80 is reachable."
+        echo "      Retry later with: certbot ${args[*]}"
+        return 1
+    fi
+}
+
+# Port 80 server of the LiveKit site: ACME challenges for both names, everything else redirects to https
+lk_http_server_block() {
+    echo "server {"
+    echo "    listen 80;"
+    [[ -n "$1" ]] && echo "    listen [::]:80;"
+    echo "    server_name $LIVEKIT_DOMAIN${LIVEKIT_TURN_DOMAIN:+ $LIVEKIT_TURN_DOMAIN};"
+    echo "    location ^~ /.well-known/acme-challenge/ { root $LK_ACME_ROOT; default_type text/plain; }"
+    echo "    location / { return 301 https://\$host\$request_uri; }"
+    echo "}"
+}
+
+setup_livekit() {
+    local sni="" v6="" keypair api_key api_secret webhook allow a f rc
+    local -a lk_sites_changed=()
+
+    # 1. Fail closed: every value is checked again here (it may come from an edited .conf); nothing is guessed
+    valid_le_domain "${LIVEKIT_DOMAIN:-}" >/dev/null       || { echo "  [!] Missing or invalid LIVEKIT_DOMAIN - skipped"; return 1; }
+    valid_le_email "${LIVEKIT_LE_EMAIL:-}" >/dev/null      || { echo "  [!] Missing or invalid LIVEKIT_LE_EMAIL - skipped"; return 1; }
+    valid_lk_node_ip "${LIVEKIT_NODE_IP:-}" >/dev/null     || { echo "  [!] Missing or invalid LIVEKIT_NODE_IP - skipped"; return 1; }
+    valid_lk_port "${LIVEKIT_RTC_PORT_START:-}" >/dev/null && valid_lk_port "${LIVEKIT_RTC_PORT_END:-}" >/dev/null \
+        && (( LIVEKIT_RTC_PORT_END > LIVEKIT_RTC_PORT_START )) || { echo "  [!] Missing or invalid LIVEKIT_RTC_PORT_START/END - skipped"; return 1; }
+    for a in $LK_HTTP_PORT $LK_TCP_PORT $LK_TURN_UDP_PORT $LK_TURN_TLS_PORT $LK_TURN_TLS_LOCAL $LK_HTTPS_LOCAL; do
+        if (( a >= LIVEKIT_RTC_PORT_START && a <= LIVEKIT_RTC_PORT_END )); then
+            echo "  [!] The media port range $LIVEKIT_RTC_PORT_START-$LIVEKIT_RTC_PORT_END includes port $a used by LiveKit/nginx - skipped"; return 1
+        fi
+    done
+    valid_lk_participants "${LIVEKIT_ROOM_MAX_PARTICIPANTS:-}" >/dev/null || { echo "  [!] Missing or invalid LIVEKIT_ROOM_MAX_PARTICIPANTS - skipped"; return 1; }
+    valid_lk_webhook "${LIVEKIT_WEBHOOK_URL:-}" >/dev/null     || { echo "  [!] Missing or invalid LIVEKIT_WEBHOOK_URL (use 'none' for no webhook) - skipped"; return 1; }
+    valid_lk_allow_list "${LIVEKIT_API_ALLOW_FROM:-}" >/dev/null || { echo "  [!] Missing or invalid LIVEKIT_API_ALLOW_FROM (use 'none' for nobody) - skipped"; return 1; }
+    case "${LIVEKIT_TURN_TLS:-}" in
+        [Yy])
+            valid_le_domain "${LIVEKIT_TURN_DOMAIN:-}" >/dev/null || { echo "  [!] Missing or invalid LIVEKIT_TURN_DOMAIN - skipped"; return 1; }
+            [[ "$LIVEKIT_TURN_DOMAIN" != "$LIVEKIT_DOMAIN" ]]      || { echo "  [!] LIVEKIT_TURN_DOMAIN must differ from LIVEKIT_DOMAIN - skipped"; return 1; }
+            sni=y ;;
+        [Nn]) LIVEKIT_TURN_DOMAIN="" ;;
+        *) echo "  [!] LIVEKIT_TURN_TLS must be y or n - skipped"; return 1 ;;
+    esac
+    webhook="$LIVEKIT_WEBHOOK_URL"; [[ "$webhook" == "none" ]] && webhook=""
+    allow="$LIVEKIT_API_ALLOW_FROM"; [[ "$allow" == "none" ]] && allow=""
+    command -v nginx >/dev/null 2>&1 || { echo "  [!] nginx is not installed - skipped"; return 1; }
+    nginx_has_ipv6 && v6=y
+
+    # 2. Port 443 must be free for nginx: another program there (e.g. the Wazuh dashboard) stops the setup
+    if ss -ltnpH 'sport = :443' 2>/dev/null | grep -v '"nginx"' | grep -q .; then
+        echo "  [!] Port 443 is used by a program other than nginx:"
+        ss -ltnpH 'sport = :443' 2>/dev/null | grep -v '"nginx"' | sed 's/^/      /'
+        echo "      LiveKit needs 443 for signalling and TURN/TLS - skipped"
+        return 1
+    fi
+
+    # 3. Packages. The stream router needs the stream, ssl_preread and realip modules.
+    wait_for_apt
+    apt_install certbot jq openssl || { echo "  [!] certbot/jq/openssl could not be installed - skipped"; return 1; }
+    if [[ -n "$sni" ]]; then
+        apt_install libnginx-mod-stream || { echo "  [!] libnginx-mod-stream could not be installed - skipped"; return 1; }
+        for a in stream_ssl_module stream_ssl_preread_module stream_realip_module; do
+            if ! nginx -V 2>&1 | grep -q -- "--with-$a"; then
+                echo "  [!] This nginx build lacks $a - TURN/TLS on 443 is not possible. Re-run with LIVEKIT_TURN_TLS=n - skipped"
+                return 1
+            fi
+        done
+        # Other https sites must move behind the router. Only sites this script wrote are rewritten automatically.
+        for f in /etc/nginx/sites-enabled/*; do
+            [[ -e "$f" ]] || continue
+            [[ "$(readlink -f "$f")" == "$LK_SITE" || "$(readlink -f "$f")" == "/etc/nginx/sites-available/default" ]] && continue
+            grep -qE '^[[:space:]]*listen[[:space:]]+(\[::\]:|0\.0\.0\.0:)?443([[:space:];])' "$f" || continue
+            if grep -qF "# Managed by ubuntu_provision.sh" "$f"; then
+                lk_sites_changed+=("$(readlink -f "$f")")
+            else
+                echo "  [!] $f listens on 443 and was not written by this script."
+                echo "      Change its https listen lines to 'listen 127.0.0.1:$LK_HTTPS_LOCAL ssl proxy_protocol;' (and drop [::]:443),"
+                echo "      or re-run with LIVEKIT_TURN_TLS=n - skipped"
+                return 1
+            fi
+        done
+        if ! grep -qE '^[[:space:]]*include[[:space:]]+/etc/nginx/main\.d/\*\.conf;' /etc/nginx/nginx.conf \
+           && ! grep -qE '^[[:space:]]*include[[:space:]]+/etc/nginx/modules-enabled/\*\.conf;' /etc/nginx/nginx.conf; then
+            echo "  [!] /etc/nginx/nginx.conf has no top-level 'include /etc/nginx/modules-enabled/*.conf;' to anchor the stream block - skipped"
+            return 1
+        fi
+    fi
+
+    # 4. Service account and binary
+    if ! id livekit &>/dev/null; then
+        useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin livekit \
+            || { echo "  [!] Could not create the livekit user - skipped"; return 1; }
+    fi
+    systemctl stop livekit.service 2>/dev/null || true
+    LK_VERSION=""
+    if ! lk_install_binary; then
+        if [[ -x "$LK_BIN" && "$PROMPT_LIVEKIT" == "reinstall" ]]; then
+            echo "  [!] Keeping the LiveKit binary that is already installed: $("$LK_BIN" --version 2>/dev/null || echo unknown)"
+        else
+            echo "  [!] LiveKit NOT installed"
+            return 1
+        fi
+    fi
+
+    # 5. API key and secret: kept across re-runs unless LIVEKIT_ROTATE_KEYS=y. The secret is never printed or logged.
+    install -d -m 750 -o root -g livekit "$LK_ETC" || { echo "  [!] Could not create $LK_ETC - skipped"; return 1; }
+    if [[ ! "${LIVEKIT_ROTATE_KEYS:-n}" =~ ^[Yy]$ ]] && keypair=$(lk_existing_keys); then
+        api_key="${keypair%% *}"; api_secret="${keypair#* }"
+        echo "  Keeping the existing API key $api_key (set LIVEKIT_ROTATE_KEYS=y to replace it)"
+    else
+        api_key="API$(openssl rand -hex 8 | tr 'a-f' 'A-F')"
+        api_secret="$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9' | head -c 48)"
+        echo "  New API key generated: $api_key"
+    fi
+    if [[ ! "$api_key" =~ ^[A-Za-z0-9]{8,64}$ || ! "$api_secret" =~ ^[A-Za-z0-9]{32,128}$ ]]; then
+        echo "  [!] Could not create a valid API key/secret - LiveKit NOT configured"; return 1
+    fi
+    ( umask 027
+      { echo "$LK_MARK"
+        echo "# API key: secret for access tokens. Copy both to the web app's configuration; keep the secret out of git."
+        echo "$api_key: $api_secret"
+      } > "$LK_KEYS" )
+    chown root:livekit "$LK_KEYS"; chmod 640 "$LK_KEYS"   # LiveKit refuses a key file readable by others
+    api_secret=""
+    if ! grep -qE "^$api_key: [A-Za-z0-9]{32,128}\$" "$LK_KEYS" 2>/dev/null; then
+        echo "  [!] Could not write $LK_KEYS - LiveKit NOT configured"; return 1
+    fi
+
+    # 6. LiveKit configuration (signalling bound to localhost: nginx is the only way in)
+    {
+        echo "$LK_MARK"
+        echo "# Rewritten by every run of ubuntu_provision.sh with INSTALL_LIVEKIT=y. Keys are in $LK_KEYS."
+        echo "port: $LK_HTTP_PORT"
+        echo "bind_addresses:"
+        echo "  - 127.0.0.1"
+        echo "key_file: $LK_KEYS"
+        echo "rtc:"
+        echo "  tcp_port: $LK_TCP_PORT"
+        echo "  port_range_start: $LIVEKIT_RTC_PORT_START"
+        echo "  port_range_end: $LIVEKIT_RTC_PORT_END"
+        echo "  # fixed public address: no STUN lookup to a third-party server at start-up"
+        echo "  use_external_ip: false"
+        echo "  node_ip: $LIVEKIT_NODE_IP"
+        echo "turn:"
+        echo "  enabled: true"
+        echo "  udp_port: $LK_TURN_UDP_PORT"
+        echo "  relay_range_start: 40000"
+        echo "  relay_range_end: 49999"
+        if [[ -n "$sni" ]]; then
+            echo "  domain: $LIVEKIT_TURN_DOMAIN"
+            echo "  # nginx ends TLS on 443 and forwards plain TURN here with a PROXY header; clients are told turns:<domain>:443"
+            echo "  tls_port: $LK_TURN_TLS_PORT"
+            echo "  external_tls: true"
+            echo "  proxy_protocol: true"
+            echo "  proxy_protocol_trusted_cidrs:"
+            echo "    - 127.0.0.1/32"
+        else
+            echo "  domain: $LIVEKIT_DOMAIN"
+            echo "  tls_port: 0"
+        fi
+        echo "room:"
+        echo "  empty_timeout: 300"
+        echo "  departure_timeout: 20"
+        echo "  max_participants: $LIVEKIT_ROOM_MAX_PARTICIPANTS"
+        if [[ -n "$webhook" ]]; then
+            echo "webhook:"
+            echo "  api_key: $api_key"
+            echo "  urls:"
+            echo "    - '$webhook'"
+        fi
+        echo "logging:"
+        echo "  level: info"
+    } > "$LK_CONF"
+    chown root:livekit "$LK_CONF"; chmod 640 "$LK_CONF"
+    grep -q "^key_file: $LK_KEYS\$" "$LK_CONF" 2>/dev/null || { echo "  [!] Could not write $LK_CONF - LiveKit NOT configured"; return 1; }
+
+    # 7. systemd unit: unprivileged, no capabilities (all ports are above 1024), read-only system
+    cat > "$LK_UNIT" <<EOF
+$LK_MARK
+[Unit]
+Description=LiveKit media server
+Documentation=https://docs.livekit.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=livekit
+Group=livekit
+ExecStart=$LK_BIN --config $LK_CONF
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$LK_UNIT"
+    systemctl daemon-reload
+
+    # Start LiveKit now: it does not need the certificates (nginx ends TLS), and a later nginx problem leaves it running
+    systemctl enable livekit.service >/dev/null 2>&1 || true
+    if ! systemctl restart livekit.service; then
+        echo "  [!] LiveKit did not start - check 'journalctl -u livekit'"; return 1
+    fi
+
+    # 8. Certificates: port-80 server first (ACME webroot), then one certificate per domain
+    install -d -m 755 "$LK_ACME_ROOT"
+    if [[ -e "$LK_SITE" ]] && ! grep -qF "$LK_MARK" "$LK_SITE"; then
+        echo "  [!] $LK_SITE exists and was not written by this script - not touching it"; return 1
+    fi
+    if [[ ! -f "/etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem" || ( -n "$sni" && ! -f "/etc/letsencrypt/live/$LIVEKIT_TURN_DOMAIN/fullchain.pem" ) ]]; then
+        { echo "$LK_MARK (temporary: ACME challenge only)"; lk_http_server_block "$v6"; } > "$LK_SITE"
+        ln -sfn "$LK_SITE" "$LK_SITE_LINK"
+        if ! nginx -t || ! systemctl reload nginx; then
+            echo "  [!] nginx rejects the temporary LiveKit site - fix the nginx config first"
+            rm -f -- "$LK_SITE_LINK" "$LK_SITE"; systemctl reload nginx || true; return 1
+        fi
+        if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp >/dev/null; fi
+        rc=0
+        lk_get_cert "$LIVEKIT_DOMAIN" || rc=1
+        [[ -n "$sni" ]] && { lk_get_cert "$LIVEKIT_TURN_DOMAIN" || rc=1; }
+        if (( rc )); then
+            rm -f -- "$LK_SITE_LINK" "$LK_SITE"; systemctl reload nginx || true; return 1
+        fi
+    fi
+    install -d -m 755 "$(dirname "$LK_RENEW_HOOK")"
+    printf '#!/bin/sh\n%s\n# Renewed certificates are read by nginx (LiveKit signalling and TURN/TLS)\nsystemctl reload nginx\n' "$LK_MARK" > "$LK_RENEW_HOOK"
+    chmod 755 "$LK_RENEW_HOOK"
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || echo "  [!] Could not enable certbot.timer - renewals will not run automatically"
+
+    # 9. nginx: keep copies so a rejected config can be put back as it was
+    local bak; bak=$(mktemp -d) || return 1
+    cp -a /etc/nginx/nginx.conf /etc/nginx/sites-available/default "$bak/" 2>/dev/null || true
+    [[ -f "$LK_SITE" ]] && cp -a "$LK_SITE" "$bak/livekit_site"
+    [[ -L "$LK_SITE_LINK" ]] && touch "$bak/livekit_site_was_enabled"
+    for f in "${lk_sites_changed[@]}"; do cp -a "$f" "$bak/site_$(basename "$f")"; done
+    [[ -f "$LIVEKIT_STREAM_CONF" ]] && cp -a "$LIVEKIT_STREAM_CONF" "$bak/stream.conf"
+
+    if [[ -n "$sni" ]]; then
+        if ! grep -qE '^[[:space:]]*include[[:space:]]+/etc/nginx/main\.d/\*\.conf;' /etc/nginx/nginx.conf; then
+            sed -i -E '0,/^[[:space:]]*include[[:space:]]+\/etc\/nginx\/modules-enabled\/\*\.conf;/s//&\ninclude \/etc\/nginx\/main.d\/*.conf;/' /etc/nginx/nginx.conf
+        fi
+        install -d -m 755 /etc/nginx/main.d
+        {
+            echo "$LK_MARK"
+            echo "# Port 443 is routed by SNI: the TURN domain to the TURN/TLS terminator, everything else to the http block."
+            echo "# Every https server in the http block listens on 127.0.0.1:$LK_HTTPS_LOCAL with proxy_protocol."
+            echo "stream {"
+            echo "    map \$ssl_preread_server_name \$livekit_tls_upstream {"
+            echo "        $LIVEKIT_TURN_DOMAIN 127.0.0.1:$LK_TURN_TLS_LOCAL;"
+            echo "        default 127.0.0.1:$LK_HTTPS_LOCAL;"
+            echo "    }"
+            echo "    server {"
+            echo "        listen 443;"
+            [[ -n "$v6" ]] && echo "        listen [::]:443;"
+            echo "        ssl_preread on;"
+            echo "        proxy_pass \$livekit_tls_upstream;"
+            echo "        proxy_protocol on;"
+            echo "        proxy_connect_timeout 5s;"
+            echo "        proxy_timeout 1h;"
+            echo "    }"
+            echo "    server {"
+            echo "        listen 127.0.0.1:$LK_TURN_TLS_LOCAL ssl proxy_protocol;"
+            echo "        set_real_ip_from 127.0.0.1;"
+            echo "        ssl_certificate     /etc/letsencrypt/live/$LIVEKIT_TURN_DOMAIN/fullchain.pem;"
+            echo "        ssl_certificate_key /etc/letsencrypt/live/$LIVEKIT_TURN_DOMAIN/privkey.pem;"
+            echo "        ssl_protocols TLSv1.2 TLSv1.3;"
+            echo "        proxy_pass 127.0.0.1:$LK_TURN_TLS_PORT;"
+            echo "        proxy_protocol on;"
+            echo "        proxy_connect_timeout 5s;"
+            echo "        proxy_timeout 1h;"
+            echo "    }"
+            echo "}"
+        } > "$LIVEKIT_STREAM_CONF"
+        # Client addresses for https sites behind the router (only from the local PROXY header)
+        printf '%s\nset_real_ip_from 127.0.0.1;\nreal_ip_header proxy_protocol;\n' "$LK_MARK" > "$LK_REALIP_CONF"
+        nginx_https_behind_stream /etc/nginx/sites-available/default
+        for f in "${lk_sites_changed[@]}"; do nginx_https_behind_stream "$f"; done
+    else
+        # TURN/TLS switched off (or never on): give 443 back to the http block
+        if [[ -f "$LIVEKIT_STREAM_CONF" ]] && grep -qF "$LK_MARK" "$LIVEKIT_STREAM_CONF"; then
+            rm -f -- "$LIVEKIT_STREAM_CONF" "$LK_REALIP_CONF"
+            for f in /etc/nginx/sites-available/*; do
+                [[ "$f" == "$LK_SITE" ]] && continue
+                grep -qE "listen[[:space:]]+127\.0\.0\.1:${LK_HTTPS_LOCAL}[^;]*proxy_protocol;" "$f" 2>/dev/null || continue
+                if [[ "$f" == /etc/nginx/sites-available/default ]] || grep -qF "# Managed by ubuntu_provision.sh" "$f"; then
+                    cp -a "$f" "$bak/site_$(basename "$f")"; lk_sites_changed+=("$f")
+                    nginx_https_restore "$f"
+                else
+                    echo "  [!] $f still listens on 127.0.0.1:$LK_HTTPS_LOCAL - change it back to 443 yourself"
+                fi
+            done
+        fi
+    fi
+
+    # The LiveKit site: port 80 for ACME + redirect, https for signalling. /twirp/ (server API) only from the allow list.
+    {
+        echo "$LK_MARK"
+        echo "map \$http_upgrade \$livekit_connection_upgrade {"
+        echo "    default upgrade;"
+        echo "    ''      close;"
+        echo "}"
+        echo ""
+        lk_http_server_block "$v6"
+        echo ""
+        echo "server {"
+        if [[ -n "$sni" ]]; then
+            echo "    listen 127.0.0.1:$LK_HTTPS_LOCAL ssl proxy_protocol;"
+        else
+            echo "    listen 443 ssl;"
+            [[ -n "$v6" ]] && echo "    listen [::]:443 ssl;"
+        fi
+        echo "    server_name $LIVEKIT_DOMAIN;"
+        echo "    ssl_certificate     /etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem;"
+        echo "    ssl_certificate_key /etc/letsencrypt/live/$LIVEKIT_DOMAIN/privkey.pem;"
+        echo "    ssl_protocols TLSv1.2 TLSv1.3;"
+        echo "    client_max_body_size 1m;"
+        echo ""
+        echo "    # Server API (RoomService etc.): denied unless the address is listed in LIVEKIT_API_ALLOW_FROM"
+        echo "    location /twirp/ {"
+        for a in $allow; do echo "        allow $a;"; done
+        echo "        deny all;"
+        echo "        proxy_pass http://127.0.0.1:$LK_HTTP_PORT;"
+        echo "        proxy_http_version 1.1;"
+        echo "        proxy_set_header Host \$host;"
+        echo "        proxy_set_header X-Forwarded-For \$remote_addr;"
+        echo "        proxy_set_header X-Forwarded-Proto https;"
+        echo "    }"
+        echo ""
+        echo "    # Signalling (WebSocket /rtc) and the health page"
+        echo "    location / {"
+        echo "        proxy_pass http://127.0.0.1:$LK_HTTP_PORT;"
+        echo "        proxy_http_version 1.1;"
+        echo "        proxy_set_header Upgrade \$http_upgrade;"
+        echo "        proxy_set_header Connection \$livekit_connection_upgrade;"
+        echo "        proxy_set_header Host \$host;"
+        echo "        proxy_set_header X-Forwarded-For \$remote_addr;"
+        echo "        proxy_set_header X-Forwarded-Proto https;"
+        echo "        proxy_buffering off;"
+        echo "        proxy_read_timeout 1h;"
+        echo "        proxy_send_timeout 1h;"
+        echo "    }"
+        echo "}"
+    } > "$LK_SITE"
+    ln -sfn "$LK_SITE" "$LK_SITE_LINK"
+
+    if ! nginx -t; then
+        echo "  [!] nginx rejects the LiveKit configuration - putting the previous nginx config back"
+        cp -a "$bak/nginx.conf" /etc/nginx/nginx.conf 2>/dev/null || true
+        cp -a "$bak/default" /etc/nginx/sites-available/default 2>/dev/null || true
+        for f in "${lk_sites_changed[@]}"; do cp -a "$bak/site_$(basename "$f")" "$f"; done
+        if [[ -f "$bak/stream.conf" ]]; then cp -a "$bak/stream.conf" "$LIVEKIT_STREAM_CONF"; else rm -f -- "$LIVEKIT_STREAM_CONF" "$LK_REALIP_CONF"; fi
+        if [[ -f "$bak/livekit_site" && -f "$bak/livekit_site_was_enabled" ]]; then
+            cp -a "$bak/livekit_site" "$LK_SITE"          # the previous, working LiveKit site stays in use
+        else
+            rm -f -- "$LK_SITE_LINK"
+        fi
+        rm -rf "$bak"
+        nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+        return 1
+    fi
+    rm -rf "$bak"
+    # restart, not reload: the listening sockets change when the stream router is added or removed
+    systemctl restart nginx || { echo "  [!] nginx did not restart - check 'journalctl -u nginx'"; return 1; }
+
+    # 10. Firewall: only what participants need. 7880 (API), 5349/5350/8443 (local hops) stay closed.
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 80/tcp >/dev/null
+        ufw allow 443/tcp >/dev/null
+        ufw allow "$LK_TCP_PORT/tcp" comment 'LiveKit ICE/TCP' >/dev/null
+        ufw allow "$LIVEKIT_RTC_PORT_START:$LIVEKIT_RTC_PORT_END/udp" comment 'LiveKit media' >/dev/null
+        ufw allow "$LK_TURN_UDP_PORT/udp" comment 'LiveKit TURN/UDP' >/dev/null
+        ufw status | grep -q "Status: active" || echo "  [!] UFW is installed but not active - nothing is filtered"
+        echo "  UFW: 80,443,$LK_TCP_PORT/tcp and $LIVEKIT_RTC_PORT_START-$LIVEKIT_RTC_PORT_END,$LK_TURN_UDP_PORT/udp allowed"
+    else
+        echo "  [!] UFW is not installed - open 80,443,$LK_TCP_PORT/tcp and $LIVEKIT_RTC_PORT_START-$LIVEKIT_RTC_PORT_END,$LK_TURN_UDP_PORT/udp in your firewall"
+    fi
+
+    # 11. Monit (step 48 only links services that existed before this step)
+    if [[ -d /etc/monit/conf-available && -d /etc/monit/conf-enabled && -f "$CONFIG_DIR/etc/monit/conf-available/livekit" ]]; then
+        cp -f "$CONFIG_DIR/etc/monit/conf-available/livekit" /etc/monit/conf-available/livekit
+        ln -sfn /etc/monit/conf-available/livekit /etc/monit/conf-enabled/livekit
+        if monit -t >/dev/null 2>&1; then
+            monit reload >/dev/null 2>&1 || true
+        else
+            echo "  [!] Monit rejects the LiveKit check - link removed"; rm -f /etc/monit/conf-enabled/livekit
+        fi
+    fi
+
+    # 12. Checks
+    local health=""
+    for a in {1..15}; do
+        health=$(curl -s --noproxy '*' --max-time 3 "http://127.0.0.1:$LK_HTTP_PORT/" 2>/dev/null || true)
+        [[ "$health" == "OK" ]] && break
+        sleep 1
+    done
+    [[ "$health" == "OK" ]] && echo "  [V] LiveKit answers on 127.0.0.1:$LK_HTTP_PORT" || echo "  [!] LiveKit does not answer on 127.0.0.1:$LK_HTTP_PORT - check 'journalctl -u livekit'"
+    echo "  Local check: https://$LIVEKIT_DOMAIN/ -> $(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$LIVEKIT_DOMAIN:443:127.0.0.1" "https://$LIVEKIT_DOMAIN/" 2>/dev/null || true)," \
+         "/twirp/ -> $(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$LIVEKIT_DOMAIN:443:127.0.0.1" -X POST "https://$LIVEKIT_DOMAIN/twirp/livekit.RoomService/ListRooms" 2>/dev/null || true) (expected 200 and 403)"
+    if [[ -n "$sni" ]]; then
+        local -a verify=(-verify_return_error -verify_hostname "$LIVEKIT_TURN_DOMAIN")
+        [[ "${LIVEKIT_LE_STAGING:-n}" =~ ^[Yy]$ ]] && verify=()   # staging certificates are not trusted
+        if echo | timeout 10 openssl s_client -connect 127.0.0.1:443 -servername "$LIVEKIT_TURN_DOMAIN" "${verify[@]}" >/dev/null 2>&1; then
+            echo "  [V] TURN/TLS: $LIVEKIT_TURN_DOMAIN:443 completes a TLS handshake"
+        else
+            echo "  [!] TURN/TLS: no valid TLS handshake for $LIVEKIT_TURN_DOMAIN on 443"
+        fi
+    fi
+    echo ""
+    echo "  LiveKit version    : ${LK_VERSION:-$("$LK_BIN" --version 2>/dev/null || echo unknown)}"
+    echo "  Web app settings for this server:"
+    echo "    LIVEKIT_URL        = wss://$LIVEKIT_DOMAIN"
+    echo "    LIVEKIT_API_KEY    = $api_key"
+    echo "    LIVEKIT_API_SECRET = see: sudo cat $LK_KEYS   (not printed here: this output is logged)"
+    [[ -z "$webhook" ]] && echo "    Webhooks           : off (set LIVEKIT_WEBHOOK_URL to receive room events, signed with this key)"
+    return 0
+}
+
+if [[ "${INSTALL_LIVEKIT:-n}" =~ ^[Yy]$ ]]; then
+    setup_livekit || echo "  [!] LiveKit setup did not complete (see above); provisioning continues"
+else
+    echo "  Skipping LiveKit."
 fi
 
 echo ""
@@ -5745,6 +6493,7 @@ check_service_status "monit" "Monit Server"
 check_service_status "webmin" "Webmin Server"
 check_service_status "grafana-server" "Grafana Server"
 check_service_status "forgejo" "Forgejo Git Server"
+check_service_status "livekit" "LiveKit Media Server"
 check_service_status "fail2ban" "Fail2Ban IDS"
 check_service_status "auditd" "Auditd Daemon"
 check_service_status "suricata" "Suricata IDS"
@@ -5978,6 +6727,8 @@ check_port "monit"          "2812"
 check_port "grafana-server" "3000"
 check_port "forgejo"        "$(grep -oP '(?<=HTTP_PORT\s=\s)\d+' /etc/forgejo/app.ini 2>/dev/null || echo 3000)"
 check_port "webmin"         "10000"
+check_port "livekit"        "7880"
+check_port "livekit"        "7881"
 check_port "wazuh-indexer"   "9200"
 check_port "wazuh-manager"   "55000"
 WZ_PORT_DASH=$(sed -n 's/^server\.port:[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' /etc/wazuh-dashboard/opensearch_dashboards.yml 2>/dev/null | head -1)
@@ -6103,6 +6854,27 @@ if systemctl is-active --quiet mosquitto 2>/dev/null; then
         smoke_warn "Mosquitto: pub/sub failed — check service status"
     fi
 else smoke_skip "Mosquitto"; fi
+
+if systemctl is-active --quiet livekit 2>/dev/null; then
+    if [[ "$(curl -s --noproxy '*' --max-time 5 http://127.0.0.1:7880/ 2>/dev/null)" == "OK" ]]; then
+        smoke_ok "LiveKit: answers on 127.0.0.1:7880"
+    else
+        smoke_warn "LiveKit: no answer on 127.0.0.1:7880 — check 'journalctl -u livekit'"
+    fi
+    LK_DOM=$(sed -n 's/^[[:space:]]*server_name[[:space:]]\+\([^ ;]*\).*/\1/p' /etc/nginx/sites-available/livekit 2>/dev/null | tail -1)
+    if [[ -n "$LK_DOM" ]]; then
+        LK_CODE=$(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$LK_DOM:443:127.0.0.1" "https://$LK_DOM/" 2>/dev/null || true)
+        [[ "$LK_CODE" == "200" ]] && smoke_ok "LiveKit: https://$LK_DOM/ through nginx" || smoke_warn "LiveKit: https://$LK_DOM/ returned '$LK_CODE' (expected 200)"
+    fi
+    LK_CERT=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\+\(\/etc\/letsencrypt\/live\/[^ ;]*\/fullchain.pem\).*/\1/p' /etc/nginx/main.d/livekit-stream.conf /etc/nginx/sites-available/livekit 2>/dev/null)
+    for LK_C in $LK_CERT; do
+        if openssl x509 -checkend 1209600 -noout -in "$LK_C" >/dev/null 2>&1; then
+            smoke_ok "LiveKit: certificate $(basename "$(dirname "$LK_C")") valid for 14+ days"
+        else
+            smoke_warn "LiveKit: certificate $LK_C expires within 14 days or is unreadable — check 'certbot renew --dry-run'"
+        fi
+    done
+else smoke_skip "LiveKit"; fi
 
 # --- Wazuh Server (shown only when a server component is installed) ---
 WAZUH_SERVER_PRESENT=n

@@ -3,7 +3,7 @@
 # Usage: sudo ./ubuntu_backup_config.sh [BACKUPPOSTFIX]
 # - includes apt packages
 # - includes users, groups, ssh keys, cron jobs, systemd service and timer overrides, letsencrypt certificates, grafana db, and forgejo db, postfix aliases
-# - includes configurations for forgejo, grafana, letsencrypt, monit, mosquitto, mysql, nginx, nginx, postfix, postgresql, valkey, valkey, wazuh, webmin
+# - includes configurations for forgejo, grafana, letsencrypt, livekit (incl. API secret), monit, mosquitto, mysql, nginx, nginx, postfix, postgresql, valkey, valkey, wazuh, webmin
 # - includes GPG keys for external repositories so apt update doesn't throw errors during the restore 
 # - DOES NOT include binary installations (e.g. wazuh, forgejo). Please install these separately on the target.
 # - DOES NOT include network config, disk config, swap config
@@ -20,6 +20,7 @@ REQUIRED_PATHS=(
     "/etc/apt/apt.conf.d/50unattended-upgrades" "/etc/apt/apt.conf.d/20auto-upgrades"
     "/etc/webmin" "/etc/monit" "/etc/mysql" "/etc/nginx" "/etc/valkey" "/etc/grafana" 
     "/etc/mosquitto" "/etc/letsencrypt" "/etc/suricata" "/etc/forgejo"
+    "/etc/livekit" "/etc/systemd/system/livekit.service"
     "/var/ossec/etc" "/var/ossec/api/configuration" "/var/ossec/var/lib/wazuh-keystore"
     "/etc/wazuh-indexer/certs" "/etc/wazuh-dashboard/certs" 
     "/var/lib/forgejo/data/forgejo.db" "/var/lib/grafana/grafana.db"
