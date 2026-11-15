@@ -7,7 +7,7 @@ quickly provision a hardened server and install any of the following services if
 - Fail2Ban<sup>*</sup> — bans IPs after failed logins
 - Forgejo — self-hosted Git server
 - Firewall<sup>*</sup> — UFW, deny by default
-- Grafana — analytics and visualization web application
+- Grafana — metrics dashboards
 - IP Blocklists<sup>*</sup> — daily-updated bad-IP blocking
 - CIS Level 1 hardening<sup>*</sup> — baseline security settings
 - Kernel module blocklists<sup>*</sup> — blocks unused kernel modules
@@ -20,13 +20,13 @@ quickly provision a hardened server and install any of the following services if
 - Postfix — relay-only outgoing mail
 - PostgreSQL — relational database
 - Suricata IDS<sup>*</sup> — network intrusion detection
-- Valkey — Redis-compatible in-memory key–value database (cache)
+- Valkey — Redis-compatible cache
 - Wazuh Agent<sup>*</sup> — sends logs to a Wazuh server
 - Wazuh Server (manager, indexer, dashboard; all-in-one) — security monitoring (SIEM)
-- Webmin — web-based admin panel and dashboard (not usually recommended, see [Notes](#notes))
+- Webmin — web-based admin panel (not recommended, see [Notes](#notes))
 
 Every component is optional — you choose what gets installed and configured at runtime via interactive prompts. The script is re-entrant, but best run on a fresh  install. 
-The components marked * are recommended for all servers.
+The components marked * are recommended.
 
 ---
 
@@ -767,7 +767,7 @@ sudo ~/ubuntu_health_check.sh
 - **File limits:** `nofile` and `nproc` are set via a drop-in in `limits.d`. Note these only apply to PAM-authenticated sessions — systemd services use their own `LimitNOFILE` directives in their unit files.
 - **Python venvs:** `setuptools` and `wheel` are not installed at the system level. Install them per-project inside a venv, e.g. `python3.15 -m venv /path/to/venv && pip install setuptools wheel`.
 - **PyPy:** installed to `/opt` and symlinked into `/usr/local/bin`. The latest PyPy release for the Python version in `PYPY_FALLBACK_VERSION` (currently 3.12) is fetched dynamically at install time, with that version as the fallback if the fetch fails. To move to a new PyPy line, only `PYPY_FALLBACK_VERSION` needs changing (in the script, `ubuntu_provision.conf` and `utils/upgrade_pypy.sh`). Older .conf files with `INSTALL_PYPY311` still work.
-- **Webmin:** not recommended. It adds little over SSH, has issues with memory bloat or creep over time and needs frequent restarts; Monit is configured to take care of that, but each restart is an alert. If you do install it, it comes from the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
+- **Webmin:** not recommended. It adds little over SSH, leaks memory and needs frequent restarts; Monit takes care of that, but each restart is an alert. If you do install it, it comes from the official `webmin-setup-repo.sh` script, which handles GPG keys and repo configuration automatically.
 
 ## Updating settings on existing servers
 
@@ -859,7 +859,8 @@ With `LIVEKIT_TURN_TLS=n`, nginx is left as a normal https server and only TURN/
 networks that allow only TCP 443 then cannot connect media.
 
 The web app needs `wss://LIVEKIT_DOMAIN`, the API key and the secret (`sudo cat /etc/livekit/keys.yaml`). See
-[howto-livekit.md](howto/howto-livekit.md) for testing and operation.
+[howto-livekit.md](howto/howto-livekit.md) for testing and operation, and
+[howto-livekit-home-vm.md](howto/howto-livekit-home-vm.md) for a test install on a home VM.
 
 ## Wazuh Server
 
