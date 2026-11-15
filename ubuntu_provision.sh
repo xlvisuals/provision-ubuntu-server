@@ -1124,7 +1124,17 @@ if [[ "$INSTALL_LIVEKIT" =~ ^[Yy]$ ]]; then
     fi
 fi
 if [[ "$INSTALL_LIVEKIT" =~ ^[Yy]$ ]]; then
-    prompt_validated LIVEKIT_NODE_IP "  Public IPv4 address that participants connect to" valid_lk_node_ip "$PRIMARY_IP"
+    while true; do
+        prompt_validated LIVEKIT_NODE_IP "  Public IPv4 address that participants connect to" valid_ipv4 "$PRIMARY_IP"
+        if ipv4_is_public "$LIVEKIT_NODE_IP" || [[ "${LIVEKIT_ALLOW_PRIVATE_NODE_IP:-}" =~ ^[Yy]$ ]]; then
+            break
+        fi
+        echo "  $LIVEKIT_NODE_IP is a private address: only devices on the same network can join calls."
+        LIVEKIT_ALLOW_PRIVATE_NODE_IP=""
+        prompt_validated LIVEKIT_ALLOW_PRIVATE_NODE_IP "  Use it anyway (test network)? (y/n)" valid_yn "n"
+        [[ "$LIVEKIT_ALLOW_PRIVATE_NODE_IP" =~ ^[Yy]$ ]] && break
+        LIVEKIT_NODE_IP=""   # ask for the address again
+    done
     prompt_validated LIVEKIT_RTC_PORT_START "  First UDP port for media" valid_lk_port "50000"
     while true; do
         prompt_validated LIVEKIT_RTC_PORT_END "  Last UDP port for media" valid_lk_port "60000"
