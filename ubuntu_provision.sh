@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # UBUNTU 24.04 and 26.04 SERVER PROVISIONING SCRIPT
-# by Axel Busch + Claude Sonnet
-# 01 November 2026
+# by Axel Busch + Claude
+# 20 November 2026
 # -----------------------------------------------------------------------------------------
 #
 # Usage: sudo bash ubuntu_provision.sh [ubuntu_provision.conf]
@@ -21,7 +21,7 @@
 #   - Runtimes:     Python (one of PYTHON_VERSIONS), PyPy (Python version taken from PYPY_FALLBACK_VERSION), Weasyprint, ImageMagick
 #   - Security:     UFW, Fail2Ban, Suricata, auditd, Wazuh Agent, IP blocklist, modprobe blocklist,
 #					Wazuh Server (manager+indexer+dashboard), Coraza
-#   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils, vnstat, nload,  
+#   - Tools:        vim, nano, micro, ne, tmux, btop, ncdu, rsync, dnsutils, vnstat, nload
 #                   ethtool, nmap, lynis, git, git-lfs, jq, smartmontools (bare metal only)
 #
 # MODIFIES (all optional):
@@ -41,7 +41,7 @@ PG_VERSION=18
 # completed by Ubuntu, the others come from the Ubuntu archive when it has them, otherwise from the deadsnakes PPA.
 PYTHON_VERSIONS="3.13 3.14 3.15"
 PYPY_FALLBACK_VERSION=pypy3.12-v8.0.1
-FORGEJO_FALLBACK_VERSION=17.0.1
+FORGEJO_FALLBACK_VERSION=17.0.2
 MODULEJAIL_FALLBACK_VERSION=1.6.3
 FORGEJO_FALLBACK_PORT=3030
 LIVEKIT_FALLBACK_VERSION=1.13.11
@@ -6515,6 +6515,80 @@ check_service_status "wazuh-dashboard" "Wazuh Dashboard"
 check_service_status "postfix" "Postfix Mail Relay"
 check_service_status "vnstat" "vnStat Traffic Monitor"
 check_service_status "unattended-upgrades" "Unattended Upgrades"
+
+echo ""
+echo "Installed service versions (last update)"
+echo "==========================================="
+# Version from dpkg (authoritative). Date = the last "status installed" line in /var/log/dpkg.log*
+# for that same version, i.e. what this shows for each package:
+#   zgrep -h "status installed nginx" /var/log/dpkg.log* | sort | tail -n 1
+# Read all logs once; zcat -f also reads the uncompressed dpkg.log and dpkg.log.1
+DPKG_INSTALLED=$(zcat -f /var/log/dpkg.log* 2>/dev/null \
+    | awk '$3 == "status" && $4 == "installed" {p = $5; sub(/:.*/, "", p); print $1 " " $2 " " p " " $6}' \
+    | sort)
+DPKG_OLDEST=$(head -n1 <<<"$DPKG_INSTALLED" | awk '{print $1}')
+NOW_S=$(date +%s)
+pkg_age() {   # pkg_age "YYYY-MM-DD HH:MM:SS" -> " (Nd ago)", empty if the date cannot be read
+    local s
+    s=$(date -d "$1" +%s 2>/dev/null) || return 0
+    echo " ($(( (NOW_S - s) / 86400 ))d ago)"
+}
+pkg_update_line() {   # pkg_update_line "Label" service pkg [pkg...] - first installed package is shown
+    local label="$1" service="$2" p pkg="" ver when
+    shift 2
+    systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service" || return 0
+    for p in "$@"; do
+        if [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$p" 2>/dev/null)" == ii* ]]; then pkg="$p"; break; fi
+    done
+    if [[ -z "$pkg" ]]; then
+        printf "  %-24s %s\n" "$label" "$(echo -e "${GREY}[no package found: $*]${NC}")"
+        return 0
+    fi
+    ver=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+    when=$(awk -v p="$pkg" -v v="$ver" '$3 == p && $4 == v {d = $1 " " $2} END {print d}' <<<"$DPKG_INSTALLED")
+    if [[ -n "$when" ]]; then
+        printf "  %-24s %-44s %s\n" "$label" "$pkg $ver" "$when$(pkg_age "$when")"
+    else
+        printf "  %-24s %-44s %s\n" "$label" "$pkg $ver" "$(echo -e "${GREY}[not in dpkg logs: updated before ${DPKG_OLDEST:-the oldest log}]${NC}")"
+    fi
+}
+bin_update_line() {   # bin_update_line "Label" service /path/to/binary - for services installed without apt
+    local label="$1" service="$2" bin="$3" ver when
+    systemctl list-unit-files "${service}.service" 2>/dev/null | grep -q "${service}.service" || return 0
+    if [[ ! -x "$bin" ]]; then
+        printf "  %-24s %s\n" "$label" "$(echo -e "${GREY}[$bin not found]${NC}")"
+        return 0
+    fi
+    ver=$("$bin" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+\S*' | head -1)
+    when=$(date -r "$bin" '+%Y-%m-%d %H:%M:%S')   # 'install' sets the time the binary was copied in
+    printf "  %-24s %-44s %s\n" "$label" "$(basename "$bin") ${ver:-unknown} (binary)" "$when$(pkg_age "$when")"
+}
+PG_PKGS=$(dpkg-query -W -f='${Package}\n' 'postgresql-[0-9]*' 2>/dev/null | grep -E '^postgresql-[0-9]+$' | sort -V -r)
+pkg_update_line "OpenSSH Server"        "ssh"                 openssh-server
+pkg_update_line "UFW Firewall"          "ufw"                 ufw
+pkg_update_line "NGINX Web Server"      "nginx"               nginx
+pkg_update_line "Valkey Server"         "valkey-server"       valkey-server
+pkg_update_line "MySQL Server"          "mysql"               mysql-server
+pkg_update_line "MariaDB Server"        "mariadb"             mariadb-server
+# shellcheck disable=SC2086 # PG_PKGS is a list of package names
+pkg_update_line "PostgreSQL Server"     "postgresql"          $PG_PKGS postgresql
+pkg_update_line "Mosquitto Broker"      "mosquitto"           mosquitto
+pkg_update_line "Monit Server"          "monit"               monit
+pkg_update_line "Webmin Server"         "webmin"              webmin
+pkg_update_line "Grafana Server"        "grafana-server"      grafana grafana-enterprise
+bin_update_line "Forgejo Git Server"    "forgejo"             /usr/local/bin/forgejo
+bin_update_line "LiveKit Media Server"  "livekit"             /usr/local/bin/livekit-server
+pkg_update_line "Fail2Ban IDS"          "fail2ban"            fail2ban
+pkg_update_line "Auditd Daemon"         "auditd"              auditd
+pkg_update_line "Suricata IDS"          "suricata"            suricata
+pkg_update_line "Wazuh Agent"           "wazuh-agent"         wazuh-agent
+pkg_update_line "Wazuh Indexer"         "wazuh-indexer"       wazuh-indexer
+pkg_update_line "Wazuh Manager"         "wazuh-manager"       wazuh-manager
+pkg_update_line "Filebeat (Wazuh)"      "filebeat"            filebeat
+pkg_update_line "Wazuh Dashboard"       "wazuh-dashboard"     wazuh-dashboard
+pkg_update_line "Postfix Mail Relay"    "postfix"             postfix
+pkg_update_line "vnStat Traffic Monitor" "vnstat"             vnstat
+pkg_update_line "Unattended Upgrades"   "unattended-upgrades" unattended-upgrades
 
 echo ""
 echo "AppArmor"

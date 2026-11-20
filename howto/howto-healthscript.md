@@ -20,6 +20,10 @@ It provides a colour-coded status report covering:
 - Pending package updates
 - Packages excluded from unattended upgrades and pinned (held) packages, and whether an update is waiting for them
 - Service status (running/stopped/failed/not installed) for all installed services
+- Installed service versions — package version and date/time of the last install or update
+  per installed service, from `/var/log/dpkg.log*` (the same as
+  `zgrep -h "status installed nginx" /var/log/dpkg.log* | sort | tail -n 1`);
+  Forgejo and LiveKit (binaries in `/usr/local/bin`) show `--version` and the file time
 - AppArmor profile status per service
 - Recent AppArmor denials
 - IP blocklist status (entry count and last update time)
