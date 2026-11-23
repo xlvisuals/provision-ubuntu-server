@@ -725,6 +725,7 @@ Run it any time (as root) to get a colour-coded status report covering:
 - Recent failed SSH logins
 - Pending package updates
 - Service status for all installed services (including whether the Coraza module still matches nginx, and its mode)
+- Installed service versions: for each installed service, the package version and the date and time it was last installed or updated (from `/var/log/dpkg.log*`); Forgejo and LiveKit show their binary version and install time
 - AppArmor profile status per service
 - Recent AppArmor denials
 - Port usage with UFW allow/block status
